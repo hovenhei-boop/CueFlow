@@ -16,7 +16,7 @@ CueFlow 是高质量字幕生成与自动检查引擎，不是字幕编辑器，
 系统词库与项目词库
         |
         v
-时间轴探测、工作音频渲染与分块
+时间轴探测、工作音频/视频代理渲染与分块
         |
         v
 固定处理档位的语义转写
@@ -31,10 +31,13 @@ CueFlow 是高质量字幕生成与自动检查引擎，不是字幕编辑器，
 内部 QA
         |
         v
+Filler Review（只标记可隐藏 Atom）
+        |
+        v
 output/subtitles.srt
 ```
 
-正常情况下，用户只能看到当前的 `subtitles.srt`。以前的 Transcript、Alignment、Subtitle 和 QA 版本属于项目内部 Artifact。CueFlow 不导出 `review_report.json`，也不让用户从多个历史 SRT 中选择。
+正常情况下，用户只能看到当前的 `subtitles.srt`。以前的 Transcript、Alignment、Subtitle、QA、Filler Review 和 Video Proxy 版本属于项目内部 Artifact。CueFlow 不导出 `review_report.json`，也不让用户从多个历史 SRT 中选择。
 
 以下内容明确不属于 v0.1：
 
@@ -52,7 +55,7 @@ output/subtitles.srt
 
 1. 只有语义转写 Provider 决定“说了什么”。
 2. 只有强制对齐器决定“已经确定的文字在什么时候说”。
-3. Alignment、QA 和 Export 都不得改写实音 Atom；Segmentation 只能调整标点、空格和 Cue 边界等显示装饰。
+3. Alignment、QA、Filler Review 和 Export 都不得改写实音 Atom；Segmentation 只能调整标点、空格和 Cue 边界等显示装饰。Filler Review 只能按版本化规则标记少量 Cue 末尾 Atom 在 SRT 中隐藏，并保留可审计引用。
 4. 语义转写和强制对齐必须处理同一个媒体 Chunk。
 5. 每个持久化中间结果都是不可变且按内容寻址的 Artifact。
 6. 当前上游 Artifact 发生变化时，所有当前下游 Artifact 必须先标记 stale，之后才能再次导出。
@@ -60,6 +63,7 @@ output/subtitles.srt
 8. Provider 原生 payload 必须止于 Adapter 边界。
 9. 用户只选择 CueFlow 固定的本地或云端 Processing Profile，不能自由选择 Provider 或 Model。
 10. QA 只能报告问题；自动返工必须由 Orchestrator 路由回语义转写模块并产生新 Transcript。
+11. Glossary 永远不能直接覆盖 Transcript；实际音频和 Semantic Transcriber 的结果仍是语义权威。
 
 ## 3. 模块
 
@@ -71,7 +75,9 @@ output/subtitles.srt
 
 探测媒体时间轴。视频输入时，不做会把首个音频采样重置到 0ms 的裸抽音轨，而是渲染一条与视频播放时间轴同起点、同总时长的工作音频：开始前缺少的采样以静音补齐，尾部保持到视频结束。直接音频输入则以该文件自身的 0ms 和总时长作为 CueFlow 时间轴。
 
-工作音频生成后，`media` 建立确定性的静音感知 `ChunkPlan`。v0.1 的两个固定档位都以约 3–4 分钟为目标，并使用小于 5 分钟的内部硬上限；用户看不到也不能修改 Provider 能力计算。以后模型能力变化时，通过版本化 Processing Profile 更新 Chunk 参数，而不是建立任意 Provider 路由器。
+工作音频生成后，`media` 建立确定性的静音感知 `ChunkPlan`。v0.1 固定使用 16kHz、mono、PCM s16le 的 Timeline Audio，`timeline_tolerance_ms = 20`，Chunk 目标为 180 秒、硬上限为 225 秒；优先在目标附近持续至少 500ms、低于 -40dB 的静音中点切分，无合适静音时在硬上限强制切分。Chunk 无重叠、无间隙，用户看不到也不能修改 Provider 能力计算。以后模型能力变化时，通过版本化 Processing Profile 更新 Chunk 参数，而不是建立任意 Provider 路由器。
+
+视频输入还必须生成一个内容寻址的 `video_proxy` Artifact：保持宽高比并限制在 640×360 边界内，视频目标码率约 1Mbps。代理可以携带从 Timeline Audio 派生的低码率审阅音轨，仅用于项目内部同步复核和低容量备份，不是转写或对齐的权威输入。CueFlow 只登记外部原视频的完整哈希、长度、格式和定位器，不在项目内长期复制原始大视频，也绝不删除用户的外部原文件。
 
 ### `glossary`
 
@@ -89,12 +95,14 @@ System Glossary 只读，Project Glossary 只影响一个项目。Effective Glos
 
 根据项目的固定 Processing Profile，使用一个 Media Chunk 和 Effective Glossary 调用对应的语义 Adapter。输出该 Chunk 的权威实音文字，以及确定性的可声学对齐 Atom；标点和空格只作为 Atom 的显示装饰，不拥有独立声学身份或时间。
 
+Semantic Adapter 还必须声明本地 Forced Aligner 所需的语言名称，并且该值必须属于固定 Model Snapshot 的支持集合。Cloud Adapter 用同一次 Omni 响应返回受限的 `source_text` 与 `language`，不能为缺失语言默认猜成中文；缺失或不受支持时明确失败。
+
 v0.1 只提供以下两个档位：
 
 | Processing Profile | 语义转写 | 强制对齐 | 媒体出境 |
 |---|---|---|---|
 | `LOCAL_PROFILE` | 本地 `Qwen3-ASR-1.7B` | 本地 `Qwen3-ForcedAligner-0.6B` | 不出境 |
-| `CLOUD_PROFILE` | 云端 `Qwen3.5-Omni` | 本地 `Qwen3-ForcedAligner-0.6B` | 上传当前 Chunk 音频、Effective Glossary 词条及必要的语言/转写配置 |
+| `CLOUD_PROFILE` | 云端 `qwen3.5-omni-plus-2026-03-15` | 本地 `Qwen3-ForcedAligner-0.6B` | 上传当前 Chunk 音频、Effective Glossary 词条及必要的语言/转写配置 |
 
 两个档位共享 Media Prep、Chunker、Glossary、Forced Aligner、Segmenter、QA 和 Export，唯一替换的是 Semantic Transcriber。具体 Model Snapshot 由应用内部配置并写入 provenance，不暴露给用户选择。
 
@@ -106,17 +114,31 @@ v0.1 只提供以下两个档位：
 
 ### `segmentation`
 
-根据各 Chunk 的 Transcript Atom 和全局对齐区间生成字幕 Cue。它可以选择 Cue 边界、时间包络，并按版本化字幕风格减少标点或用空格/Cue 边界代替标点；不得增删或替换可发音 Atom 的文字。必要标点附着在相邻实音 Atom 之后，不参与 Alignment。
+根据各 Chunk 的完整 Transcript Atom 和全局对齐区间生成字幕 Cue。Semantic Transcriber 必须先完整逐字转写实际人声，不得摘要、改写、因显示风格删除口语或擅自修正实际说出的内容。Segmenter 只能选择 Cue 边界、时间包络，并按版本化字幕风格处理标点和空格；不得修改 Transcript。
+
+v0.1 每个 Cue 最多 10 个显示文字单位。CJK Atom 计 1 个单位，完整 `word`、`number` 和 `pronounceable_symbol` Atom 各计 1 个单位且不得从内部拆开。Effective Glossary 中至少 2 个 Atom 的精确匹配跨度视为不可拆保护单元。若单个保护单元本身超过 10 个单位，允许只为容纳该单元而超限，并产生 `protected_unit_exceeds_display_limit` warning；除此以外 10 单位是硬上限。切分优先使用 Provider 原始标点表达的完整语义单元，声学停顿只能辅助，不能凌驾于语义完整性之上。
+
+Transcript 保留全部 Provider 原始 Decoration 以便重建 `source_text`。默认 SRT 风格删除句号、分号、问号、感叹号和破折号；需要表达停顿的逗号转换为空格。该处理只影响 Subtitle render，不改变 Atom 或 Alignment。
 
 ### `qa`
 
 逐块读取当前 Transcript/Alignment，并读取全局 Subtitle 与 Glossary，生成内部 `QaArtifact`。阻塞问题禁止导出，warning 不阻塞。v0.1 至少包含时间结构检查，以及相邻 Transcript Chunk 边界疑似重复的 warning。
 
-普通低 confidence 或可疑文字先作为内部 Issue 交给 Orchestrator。每个 Chunk、每次 Run 最多执行 4 次 Semantic Attempt（首次 + 最多 3 次自动返工），且只有版本化白名单内的 QA rule code 可以触发自动返工。Orchestrator 把受影响 Chunk 路由回 Semantic Transcriber，生成新 Transcript 并重新对齐；QA 本身不改字。达到上限后停止返工，仍未解决的问题成为用户界面的 ReviewIssue。它们仍是内部数据，不导出 `review_report.json`。
+时间戳非法、Cue 重叠或越界、实音 Atom 未正确对齐、Transcript/Alignment/Chunk 引用错位及 Artifact 依赖身份不一致属于 blocking structural error。Orchestrator 必须重新执行对应的确定性阶段或本地 Alignment；若重新执行后仍不合法，则明确失败并禁止导出。QA 不得直接改字。
+
+v0.1 的 `glossary_single_atom_conflict` 是版本化语义返工白名单规则。单 Atom Glossary term 不参与；只有至少 2 个 Atom 的 Glossary term 与 Transcript 候选窗口 Atom 数量和 class 序列完全相同、经 NFC/casefold 后恰好一个 Atom 不同时才触发。Provider 明确标记为不确定的可映射跨度也可独立触发返工。每个 Chunk、每次 Run 最多执行 4 次 Semantic Attempt（首次 + 最多 3 次返工），每次都生成新的 Transcript 和 Alignment，Glossary 不能直接覆盖结果。
+
+连续两次候选 Atom 序列完全相同表示稳定：若稳定结果与 Glossary term 一致，Issue 为 `resolved`；若稳定但仍保持相同冲突，停止返工并产生非阻塞 `stable_glossary_conflict` ReviewIssue；若到 4 次仍没有连续两次一致，产生非阻塞 `unstable_glossary_conflict` ReviewIssue。v0.1 不使用通用 Levenshtein、拼音/音素相似度、NER 或跨 Provider confidence 阈值。
+
+### `filler_review`
+
+在最终 Subtitle 已生成且结构 QA 通过后，只审查每个 Cue 最后一个实音 Atom 是否可以从 SRT 显示中隐藏。候选白名单固定为 `啊`、`呀`、`哦`、`嗯`、`呃`，不处理 `呢`；每个 Cue 最多隐藏一个 Atom。结果只包含 Artifact/Atom 引用、`terminal_filler` reason 和证据，不得返回或应用重写后的字幕文字。被隐藏 Atom 仍保留在 Transcript、Alignment 和 Cue 时间包络内。
+
+`CLOUD_PROFILE` 使用同一个 `qwen3.5-omni-plus-2026-03-15` 做一次受限纯文本 Atom suppression 判断；Adapter 只接受预先给定候选 Atom ID 的子集。`LOCAL_PROFILE` 不增加第三个模型，依据原始句末标点、后续声学停顿、Chunk/音频结束和上述极小白名单执行保守确定性规则，有歧义就保留。Cloud Filler Review 失败或送达状态不明确时不自动重试，记录 warning 并以空 suppression 继续导出。
 
 ### `export`
 
-把当前且内部一致的 Subtitle Artifact 渲染为 SRT。先写临时文件，再原子替换唯一的用户可见文件 `output/subtitles.srt`。不暴露历史版本，也不额外输出报告文件。
+把当前且内部一致的 Subtitle、QA 和 FillerReview Artifact 渲染为 SRT。先写临时文件，再原子替换唯一的用户可见文件 `output/subtitles.srt`。不暴露历史版本，也不额外输出报告文件。
 
 ### `orchestration`
 
@@ -157,36 +179,40 @@ v0.1 使用固定依赖图：
 
 ```text
 Source Media -> Media Probe -> Timeline Audio -> Chunk Plan -> Media Chunk
+                         \-> Video Proxy（仅视频输入，非音频权威）
 System Glossary + Project Glossary -> Effective Glossary
 Media Chunk[n] + Effective Glossary -> Transcript[n]
 Media Chunk[n] + Transcript[n] -> Alignment[n]
 all Transcript[n] + all Alignment[n] + Segmenter Config -> global Subtitle
 all Transcript[n] + all Alignment[n] + global Subtitle + Effective Glossary -> global QA
-Subtitle + passing QA -> SRT projection
+all Transcript[n] + all Alignment[n] + global Subtitle + Filler Review Config -> global Filler Review
+Subtitle + passing QA + Filler Review -> SRT projection
 ```
 
 最小 stale 路由为：
 
-- Media、Timeline Audio 或 ChunkPlan 改变：所有 Chunk 的 Transcript/Alignment，以及所有全局下游 Artifact stale。
+- Media、Timeline Audio 或 ChunkPlan 改变：所有 Chunk 的 Transcript/Alignment，以及所有全局下游 Artifact stale。视频源身份改变还会使 Video Proxy stale。
 - EffectiveGlossary 改变：所有 Chunk 的 Transcript/Alignment，以及所有全局下游 Artifact stale。
-- `Transcript[n]` 改变：`Alignment[n]` 与全局 Subtitle、QA、导出投影 stale；其他 Chunk 的 Transcript/Alignment 保持 current。
-- `Alignment[n]` 改变：全局 Subtitle、QA 和导出投影 stale；其他 Chunk Alignment 保持 current。
-- Segmenter 配置改变：Subtitle、QA 和导出投影 stale。
+- `Transcript[n]` 改变：`Alignment[n]` 与全局 Subtitle、QA、Filler Review、导出投影 stale；其他 Chunk 的 Transcript/Alignment 保持 current。
+- `Alignment[n]` 改变：全局 Subtitle、QA、Filler Review 和导出投影 stale；其他 Chunk Alignment 保持 current。
+- Segmenter 配置改变：Subtitle、QA、Filler Review 和导出投影 stale。
 - QA 规则改变：QA 和导出资格 stale。
+- Filler Review 配置或 Cloud Filler Review Model Snapshot 改变：Filler Review 和导出投影 stale。
 
 Chunk 级 `scope_key` 只允许复用没有受影响的完整 Chunk Artifact；全局 Subtitle 和 QA 仍整体重算。任意 Atom 范围的局部执行继续推迟，不建设通用增量调度器。
 
 ## 6. 数据生命周期
 
-1. 登记输入资产并计算完整文件内容哈希。
-2. 探测媒体，渲染时间轴工作音频并记录 `timeline_status`。
+1. 登记外部输入资产的完整文件内容哈希、长度、格式与定位器，不删除外部文件。
+2. 探测媒体，渲染时间轴工作音频并记录 `timeline_status`；视频输入同时生成不可变低容量 Video Proxy，但不保留原始大视频副本。
 3. 从工作音频创建不可变 ChunkPlan。
 4. 解析本次 Run 使用的不可变 EffectiveGlossary 和固定 Processing Profile。
 5. 将每个 Chunk 的转写和本地对齐记录为独立 Invocation 与 Artifact。
 6. Subtitle 直接组合所有 current Chunk Transcript/Alignment；不生成 Global Alignment Artifact。
-7. 生成内部 QA，并按每个 Chunk、每次 Run 最多 4 次 Semantic Attempt 的上限路由白名单问题；存在阻塞问题时停止导出。
-8. 原子替换当前用户可见 SRT；`timeline_status = unverified` 或未解决 warning 只触发界面提示。
-9. 在内部保留旧 Artifact，用于复现和恢复。
+7. 生成内部 QA，修复 structural blocking error，并按每个 Chunk、每次 Run 最多 4 次 Semantic Attempt 的上限执行稳定性返工；仍有 blocking error 时停止导出。
+8. 对最终 Subtitle 生成只含 Atom suppression 决策的 Filler Review。
+9. 原子替换当前用户可见 SRT；`timeline_status = unverified`、Filler Review unavailable 或未解决 warning 只触发界面提示。
+10. 在内部保留旧 Artifact，用于复现和恢复。
 
 临时文件只能在不可变替代文件安全登记后删除。崩溃遗留、尚未登记的内容寻址文件属于可恢复 orphan，可以由之后的显式维护操作清理。项目删除和保留策略是独立产品动作，不能作为 Run 的隐式副作用。
 

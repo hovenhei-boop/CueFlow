@@ -24,6 +24,15 @@ dist/
 *.log
 tmp/
 temp/
+.tmp/
+.cache/
+.tools/
+artifacts/
+reports/
+coverage/
+output/
+.coverage
+htmlcov/
 
 # OS junk
 .DS_Store
