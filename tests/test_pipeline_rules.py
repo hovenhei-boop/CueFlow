@@ -8,9 +8,8 @@ from cueflow.alignment import build_alignment_payload
 from cueflow.atomizer import build_transcript_payload
 from cueflow.canonical import hash_json
 from cueflow.errors import ContractError, ExportBlockedError
-from cueflow.export import validate_export_gate
-from cueflow.filler import local_filler_review_payload
-from cueflow.providers import AlignmentToken, parse_cloud_filler_response
+from cueflow.export import render_srt, validate_export_gate
+from cueflow.providers import AlignmentToken
 from cueflow.qa import evaluate_semantic_attempts, glossary_single_atom_conflicts
 from cueflow.schema import ArtifactEnvelope, InputRef, Producer
 from cueflow.segmentation import segment_subtitles
@@ -165,14 +164,21 @@ def test_export_gate_enumerates_every_chunk_in_current_plan() -> None:
         payload={
             "duration_ms": 10_000,
             "timeline_audio_artifact_id": "art_" + "1" * 64,
+            "config": {
+                "target_duration_ms": 5_000,
+                "hard_limit_ms": 6_000,
+                "silence_min_duration_ms": 500,
+            },
             "chunks": [
                 {
                     "chunk_id": "chunk_0001",
+                    "ordinal": 0,
                     "global_start_ms": 0,
                     "global_end_ms": 5_000,
                 },
                 {
                     "chunk_id": "chunk_0002",
+                    "ordinal": 1,
                     "global_start_ms": 5_000,
                     "global_end_ms": 10_000,
                 },
@@ -204,26 +210,12 @@ def test_export_gate_enumerates_every_chunk_in_current_plan() -> None:
             "issues": [],
         },
     )
-    filler = ArtifactEnvelope.create(
-        artifact_kind="filler_review",
-        scope_key="global",
-        producer=_producer("filler"),
-        inputs=[InputRef(role="subtitle", artifact_id=subtitle.artifact_id)],
-        payload={
-            "mode": "deterministic_local",
-            "status": "completed",
-            "candidates": [],
-            "suppressions": [],
-        },
-    )
-
     class FakeRegistry:
         def current_pointer(self, project_id: str, kind: str, scope: str) -> dict[str, Any]:
             artifact = {
                 "chunk_plan": chunk_plan,
                 "subtitle": subtitle,
                 "qa": qa,
-                "filler_review": filler,
                 "transcript": transcript,
                 "alignment": alignment,
             }[kind]
@@ -240,7 +232,6 @@ def test_export_gate_enumerates_every_chunk_in_current_plan() -> None:
             alignments=[alignment],
             subtitle=subtitle,
             qa=qa,
-            filler_review=filler,
         )
 
 
@@ -254,9 +245,15 @@ def test_export_gate_allows_warnings_but_rejects_blocking_qa() -> None:
         payload={
             "duration_ms": 10_000,
             "timeline_audio_artifact_id": "art_" + "1" * 64,
+            "config": {
+                "target_duration_ms": 10_000,
+                "hard_limit_ms": 10_000,
+                "silence_min_duration_ms": 500,
+            },
             "chunks": [
                 {
                     "chunk_id": "chunk_0001",
+                    "ordinal": 0,
                     "global_start_ms": 0,
                     "global_end_ms": 10_000,
                 }
@@ -298,30 +295,8 @@ def test_export_gate_allows_warnings_but_rejects_blocking_qa() -> None:
             },
         )
 
-    def filler_artifact(qa: ArtifactEnvelope) -> ArtifactEnvelope:
-        return ArtifactEnvelope.create(
-            artifact_kind="filler_review",
-            scope_key="global",
-            producer=_producer("filler"),
-            inputs=[
-                InputRef(role="subtitle", artifact_id=subtitle.artifact_id),
-                InputRef(role="qa", artifact_id=qa.artifact_id),
-                InputRef(role="transcript", artifact_id=transcript.artifact_id),
-                InputRef(role="alignment", artifact_id=alignment.artifact_id),
-            ],
-            payload={
-                "subtitle_artifact_id": subtitle.artifact_id,
-                "review_config_hash": "sha256:" + "2" * 64,
-                "mode": "deterministic_local",
-                "status": "completed",
-                "candidates": [],
-                "suppressions": [],
-                "warnings": [],
-            },
-        )
-
     class FakeRegistry:
-        def __init__(self, qa: ArtifactEnvelope, filler: ArtifactEnvelope) -> None:
+        def __init__(self, qa: ArtifactEnvelope) -> None:
             self.artifacts = {
                 ("chunk_plan", "global"): chunk_plan,
                 ("media_chunk", "chunk_0001"): media_chunk,
@@ -329,18 +304,16 @@ def test_export_gate_allows_warnings_but_rejects_blocking_qa() -> None:
                 ("alignment", "chunk_0001"): alignment,
                 ("subtitle", "global"): subtitle,
                 ("qa", "global"): qa,
-                ("filler_review", "global"): filler,
             }
 
         def current_pointer(self, project_id: str, kind: str, scope: str) -> dict[str, Any]:
             return {"artifact_id": self.artifacts[(kind, scope)].artifact_id, "is_stale": 0}
 
     warning_qa = qa_artifact("warnings", "warning")
-    warning_filler = filler_artifact(warning_qa)
     warning_context = type(
         "FakeContext",
         (),
-        {"registry": FakeRegistry(warning_qa, warning_filler), "project_id": "project"},
+        {"registry": FakeRegistry(warning_qa), "project_id": "project"},
     )()
     validate_export_gate(
         warning_context,
@@ -349,15 +322,13 @@ def test_export_gate_allows_warnings_but_rejects_blocking_qa() -> None:
         alignments=[alignment],
         subtitle=subtitle,
         qa=warning_qa,
-        filler_review=warning_filler,
     )
 
     blocked_qa = qa_artifact("blocked", "blocking_error")
-    blocked_filler = filler_artifact(blocked_qa)
     blocked_context = type(
         "FakeContext",
         (),
-        {"registry": FakeRegistry(blocked_qa, blocked_filler), "project_id": "project"},
+        {"registry": FakeRegistry(blocked_qa), "project_id": "project"},
     )()
     with pytest.raises(ExportBlockedError, match="structural blocking"):
         validate_export_gate(
@@ -367,7 +338,6 @@ def test_export_gate_allows_warnings_but_rejects_blocking_qa() -> None:
             alignments=[alignment],
             subtitle=subtitle,
             qa=blocked_qa,
-            filler_review=blocked_filler,
         )
 
 
@@ -419,41 +389,9 @@ def test_glossary_conflict_stability_rules_and_single_atom_exclusion() -> None:
     assert exact_elsewhere.issues[0]["code"] == "stable_glossary_conflict"
 
 
-def test_local_filler_review_only_marks_atom_and_keeps_subtitle_envelope() -> None:
+def test_subtitle_and_srt_keep_terminal_pronounceable_atoms() -> None:
     _, transcript, alignment = _aligned_chunk("这个方案可以啊。")
     subtitle, _ = segment_subtitles([transcript], [alignment], [], duration_ms=11_000)
-    cue_before = dict(subtitle["cues"][0])
-    review = local_filler_review_payload("art_" + "2" * 64, subtitle, duration_ms=11_000)
-    assert review["suppressions"] == [
-        {
-            "cue_id": "cue_00001",
-            "transcript_artifact_id": transcript.artifact_id,
-            "atom_id": "a0007",
-            "text": "啊",
-            "reason": "terminal_filler",
-        }
-    ]
-    assert subtitle["cues"][0] == cue_before
+    assert subtitle["cues"][0]["text"] == "这个方案可以啊"
+    assert "这个方案可以啊" in render_srt(subtitle)
     assert transcript.payload["source_text"] == "这个方案可以啊。"
-
-    _, retained_transcript, retained_alignment = _aligned_chunk("这个方案呢。")
-    retained_subtitle, _ = segment_subtitles(
-        [retained_transcript], [retained_alignment], [], duration_ms=11_000
-    )
-    retained_review = local_filler_review_payload(
-        "art_" + "3" * 64, retained_subtitle, duration_ms=11_000
-    )
-    assert retained_review["candidates"] == []
-    assert retained_review["suppressions"] == []
-
-
-@pytest.mark.parametrize(
-    "response",
-    [
-        '{"suppressions":[{"cue_id":"c1","atom_id":"a1","text":"rewritten"}]}',
-        '{"suppressions":[],"rewritten_text":"x"}',
-    ],
-)
-def test_cloud_filler_parser_rejects_rewritten_text(response: str) -> None:
-    with pytest.raises(ContractError):
-        parse_cloud_filler_response(response)

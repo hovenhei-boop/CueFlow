@@ -10,6 +10,10 @@ class IntegrityError(CueFlowError):
     """Persisted control-plane or artifact data is inconsistent."""
 
 
+class SourceMissingError(IntegrityError):
+    """The registered external source path is unavailable."""
+
+
 class ProviderError(CueFlowError):
     """Base provider failure."""
 

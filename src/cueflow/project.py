@@ -7,7 +7,7 @@ from typing import Any
 
 from cueflow.artifact_store import ArtifactPublisher, ArtifactStore
 from cueflow.config import PROFILES
-from cueflow.errors import ContractError, IntegrityError
+from cueflow.errors import ContractError, IntegrityError, SourceMissingError
 from cueflow.registry import Registry
 from cueflow.schema import ArtifactEnvelope, utc_now
 
@@ -54,6 +54,8 @@ class ProjectContext:
         self, path: Path, *, asset_kind: str, media_kind: str | None = None
     ) -> dict[str, Any]:
         if not path.is_file():
+            if asset_kind == "media":
+                raise SourceMissingError(f"source_missing: {path}")
             raise ContractError(f"source file does not exist: {path}")
         if asset_kind not in {"media", "auxiliary"}:
             raise ContractError("asset_kind must be media or auxiliary")
@@ -82,7 +84,7 @@ class ProjectContext:
         row = self.registry.source_asset(self.project_id, source_asset_id)
         path = Path(str(row["storage_locator"]))
         if not path.is_file():
-            raise IntegrityError("external source is unavailable for Media Prep")
+            raise SourceMissingError(f"source_missing: {path}")
         digest = hashlib.sha256()
         byte_length = 0
         with path.open("rb") as input_file:
@@ -103,3 +105,7 @@ class ProjectContext:
         if pointer is None or bool(pointer["is_stale"]):
             raise IntegrityError(f"missing or stale current Artifact: {artifact_kind}/{scope_key}")
         return self.store.read_envelope(Path(str(pointer["storage_locator"])))
+
+    def artifact(self, artifact_id: str) -> ArtifactEnvelope:
+        row = self.registry.artifact(self.project_id, artifact_id)
+        return self.store.read_envelope(Path(str(row["storage_locator"])))

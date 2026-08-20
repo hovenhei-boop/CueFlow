@@ -250,6 +250,25 @@ def structural_issues(
     return issues
 
 
+def alignment_repair_workset(
+    issues: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Return the distinct chunks eligible for one QA alignment repair wave."""
+    chunk_ids: set[str] = set()
+    for issue in issues:
+        if issue.get("severity") != "blocking_error":
+            continue
+        if issue.get("code") != "alignment_structural_error":
+            continue
+        observed = issue.get("observed")
+        if not isinstance(observed, Mapping):
+            continue
+        chunk_id = observed.get("chunk_id")
+        if isinstance(chunk_id, str) and chunk_id:
+            chunk_ids.add(chunk_id)
+    return tuple(sorted(chunk_ids))
+
+
 def possible_chunk_boundary_duplication(
     transcripts: Sequence[ArtifactEnvelope], max_window_atoms: int = 8
 ) -> list[dict[str, Any]]:

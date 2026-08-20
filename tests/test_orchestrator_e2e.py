@@ -11,10 +11,11 @@ import pytest
 import cueflow.orchestrator as orchestrator_module
 from cueflow.atomizer import atomize
 from cueflow.config import RuntimeConfig, RuntimeDeviceConfig
-from cueflow.errors import DeliveryAmbiguousError, ExportBlockedError
-from cueflow.media import ProbeResult, _packet_discontinuity
+from cueflow.errors import DeliveryAmbiguousError, ExportBlockedError, SourceMissingError
+from cueflow.media import ProbeResult
 from cueflow.orchestrator import initialize_project, project_status, run_project
 from cueflow.providers import AlignmentToken, SemanticResult
+from cueflow.schema import validate_payload
 
 
 class FakeSemantic:
@@ -160,10 +161,8 @@ def test_full_orchestrator_preserves_source_and_exports_only_srt(tmp_path: Path)
         assert context.registry.source_asset(
             context.project_id, str(result["source_asset_id"])
         )["storage_mode"] == "external_reference"
-        proxy = context.current_artifact("video_proxy")
-        assert proxy.payload["width"] == 640
-        assert proxy.payload["height"] == 360
         probe = context.current_artifact("media_probe")
+        validate_payload("media_probe", probe.payload)
         assert probe.payload["timeline_status"] == "corrected"
         assert probe.payload["timeline_actions"][0]["action"] == "pad_silence_before"
         timeline = context.current_artifact("timeline_audio")
@@ -175,15 +174,14 @@ def test_full_orchestrator_preserves_source_and_exports_only_srt(tmp_path: Path)
             assert timeline_wave.getframerate() == 16_000
             assert timeline_wave.getnchannels() == 1
             assert timeline_wave.getsampwidth() == 2
-            assert abs(timeline_wave.getnframes() / 16 - 4_000) <= 20
+            assert timeline_wave.getnframes() == timeline.payload["total_sample_count"]
         assert not context.store.blob_path("sha256:" + source_hash).exists()
         output_files = sorted(
             path.name for path in (context.root / "output").iterdir() if path.is_file()
         )
         assert output_files == ["subtitles.srt"]
         srt = (context.root / "output" / "subtitles.srt").read_text(encoding="utf-8")
-        assert "这个方案可以" in srt
-        assert "这个方案可以啊" not in srt
+        assert "这个方案可以啊" in srt
         assert "00:00:00,000 --> 00:00:01,050" in srt
         assert not list((context.root / "output").glob("*.tmp"))
         assert context.registry.current_pointers(context.project_id, "alignment")
@@ -203,7 +201,7 @@ def test_unaligned_atoms_get_one_repair_then_block_export(tmp_path: Path) -> Non
     context = initialize_project(tmp_path / "project", "Blocked", "LOCAL_PROFILE")
     UnalignableAligner.calls = 0
     try:
-        with pytest.raises(ExportBlockedError, match="one repair pass"):
+        with pytest.raises(ExportBlockedError, match="allowed structural repair"):
             run_project(
                 context,
                 source,
@@ -256,11 +254,6 @@ def test_glossary_rework_publishes_new_versions_and_stable_warning(tmp_path: Pat
 def test_timestamp_discontinuity_is_unverified_warning_and_does_not_block_srt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    packets = [
-        {"stream_index": 1, "pts_time": "0.000", "duration_time": "0.020"},
-        {"stream_index": 1, "pts_time": "0.100", "duration_time": "0.020"},
-    ]
-    assert _packet_discontinuity(packets, 1, 20) == "audio_timestamp_discontinuity"
     runtime = _runtime()
     source = tmp_path / "external-source.mp4"
     _video(source, runtime)
@@ -274,7 +267,12 @@ def test_timestamp_discontinuity_is_unverified_warning_and_does_not_block_srt(
             *payload["timeline_issues"],
             "audio_timestamp_discontinuity",
         ]
-        return ProbeResult(probed.media_kind, probed.duration_ms, payload)
+        return ProbeResult(
+            probed.media_kind,
+            probed.duration_ms,
+            probed.total_sample_count,
+            payload,
+        )
 
     monkeypatch.setattr(orchestrator_module, "probe_source", discontinuous_probe)
     context = initialize_project(tmp_path / "project", "Unverified", "LOCAL_PROFILE")
@@ -294,6 +292,15 @@ def test_timestamp_discontinuity_is_unverified_warning_and_does_not_block_srt(
         assert {item["code"] for item in project_status(context)["warnings"]} >= {
             "timeline_status_unverified"
         }
+    finally:
+        context.close()
+
+
+def test_source_missing_fails_without_relink_or_guessing(tmp_path: Path) -> None:
+    context = initialize_project(tmp_path / "project", "Missing", "LOCAL_PROFILE")
+    try:
+        with pytest.raises(SourceMissingError, match="source_missing"):
+            run_project(context, tmp_path / "moved.mp4", runtime=_runtime())
     finally:
         context.close()
 

@@ -1,195 +1,72 @@
-# CueFlow v0.1 失败模型
+# CueFlow v0.1 Failure Model
 
-状态：设计基线
+状态：冻结基线
 
-本失败模型优先防止那些会生成“看起来正常但语义已经错配”的 SRT：混合不同版本、配错 Chunk、重复增加时间 offset、歧义付费请求和部分状态更新。
+## 1. 原则
 
-## 1. 失败原则
+不掩盖 structural error，不删除或修改外部源，不猜测 retry 输入，不自动重试 delivery ambiguous 请求，不伪造 confidence，不让新 Run 自动沿用其他 Run 的结果，不让 QA 修改 Transcript，也不生成与实际人声不一致的 SRT。
 
-1. 违反不变量时必须明确失败，不能伪造看似合理的 SRT。
-2. 新状态完全持久化以前，保留最后一组已知有效的 Current Pointer。
-3. 每次实际 Provider 尝试必须单独记录。
-4. 不得静默切换 Processing Profile、Provider、Model Snapshot 或数据出境路径。
-5. 默认不得自动重试送达状态不明确的请求。
-6. QA warning 可以降低可置信程度，但不能修改数据。
-7. Blocking QA 和 stale 依赖都必须阻止导出；`timeline_status = unverified` 是明确警告，不阻止用户取得 SRT。
-8. Glossary 只能提供冲突与返工证据，永远不得直接覆盖 Semantic Transcriber 的文字。
-9. Filler Review 只能隐藏经过验证的候选 Atom；失败时保留原显示文字，不能改写或扩大 suppression。
+## 2. Source failure
 
-## 2. Provider Invocation 结果
+新 Run 或重新 Media Prep 时，SourceAsset 路径不存在或不可访问，抛 `SourceMissingError`；路径存在但 SHA-256/长度改变，抛 IntegrityError。系统不猜路径、不 relink、不从项目内备用媒体恢复。
 
-Provider 尝试按“已知发生了什么”分类，不能只用一个通用 `failed` Boolean。
+若原 Run 已完成 Media Prep，targeted retry 使用 Invocation 绑定的项目内 Artifact 和 blob，不因外部源之后缺失而重新做 Media Prep。
 
-### `definitely_not_sent`
+## 3. Media timing failure
 
-已知请求没有到达 Provider，例如发送前本地输入校验失败。修正本地条件后，或按明确重试策略，可以安全自动重试。
+Opening analysis 与全文件 continuity scan 都读取原媒体。Evidence 可靠时任何非零 offset 都量化为 16kHz sample correction；offset 为零记录 origin unchanged；timestamp 缺失或矛盾时记录 origin unverified；中段 gap/backward jump/discontinuity 无法确定性修复时 `timeline_status = unverified`。
 
-### `delivery_ambiguous`
+Unverified 是非阻塞 warning。Render 执行已记录 action，不猜补偿。未知 action、缺少 origin/duration action、负 sample count或 Timeline Audio 格式/sample length 不符是 ContractError。全文件 scan 必须流式处理；ffprobe 失败、输出无法解析或没有可用 packet 时不得伪装 normal。
 
-请求可能已到达 Provider，但没有收到确定响应。例如上传完成后连接中断，或长请求仍可能在运行时发生超时。默认行为：
+## 4. Artifact publication 与恢复
 
-- 保留 Invocation 和逻辑操作键；
-- 不自动重试；
-- 向调用方暴露显式重试决定；
-- 如果重试，创建新的 Invocation，并保留两次结果。
+Artifact 发布顺序：临时写入、flush/fsync、校验 hash、原子移动到内容路径、SQLite 事务登记 Artifact/dependency/current pointer。中途崩溃最多留下 temp/orphan；现有 current 状态保持有效。
 
-本地幂等键可以复用已知成功结果，但不能承诺 Provider 会避免重复计费或重复执行。
+恢复只信任已登记、文件/hash 完整、Schema 可解释且依赖匹配的 Artifact。不同 Run 的 Artifact 即使内容相同，也不能使新 Run 跳过 Provider/阶段执行。
 
-### `explicit_failure`
+## 5. Provider 与 Invocation
 
-Provider 返回明确失败。只有明确的 Provider Policy 把该状态标记为可重试时才重试；重试仍是新的 Invocation。
-
-### `succeeded`
-
-响应已经通过 Adapter 解析和 Core Schema 校验，并且所生成 Artifact 已安全登记。HTTP 在语法上成功但语义 payload 无效时，不能记为 `succeeded`。
-
-## 3. Run 恢复
-
-应用启动时，应在核对持久化 Artifact 和 Invocation 后，把遗留在 `running` 的 Run 标记为 `interrupted`。只有完整输入身份与配置哈希都匹配时，恢复流程才能复用已有 Artifact。
-
-恢复不能只凭文件存在就推断成功，而要检查：
-
-- 已登记 Artifact Row；
-- 文件存在且 Content Hash 正确；
-- 精确输入依赖身份；
-- Schema Version 可被当前版本解释；
-- Producer 配置身份。
-
-存在文件但没有 Registry Row 时，它属于 orphan。Registry Row 存在但文件缺失时，属于完整性错误，不能成为 Current Artifact。
-
-视频 SourceAsset 默认只保存外部定位器和完整内容身份。若 Timeline Audio、Video Proxy 等已登记 Artifact 完整，下游恢复不要求外部原视频仍存在；只有需要重新执行 Media Prep 时才必须重新访问外部文件并校验完整哈希。CueFlow 不得删除、移动或修改外部原文件。
-
-## 4. Artifact 原子发布
-
-Artifact 发布顺序：
-
-1. 在目标文件系统内把 Canonical Payload 序列化到临时文件；
-2. Flush 并关闭文件；
-3. 计算并校验 Content Hash；
-4. 原子重命名到不可变内容寻址路径；
-5. 开始 SQLite 写事务；
-6. 插入 Artifact 与 Dependency Row；
-7. 更新所有相关 Current Pointer 和 stale 状态；
-8. Commit。
-
-进程在第 4 步前停止时，临时文件可以安全丢弃。第 4、5 步之间停止时，只会留下 orphan，当前状态仍然有效。SQLite 事务失败时，所有指针更新一起回滚。
-
-多步“读取—校验—写入”操作使用 SQLite 写事务，通常采用 `BEGIN IMMEDIATE`，避免两个写者同时根据旧 Current Pointer 作出决定。这只是正确使用数据库，不是项目锁子系统。除此以外，v0.1 假设一个项目只有一个活动 Orchestrator。
-
-## 5. 媒体时间轴异常
-
-视频输入必须先产生可审计的 `media_probe`。Media Prep 的结果分为：
-
-- `normal`：按探测到的呈现时间轴渲染 Timeline Audio；
-- `corrected`：确定性应用静音 pad、呈现边界 trim 或尾部补静音，并把动作写入 Artifact；
-- `unverified`：检测到无法可靠修复的 discontinuity 或时长异常，但仍渲染当前最佳 Timeline Audio。
-
-Media Prep 不允许把首个音频采样无条件搬到 0ms，也不允许在未记录的情况下修正 timestamp。修正完成后，后续模块只认识从 0ms 开始的 Timeline Audio；不存在 Export 时再次补回的全局 offset。
-
-`unverified` 不得被伪装成 `normal`，也不阻止生成 SRT。完成界面必须明确提示字幕可能存在整体或局部偏移，并建议用户检查开头、中段和结尾。用户可见提示来自项目内部状态，不产生额外报告文件。
-
-视频 Media Prep 还必须发布正式 `video_proxy` Artifact。Timeline Audio 与 Video Proxy 都安全落盘并登记以前，不得把新 Media Prep 状态切换为 current。Proxy 生成失败会使本次 Media Prep 失败，但绝不能影响外部原视频；已经写入但尚未登记的文件按 orphan 处理。
-
-## 6. SRT 原子投影
-
-用户可见 SRT 只能由已登记的内部 `srt_render` Artifact 生成；它的 Subtitle、QA 与 `filler_review` 依赖链必须 current 且非 stale。
-
-发布流程：
+每次 operation 在发送前创建 Invocation 和 ordered InvocationInputs。状态流为：
 
 ```text
-写 output/subtitles.srt.tmp
-校验 SRT 已完整渲染
-原子重命名/替换 -> output/subtitles.srt
+created → sending → succeeded
+                  → definitely_not_sent
+                  → delivery_ambiguous
+                  → explicit_failure
 ```
 
-替换前崩溃时，原来的有效 SRT 保持不变。不存在需要与 SRT 跨文件原子同步的第二份用户报告。
+凭据/依赖/模型在发送前不可用时为 definitely_not_sent。请求可能已送达但无确定结果时为 delivery_ambiguous，禁止自动重试。Provider 明确错误或非法契约为 explicit_failure。每个阶段在 finally 中关闭已创建 Provider；阶段无工作时不实例化。
 
-## 7. 导出闸门
+## 6. Semantic budget 与 retry reset
 
-存在以下任何情况时都禁止导出：
+新 Run 每 Chunk 的 window 0 最多 4 个 Semantic Attempt。进入 sending 即消耗 slot；definitely_not_sent 不消耗。成功 Attempt 产生 Transcript；失败/ambiguous Invocation 仍保留审计。
 
-- 任一 Active Chunk 缺少相同 `scope_key` 的 Transcript 或 Alignment 指针；
-- 全局 Subtitle 或 QA 指针缺失；
-- 全局 Filler Review 指针缺失；
-- 任一参与导出的 Chunk 或全局 Artifact 已 stale；
-- Artifact 没有依赖精确的 Active Upstream Version；
-- Transcript、Alignment 与 MediaChunk 的 `chunk_id`/`scope_key` 不一致；
-- 任一 Chunk Alignment 引用了缺失或不同 Transcript 中的 Atom；
-- Cue 时间非法、无序或超出媒体时间线；
-- QA result 为 `blocked`；
-- Filler Review suppression 引用未知、非候选或不属于对应 Cue 的 Atom；
-- 所需 Schema Major Version 未知。
+只有用户执行 `cueflow retry INVOCATION_ID` 才能 reset 目标 Chunk：第一次创建 window 1，第二次创建 window 2，第三次拒绝；两次上限是固定 SQLite 数据模型约束，不是 Ruleset 配置。每个 window 最多 4 个已发送 Attempt，同一 Run/Chunk总量最多 12。Reset 持久化并绑定触发 Invocation，自动返工不能 reset，retry 不创建隐藏 Run。
 
-导出校验必须枚举当前 ChunkPlan 中的每个 Active Chunk，不能只检查一个项目级“Active Transcript”。所有 Chunk 校验通过后，Subtitle 才能直接组合它们；不存在需要单独校验的 Global Alignment Artifact。
+## 7. Semantic stability failure
 
-Warning（包括 Chunk 边界疑似重复、`stable_glossary_conflict`、`unstable_glossary_conflict`、`protected_unit_exceeds_display_limit`、Filler Review unavailable 和 `timeline_status = unverified`）不阻塞导出。CLI 展示这些内部 warning，但 v0.1 不生成公开 Review Report，也不要求 `human_verified_final` 状态。
+Glossary conflict 与 Provider uncertainty 只能请求重听当前 Chunk。每个成功 Attempt 创建新 Transcript/Invocation；rejected Transcript 不进入 Alignment。连续两次稳定但仍冲突时接受实际结果并产生 stable warning；当前 window 用尽仍不稳定时产生 unstable warning并接受最后实际结果。Glossary 不覆盖文字。
 
-## 8. Processing Profile 与隐私边界
+## 8. Alignment execution repair
 
-用户只能选择 `LOCAL_PROFILE` 或 `CLOUD_PROFILE`，不能输入 Provider/Model ID：
+Alignment Stage 只处理 accepted Transcript。一次执行返回未对齐 Atom、token mismatch、非法或越界 timestamp 时，允许最多一次 structural repair。第二次仍非法则阶段失败并禁止 Subtitle/SRT。ProviderUnavailable 与 delivery ambiguous 按 Invocation failure 处理，不伪装为结构修复成功。
 
-- `LOCAL_PROFILE`：Qwen3-ASR-1.7B 和 Qwen3-ForcedAligner-0.6B 都在本地运行，媒体不因语义转写或对齐出境。两个模型默认按阶段串行加载和释放，不要求同时驻留，以降低显存峰值。
-- `CLOUD_PROFILE`：语义转写会把当前 Chunk 音频、Effective Glossary 词条及必要的语言/转写配置上传到 `qwen3.5-omni-plus-2026-03-15`；返回 Transcript 后，原 Chunk 与文字交给本地 Qwen3-ForcedAligner-0.6B。
+## 9. QA Alignment Repair Wave
 
-调用失败不得触发自动切换 Profile、把 Local 改成 Cloud、把 Cloud 改成其他 Provider，或把本地 Alignment 改成云端 Alignment。应用升级内部 Model Snapshot 时必须产生新的 Profile/Producer 配置身份，旧 Run 仍可解释其真实生产者。
+QA 发现 alignment-related blocking issues 时，可独立执行最多一个 Wave：汇总全部受影响 Chunk、一次加载 Aligner、批量重建、切换 current、重建 Subtitle、重跑 QA。Wave 与 execution repair 不共享预算。第二轮仍 blocked 时失败。Wave 不建独立表，通过本 Run 的 `qa_alignment_repair` Invocations 审计。
 
-Semantic Transcriber 未返回当前固定 Forced Aligner 支持的语言名称时，本次调用按契约失败处理；不得默认猜成中文，也不得换用其他 Aligner。
+## 10. Export gate
 
-Cloud Semantic Transcriber 固定为 `qwen3.5-omni-plus-2026-03-15`。Local 和 Cloud 都固定使用本地 `Qwen3-ForcedAligner-0.6B`，不得切换到云端 Alignment。设备、dtype、显存和 CUDA 由运行时能力检测与版本化运行配置决定；资源不足时明确失败，不得自动量化、换模型或切换 Profile。
+缺少 Chunk Transcript/Alignment、精确 Artifact identity 不一致、未完整对齐、Cue 时间非法、Subtitle inputs 不一致、QA subject/dependency 不一致、blocked QA、Envelope/Registry dependency 不一致均阻塞 Export。
 
-Cloud Filler Review 使用同一个 Omni Plus Snapshot 进行纯文本、候选 Atom ID 限定的判断。它是显示优化而不是 Semantic Attempt。失败或送达不明确时记录独立 Invocation，不自动重试，以空 suppression 和 warning 继续；Local Profile 使用确定性规则且不增加第三个模型。
+Glossary stability、Provider uncertainty、Chunk 边界疑似重复、保护单元超限和 timeline unverified 是 warning。SrtRender Artifact 成功发布后才原子替换 `output/subtitles.srt`。
 
-v0.1 默认保留策略提案：
+## 11. Targeted retry 与 Run reopen
 
-- 在项目中保留规范化 Artifact 和最小 Invocation Metadata；
-- 保留 Provider/Model ID、时间、可用时的 Response ID 和失败分类；
-- 普通日志不得包含密钥、完整媒体和完整请求体；
-- 原始 Provider Response 只能保存在明确隔离、可配置的内部区域，而且不是 Core 必需状态。
+只有 definitely_not_sent、delivery_ambiguous 或 explicit_failure Invocation 可显式 retry。原 Run 必须为 failed 或 interrupted；系统将同一 Run reopen 为 running。
 
-改变此保留策略需要显式产品决策，因为它同时影响隐私与复现能力。
+Retry 读取原 InvocationInputs，重放相同 operation，使用同一 Run 已成功且 exact upstream 匹配的其他 Chunk Artifact，处理尚未完成的必要阶段，重建必要全局下游，再次进入 succeeded/failed。它不读取外部源重建已有 MediaChunk，不使用其他 Run 输出，也不重跑无关成功 Chunk。
 
-## 9. QA 与内部返工失败行为
+## 12. 必测失败路径
 
-对于一个 Ruleset Version 和一组精确输入 Artifact，QA 应当是确定性的。Rule Engine 执行失败会产生失败的 QA Run，不能被解释成“没有发现问题”。
-
-时间戳非法、Cue 重叠或越界、实音 Atom 未正确对齐、Transcript/Alignment/Chunk 引用错位及 Artifact 依赖身份不一致是 blocking structural error。Orchestrator 对受影响的确定性阶段或本地 Alignment执行一次修复性重算；重算后仍非法则 Run 失败并禁止导出。不得把 structural error 降为 warning。
-
-`glossary_single_atom_conflict` 是 v0.1 语义返工白名单规则。单 Atom Glossary term 不参与；至少 2 个 Atom 的 term 与 Transcript 窗口必须 Atom 数量和 class 序列完全相同，NFC/casefold 后恰好一个 Atom 不同。Provider 明确标记为不确定的可映射跨度也可独立触发。v0.1 不使用 Levenshtein、拼音/音素、NER 或 confidence 阈值。
-
-只有 Orchestrator 可以请求 Semantic Transcriber 重新处理对应 Chunk；QA 不得直接改字。每个 Chunk、每次 Run 最多 4 次 Semantic Attempt（首次 + 最多 3 次自动返工）。每次返工创建新的 Transcript、Alignment、Invocation 和依赖记录，并只切换该 Chunk 的 Current Pointer。Glossary 只能进入受限提示并提醒模型核对实际发音，不能强制替换结果。
-
-连续两次候选 Atom 序列完全相同表示稳定。稳定结果与 Glossary term 一致时 Issue 标记为 `resolved`；稳定但仍保持同一个冲突时停止返工，保留 Semantic Transcriber 的实际结果，并生成非阻塞 `stable_glossary_conflict` ReviewIssue。达到 4 次仍未连续稳定时生成非阻塞 `unstable_glossary_conflict` ReviewIssue。返工循环不能无限运行，也不能把一次 `delivery_ambiguous` 云请求当作普通自动返工再次发送。
-
-`possible_chunk_boundary_duplication` 比较相邻 Transcript Chunk 的规范化前后缀窗口。它只能发出 warning，并记录两个位置和观测到的重叠文字。它不得编辑文字，因为重复内容可能本来就是真的；没有重叠也不能证明没有吞字。
-
-## 10. 首次实现必须验证的内容
-
-首次实现至少要有以下契约测试：
-
-- Canonical Hash，包括 Atomizer Version 改变；
-- 用延迟起始音轨验证 Timeline Audio 补静音后仍与视频 0ms/总时长一致；
-- 视频 SourceAsset 只登记外部原文件身份，生成受 640×360/约 1Mbps 配置约束的不可变 Video Proxy，且从不删除外部文件；
-- 用 timestamp discontinuity 样本验证状态为 `unverified`、SRT 仍输出且界面警告存在；
-- Chunk 局部时间转全局时间，以及防止重复加 offset；
-- 拒绝不匹配的 Chunk ID 和 Transcript 引用；
-- Current Pointer 能按 `scope_key` 独立切换一个 Chunk，且导出逐块校验；
-- 单个 Transcript Chunk 改变只使对应 Alignment 与全局下游 stale；
-- Glossary 改变使所有 Chunk Transcript/Alignment 与全局下游 stale；
-- 标点和空格只作为 Decoration，不产生 Alignment Assignment 或 unaligned warning；
-- Segmenter 普通 Cue 不超过 10 个版本化显示单位、不可拆 Glossary 保护单元超限时只产生 warning；
-- Subtitle 直接组合多个 Chunk Alignment，项目中不存在 Global Alignment Artifact；
-- Artifact 原子发布与 orphan 恢复；
-- SQLite 回滚时保留原来的 Current Pointer；
-- Ambiguous Invocation 不自动重试；
-- 固定本地/云端 Profile，禁止用户选择 Model 和静默 Profile/Provider fallback；
-- 云端档上传当前 Chunk 音频、Effective Glossary 词条及必要的语言/转写配置，Forced Alignment 保持本地；
-- 单 Atom Glossary term 不触发 `glossary_single_atom_conflict`，至少 2 个 Atom 且恰好一个 Atom 冲突才触发；
-- QA 返工生成新版本并遵守每个 Chunk/Run 最多 4 次 Semantic Attempt；稳定匹配、稳定冲突和 4 次仍不稳定分别产生 resolved、`stable_glossary_conflict` 和 `unstable_glossary_conflict`；
-- Structural blocking error 触发一次对应阶段修复性重算，仍非法则禁止导出；
-- QA warning 与 blocking 对导出的不同影响；
-- Local Filler Review 只隐藏白名单内的 Cue 末尾 Atom；Cloud Filler Review 只能返回候选 ID 子集，失败时保留原显示并告警；
-- Filler suppression 不改变 Transcript、Alignment、Subtitle Atom span 或 Cue 时间包络；
-- 原子替换唯一用户可见的 `subtitles.srt`；
-- 辅助资产不能绕过 Glossary 边界。
-
-Provider 能力和字幕质量 Benchmark 属于私人审计项目，不是发行项目测试。
+Source missing/content mismatch；opening timestamp 缺失、AAC priming、negative PTS、edit-list；中段 discontinuity；unknown action；4-attempt window、两次 reset和12次硬上限；rejected Transcript 无 Alignment；两个独立 repair 预算；多 Chunk QA batch；targeted retry exact inputs/Run reopen；structural QA 阻止 SRT；Artifact/Registry dependency/current pointer 不完整。

@@ -8,10 +8,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 
+from cueflow.config import SEMANTIC_RETRY_RESET_LIMIT
 from cueflow.errors import ContractError, IntegrityError
 from cueflow.schema import ArtifactEnvelope, utc_now
 
-DDL = """
+DDL = f"""
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
 
@@ -98,6 +99,8 @@ CREATE TABLE IF NOT EXISTS invocations (
     operation TEXT NOT NULL,
     logical_operation_key TEXT NOT NULL,
     attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+    semantic_budget_window INTEGER NOT NULL DEFAULT 0
+        CHECK (semantic_budget_window BETWEEN 0 AND {SEMANTIC_RETRY_RESET_LIMIT}),
     status TEXT NOT NULL,
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
@@ -108,6 +111,31 @@ CREATE TABLE IF NOT EXISTS invocations (
     updated_at TEXT NOT NULL,
     FOREIGN KEY (run_id) REFERENCES runs(run_id),
     FOREIGN KEY (project_id, artifact_id) REFERENCES artifacts(project_id, artifact_id)
+);
+
+CREATE TABLE IF NOT EXISTS invocation_inputs (
+    invocation_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    input_artifact_id TEXT NOT NULL,
+    PRIMARY KEY (invocation_id, ordinal),
+    FOREIGN KEY (invocation_id) REFERENCES invocations(invocation_id),
+    FOREIGN KEY (project_id, input_artifact_id) REFERENCES artifacts(project_id, artifact_id)
+);
+
+CREATE TABLE IF NOT EXISTS semantic_budget_resets (
+    run_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    chunk_id TEXT NOT NULL,
+    window_index INTEGER NOT NULL
+        CHECK (window_index BETWEEN 1 AND {SEMANTIC_RETRY_RESET_LIMIT}),
+    trigger_invocation_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, chunk_id, window_index),
+    UNIQUE (trigger_invocation_id),
+    FOREIGN KEY (run_id) REFERENCES runs(run_id),
+    FOREIGN KEY (trigger_invocation_id) REFERENCES invocations(invocation_id)
 );
 """
 
@@ -312,6 +340,34 @@ class Registry:
             ).fetchone(),
         )
 
+    def artifact(self, project_id: str, artifact_id: str) -> sqlite3.Row:
+        row = self._connection.execute(
+            "SELECT * FROM artifacts WHERE project_id=? AND artifact_id=?",
+            (project_id, artifact_id),
+        ).fetchone()
+        if row is None:
+            raise IntegrityError(f"unknown artifact: {artifact_id}")
+        return cast(sqlite3.Row, row)
+
+    def dependent_artifacts(
+        self, project_id: str, input_artifact_id: str, artifact_kind: str | None = None
+    ) -> list[sqlite3.Row]:
+        parameters: list[Any] = [project_id, input_artifact_id]
+        kind_clause = ""
+        if artifact_kind is not None:
+            kind_clause = " AND a.artifact_kind=?"
+            parameters.append(artifact_kind)
+        return self._connection.execute(
+            """
+            SELECT a.* FROM artifact_dependencies d
+            JOIN artifacts a ON a.project_id=d.project_id AND a.artifact_id=d.artifact_id
+            WHERE d.project_id=? AND d.input_artifact_id=?
+            """
+            + kind_clause
+            + " ORDER BY a.scope_key, a.created_at, a.artifact_id",
+            parameters,
+        ).fetchall()
+
     def activate_artifacts(
         self,
         project_id: str,
@@ -406,6 +462,12 @@ class Registry:
         )
         self._connection.commit()
 
+    def reopen_run_for_retry(self, run_id: str) -> None:
+        row = self.run(run_id)
+        if row["status"] not in {"failed", "interrupted"}:
+            raise ContractError("targeted retry requires a failed or interrupted Run")
+        self.set_run_status(run_id, "running")
+
     def run(self, run_id: str) -> sqlite3.Row:
         row = self._connection.execute(
             "SELECT * FROM runs WHERE run_id=?", (run_id,)
@@ -442,32 +504,46 @@ class Registry:
         provider: str,
         model: str,
         chunk_id: str | None = None,
+        semantic_budget_window: int = 0,
+        inputs: Sequence[tuple[str, str]] = (),
     ) -> str:
+        if not 0 <= semantic_budget_window <= SEMANTIC_RETRY_RESET_LIMIT:
+            raise ContractError("invalid semantic budget window")
         invocation_id = "inv_" + uuid.uuid4().hex
         now = utc_now()
-        self._connection.execute(
-            """
-            INSERT INTO invocations
-            (invocation_id, run_id, project_id, chunk_id, operation, logical_operation_key,
-             attempt_number, status, provider, model, response_id, artifact_id,
-             error_message, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, NULL, NULL, NULL, ?, ?)
-            """,
-            (
-                invocation_id,
-                run_id,
-                project_id,
-                chunk_id,
-                operation,
-                logical_operation_key,
-                attempt_number,
-                provider,
-                model,
-                now,
-                now,
-            ),
-        )
-        self._connection.commit()
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO invocations
+                (invocation_id, run_id, project_id, chunk_id, operation, logical_operation_key,
+                 attempt_number, semantic_budget_window, status, provider, model, response_id,
+                 artifact_id, error_message, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, NULL, NULL, NULL, ?, ?)
+                """,
+                (
+                    invocation_id,
+                    run_id,
+                    project_id,
+                    chunk_id,
+                    operation,
+                    logical_operation_key,
+                    attempt_number,
+                    semantic_budget_window,
+                    provider,
+                    model,
+                    now,
+                    now,
+                ),
+            )
+            for ordinal, (role, artifact_id) in enumerate(inputs):
+                connection.execute(
+                    """
+                    INSERT INTO invocation_inputs
+                    (invocation_id, project_id, ordinal, role, input_artifact_id)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (invocation_id, project_id, ordinal, role, artifact_id),
+                )
         return invocation_id
 
     def set_invocation_status(
@@ -512,6 +588,85 @@ class Registry:
             "SELECT * FROM invocations WHERE run_id=? ORDER BY created_at, invocation_id",
             (run_id,),
         ).fetchall()
+
+    def invocation_inputs(self, invocation_id: str) -> list[sqlite3.Row]:
+        return self._connection.execute(
+            "SELECT * FROM invocation_inputs WHERE invocation_id=? ORDER BY ordinal",
+            (invocation_id,),
+        ).fetchall()
+
+    def next_invocation_attempt_number(self, run_id: str, logical_operation_key: str) -> int:
+        row = self._connection.execute(
+            """
+            SELECT COALESCE(MAX(attempt_number), 0) FROM invocations
+            WHERE run_id=? AND logical_operation_key=?
+            """,
+            (run_id, logical_operation_key),
+        ).fetchone()
+        assert row is not None
+        return int(row[0]) + 1
+
+    def semantic_budget_window(self, run_id: str, chunk_id: str) -> int:
+        row = self._connection.execute(
+            """
+            SELECT COALESCE(MAX(window_index), 0) FROM semantic_budget_resets
+            WHERE run_id=? AND chunk_id=?
+            """,
+            (run_id, chunk_id),
+        ).fetchone()
+        assert row is not None
+        return int(row[0])
+
+    def sent_semantic_attempt_count(
+        self, run_id: str, chunk_id: str, budget_window: int
+    ) -> int:
+        row = self._connection.execute(
+            """
+            SELECT COUNT(*) FROM invocations
+            WHERE run_id=? AND chunk_id=? AND operation='semantic_transcription'
+              AND semantic_budget_window=? AND status NOT IN ('created', 'definitely_not_sent')
+            """,
+            (run_id, chunk_id, budget_window),
+        ).fetchone()
+        assert row is not None
+        return int(row[0])
+
+    def record_semantic_budget_reset(
+        self, run_id: str, project_id: str, chunk_id: str, trigger_invocation_id: str
+    ) -> int:
+        trigger = self.invocation(trigger_invocation_id)
+        if (
+            trigger["run_id"] != run_id
+            or trigger["project_id"] != project_id
+            or trigger["chunk_id"] != chunk_id
+            or trigger["operation"] != "semantic_transcription"
+            or trigger["status"]
+            not in {"definitely_not_sent", "delivery_ambiguous", "explicit_failure"}
+        ):
+            raise ContractError("semantic budget reset trigger is invalid")
+        current = self.semantic_budget_window(run_id, chunk_id)
+        if current >= SEMANTIC_RETRY_RESET_LIMIT:
+            raise ContractError("semantic retry reset limit exhausted")
+        window = current + 1
+        self._connection.execute(
+            """
+            INSERT INTO semantic_budget_resets
+            (run_id, project_id, chunk_id, window_index, trigger_invocation_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (run_id, project_id, chunk_id, window, trigger_invocation_id, utc_now()),
+        )
+        self._connection.commit()
+        return window
+
+    def qa_repair_wave_count(self, run_id: str) -> int:
+        row = self._connection.execute(
+            "SELECT EXISTS(SELECT 1 FROM invocations "
+            "WHERE run_id=? AND operation='qa_alignment_repair')",
+            (run_id,),
+        ).fetchone()
+        assert row is not None
+        return int(row[0])
 
     def dependencies(self, project_id: str, artifact_id: str) -> list[sqlite3.Row]:
         return self._connection.execute(

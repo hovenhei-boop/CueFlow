@@ -284,26 +284,6 @@ class CloudOmniSemanticTranscriber:
         return None
 
 
-def parse_cloud_filler_response(text: str) -> list[dict[str, str]]:
-    try:
-        value = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ContractError("cloud filler response must be strict JSON") from exc
-    if not isinstance(value, dict) or set(value) != {"suppressions"}:
-        raise ContractError("cloud filler response may only contain suppressions")
-    suppressions = value["suppressions"]
-    if not isinstance(suppressions, list):
-        raise ContractError("cloud filler suppressions must be an array")
-    result: list[dict[str, str]] = []
-    for raw in suppressions:
-        if not isinstance(raw, dict) or set(raw) != {"cue_id", "atom_id"}:
-            raise ContractError("cloud filler item may only contain cue_id and atom_id")
-        if not isinstance(raw["cue_id"], str) or not isinstance(raw["atom_id"], str):
-            raise ContractError("cloud filler identifiers must be strings")
-        result.append({"cue_id": raw["cue_id"], "atom_id": raw["atom_id"]})
-    return result
-
-
 def parse_cloud_semantic_response(text: str) -> tuple[str, str]:
     try:
         value = json.loads(text)

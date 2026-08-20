@@ -12,45 +12,14 @@ from cueflow.config import COMPONENT_VERSION, SegmenterConfig
 from cueflow.errors import ExportBlockedError
 from cueflow.project import ProjectContext
 from cueflow.schema import ArtifactEnvelope, InputRef, Producer
-from cueflow.segmentation import AtomView, render_atom_text
 
 
-def render_srt(subtitle: Mapping[str, Any], filler_review: Mapping[str, Any]) -> str:
-    suppressions = {
-        (
-            str(item["cue_id"]),
-            str(item["transcript_artifact_id"]),
-            str(item["atom_id"]),
-        )
-        for item in filler_review.get("suppressions", [])
-    }
+def render_srt(subtitle: Mapping[str, Any]) -> str:
     blocks: list[str] = []
     for index, cue in enumerate(subtitle.get("cues", []), start=1):
-        atom_views = []
-        for ref in cue.get("atom_refs", []):
-            key = (
-                str(cue["cue_id"]),
-                str(ref["transcript_artifact_id"]),
-                str(ref["atom_id"]),
-            )
-            if key in suppressions:
-                continue
-            atom_views.append(
-                AtomView(
-                    transcript_artifact_id=str(ref["transcript_artifact_id"]),
-                    chunk_id=str(ref["chunk_id"]),
-                    atom_id=str(ref["atom_id"]),
-                    position=int(ref["position"]),
-                    text=str(ref["text"]),
-                    atom_class=str(ref["atom_class"]),
-                    decoration_after=str(ref.get("decoration_after", "")),
-                    global_start_ms=int(ref["global_start_ms"]),
-                    global_end_ms=int(ref["global_end_ms"]),
-                )
-            )
-        text = render_atom_text(atom_views)
+        text = str(cue.get("text", ""))
         if not text:
-            raise ExportBlockedError("Filler Review would render an empty Cue")
+            raise ExportBlockedError("Subtitle contains an empty Cue")
         blocks.append(
             f"{index}\n{_srt_time(int(cue['global_start_ms']))} --> "
             f"{_srt_time(int(cue['global_end_ms']))}\n{text}"
@@ -66,7 +35,6 @@ def publish_srt(
     alignments: Sequence[ArtifactEnvelope],
     subtitle: ArtifactEnvelope,
     qa: ArtifactEnvelope,
-    filler_review: ArtifactEnvelope,
 ) -> tuple[ArtifactEnvelope, Path]:
     validate_export_gate(
         context,
@@ -75,9 +43,8 @@ def publish_srt(
         alignments=alignments,
         subtitle=subtitle,
         qa=qa,
-        filler_review=filler_review,
     )
-    text = render_srt(subtitle.payload, filler_review.payload)
+    text = render_srt(subtitle.payload)
     config = SegmenterConfig()
     producer = Producer(
         component="srt_render",
@@ -90,7 +57,6 @@ def publish_srt(
     payload = {
         "subtitle_artifact_id": subtitle.artifact_id,
         "qa_artifact_id": qa.artifact_id,
-        "filler_review_artifact_id": filler_review.artifact_id,
         "encoding": "utf-8",
         "byte_length": len(text.encode("utf-8")),
         "text": text,
@@ -102,7 +68,6 @@ def publish_srt(
         inputs=[
             InputRef(role="subtitle", artifact_id=subtitle.artifact_id),
             InputRef(role="qa", artifact_id=qa.artifact_id),
-            InputRef(role="filler_review", artifact_id=filler_review.artifact_id),
         ],
         payload=payload,
     )
@@ -120,12 +85,10 @@ def validate_export_gate(
     alignments: Sequence[ArtifactEnvelope],
     subtitle: ArtifactEnvelope,
     qa: ArtifactEnvelope,
-    filler_review: ArtifactEnvelope,
 ) -> None:
     _require_current(context, chunk_plan)
     _require_current(context, subtitle)
     _require_current(context, qa)
-    _require_current(context, filler_review)
     if qa.payload.get("result") == "blocked":
         raise ExportBlockedError("QA contains unresolved structural blocking errors")
     chunks = chunk_plan.payload.get("chunks")
@@ -163,19 +126,6 @@ def validate_export_gate(
     qa_input_ids = [item.artifact_id for item in qa.inputs if item.artifact_id is not None]
     if qa.payload.get("subject_artifact_ids") != qa_input_ids:
         raise ExportBlockedError("QA subject identities differ from its dependency edges")
-    expected_filler_inputs = {
-        subtitle.artifact_id,
-        qa.artifact_id,
-        *[item.artifact_id for item in transcripts],
-        *[item.artifact_id for item in alignments],
-    }
-    actual_filler_inputs = {
-        item.artifact_id for item in filler_review.inputs if item.artifact_id is not None
-    }
-    if actual_filler_inputs != expected_filler_inputs:
-        raise ExportBlockedError("Filler Review dependencies are not the exact current inputs")
-    if filler_review.payload.get("subtitle_artifact_id") != subtitle.artifact_id:
-        raise ExportBlockedError("Filler Review payload references a different Subtitle")
 
 
 def _require_current(context: ProjectContext, envelope: ArtifactEnvelope) -> None:

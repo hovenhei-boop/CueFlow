@@ -8,6 +8,7 @@ from cueflow.alignment import build_alignment_payload
 from cueflow.artifact_store import ArtifactStore
 from cueflow.atomizer import build_transcript_payload
 from cueflow.canonical import hash_json
+from cueflow.errors import ContractError
 from cueflow.glossary import glossary_payload
 from cueflow.orchestrator import initialize_project, set_project_glossary
 from cueflow.project import ProjectContext
@@ -93,6 +94,8 @@ def test_chunk_scope_switch_and_stale_routes_are_independent(tmp_path: Path) -> 
             inputs=(),
             payload={
                 "duration_ms": 1_000,
+                "total_sample_count": 16_000,
+                "timeline_origin_sample": 0,
                 "sample_rate_hz": 16_000,
                 "channels": 1,
                 "sample_format": "s16le",
@@ -199,5 +202,23 @@ def test_auxiliary_asset_does_not_bypass_effective_glossary(tmp_path: Path) -> N
         assert registered["asset_kind"] == "auxiliary"
         assert after.artifact_id == before.artifact_id
         assert after.payload["terms"] == []
+    finally:
+        project.close()
+
+
+def test_interrupted_run_can_only_reopen_for_targeted_retry(tmp_path: Path) -> None:
+    project = initialize_project(tmp_path / "project", "Test", "LOCAL_PROFILE")
+    try:
+        run_id = project.registry.create_run(
+            project.project_id,
+            {"source_asset_id": "fixture"},
+            "sha256:" + "0" * 64,
+        )
+        project.registry.set_run_status(run_id, "interrupted")
+        project.registry.reopen_run_for_retry(run_id)
+        assert project.registry.run(run_id)["status"] == "running"
+        project.registry.set_run_status(run_id, "succeeded")
+        with pytest.raises(ContractError, match="failed or interrupted"):
+            project.registry.reopen_run_for_retry(run_id)
     finally:
         project.close()

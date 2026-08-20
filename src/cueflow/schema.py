@@ -13,7 +13,6 @@ ARTIFACT_KINDS = frozenset(
     {
         "media_probe",
         "timeline_audio",
-        "video_proxy",
         "chunk_plan",
         "media_chunk",
         "system_glossary",
@@ -23,7 +22,6 @@ ARTIFACT_KINDS = frozenset(
         "alignment",
         "subtitle",
         "qa",
-        "filler_review",
         "srt_render",
     }
 )
@@ -222,8 +220,6 @@ def validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
         validate_subtitle_payload(payload)
     elif kind == "qa":
         validate_qa_payload(payload)
-    elif kind == "filler_review":
-        validate_filler_review_payload(payload)
     elif kind == "media_chunk":
         validate_interval(payload, "global_start_ms", "global_end_ms")
         _string(payload.get("timeline_audio_artifact_id"), "timeline_audio_artifact_id")
@@ -232,35 +228,42 @@ def validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
         if not isinstance(chunks, list) or not chunks:
             raise ContractError("chunk_plan.chunks must be a non-empty array")
         _string(payload.get("timeline_audio_artifact_id"), "timeline_audio_artifact_id")
-        _validate_chunk_coverage(chunks, _integer(payload.get("duration_ms"), "duration_ms"))
+        config = _mapping(payload.get("config"), "chunk_plan.config")
+        target = _positive_integer(config.get("target_duration_ms"), "target_duration_ms")
+        hard_limit = _positive_integer(config.get("hard_limit_ms"), "hard_limit_ms")
+        _positive_integer(config.get("silence_min_duration_ms"), "silence_min_duration_ms")
+        if target > hard_limit:
+            raise ContractError("chunk target duration cannot exceed hard limit")
+        _validate_chunk_coverage(
+            chunks,
+            _positive_integer(payload.get("duration_ms"), "duration_ms"),
+            hard_limit,
+        )
     elif kind == "timeline_audio":
-        if _integer(payload.get("duration_ms"), "duration_ms") <= 0:
-            raise ContractError("timeline_audio duration_ms must be positive")
+        duration_ms = _positive_integer(payload.get("duration_ms"), "duration_ms")
+        total_samples = _positive_integer(payload.get("total_sample_count"), "total_sample_count")
         if (
             payload.get("sample_rate_hz") != 16_000
             or payload.get("channels") != 1
             or payload.get("sample_format") != "s16le"
         ):
             raise ContractError("timeline_audio must be 16kHz mono PCM s16le")
-    elif kind == "video_proxy":
-        if payload.get("authoritative_for_audio_processing") is not False:
-            raise ContractError("video_proxy cannot be authoritative for audio processing")
-        if _integer(payload.get("max_width"), "max_width") > 640:
-            raise ContractError("video_proxy max_width exceeds 640")
-        if _integer(payload.get("max_height"), "max_height") > 360:
-            raise ContractError("video_proxy max_height exceeds 360")
-        width = _integer(payload.get("width"), "width")
-        height = _integer(payload.get("height"), "height")
-        if width <= 0 or height <= 0 or width > 640 or height > 360:
-            raise ContractError("video_proxy dimensions exceed the frozen boundary")
+        if payload.get("timeline_origin_sample") != 0:
+            raise ContractError("timeline_audio origin must be sample zero")
+        expected_ms = (total_samples * 1000 + 8000) // 16_000
+        if duration_ms != expected_ms:
+            raise ContractError("timeline_audio duration does not match total sample count")
     elif kind == "media_probe":
         if payload.get("timeline_status") not in {"normal", "corrected", "unverified"}:
             raise ContractError("invalid media_probe timeline_status")
-        if _integer(payload.get("presentation_duration_ms"), "presentation_duration_ms") <= 0:
-            raise ContractError("media_probe presentation duration must be positive")
-        if payload.get("timeline_tolerance_ms") != 20:
-            raise ContractError("media_probe timeline tolerance must be 20ms")
+        _positive_integer(payload.get("presentation_duration_ms"), "presentation_duration_ms")
+        _positive_integer(payload.get("presentation_total_samples"), "presentation_total_samples")
+        _positive_integer(payload.get("opening_scan_limit_ms"), "opening_scan_limit_ms")
+        _validate_media_probe_evidence(payload)
+        _validate_timeline_actions(payload.get("timeline_actions"))
     elif kind == "srt_render":
+        _string(payload.get("subtitle_artifact_id"), "subtitle_artifact_id")
+        _string(payload.get("qa_artifact_id"), "qa_artifact_id")
         if not isinstance(payload.get("text"), str):
             raise ContractError("srt_render.text must be a string")
 
@@ -407,51 +410,189 @@ def validate_qa_payload(payload: Mapping[str, Any]) -> None:
             raise ContractError("invalid QA resolution_status")
 
 
-def validate_filler_review_payload(payload: Mapping[str, Any]) -> None:
-    if payload.get("mode") not in {"deterministic_local", "cloud_atom_review"}:
-        raise ContractError("invalid filler review mode")
-    if payload.get("status") not in {"completed", "unavailable"}:
-        raise ContractError("invalid filler review status")
-    candidates = payload.get("candidates")
-    suppressions = payload.get("suppressions")
-    if not isinstance(candidates, list) or not isinstance(suppressions, list):
-        raise ContractError("filler candidates and suppressions must be arrays")
-    candidate_text: dict[tuple[str, str, str], str] = {}
-    cue_counts: dict[str, int] = {}
-    for raw in candidates:
-        candidate = _mapping(raw, "candidates[]")
-        text = _string(candidate.get("text"), "candidate.text")
-        if text not in {"啊", "呀", "哦", "嗯", "呃"}:
-            raise ContractError("filler candidate is outside the frozen whitelist")
-        key = (
-            _string(candidate.get("cue_id"), "candidate.cue_id"),
-            _string(candidate.get("transcript_artifact_id"), "candidate.transcript_artifact_id"),
-            _string(candidate.get("atom_id"), "candidate.atom_id"),
-        )
-        if key in candidate_text:
-            raise ContractError("duplicate filler candidate")
-        candidate_text[key] = text
-    for raw in suppressions:
-        suppression = _mapping(raw, "suppressions[]")
-        key = (
-            _string(suppression.get("cue_id"), "suppression.cue_id"),
-            _string(
-                suppression.get("transcript_artifact_id"),
-                "suppression.transcript_artifact_id",
-            ),
-            _string(suppression.get("atom_id"), "suppression.atom_id"),
-        )
-        if key not in candidate_text:
-            raise ContractError("filler suppression is not a candidate")
-        if suppression.get("text") != candidate_text[key]:
-            raise ContractError("filler suppression text differs from its candidate")
-        if suppression.get("reason") != "terminal_filler":
-            raise ContractError("invalid filler suppression reason")
-        cue_counts[key[0]] = cue_counts.get(key[0], 0) + 1
-        if cue_counts[key[0]] > 1:
-            raise ContractError("more than one filler suppression for a cue")
-    if payload.get("status") == "unavailable" and suppressions:
-        raise ContractError("unavailable filler review must not suppress atoms")
+def _validate_timeline_actions(value: Any) -> None:
+    if not isinstance(value, list):
+        raise ContractError("media_probe.timeline_actions must be an array")
+    origin_actions = {
+        "timeline_origin_unchanged",
+        "pad_silence_before",
+        "trim_before_timeline",
+        "timeline_origin_unverified",
+    }
+    seen_origin = 0
+    seen_duration = 0
+    for raw in value:
+        action = _mapping(raw, "timeline_actions[]")
+        name = _string(action.get("action"), "timeline action")
+        if name in origin_actions:
+            seen_origin += 1
+            if name in {"pad_silence_before", "trim_before_timeline"}:
+                _positive_integer(action.get("sample_count"), "sample_count")
+            elif "sample_count" in action:
+                raise ContractError(f"{name} must not carry sample_count")
+        elif name == "fit_presentation_duration":
+            seen_duration += 1
+            _positive_integer(action.get("total_sample_count"), "total_sample_count")
+        else:
+            raise ContractError(f"unknown timeline action: {name}")
+    if seen_origin != 1 or seen_duration != 1:
+        raise ContractError("timeline actions require one origin and one duration action")
+
+
+def _validate_media_probe_evidence(payload: Mapping[str, Any]) -> None:
+    _require_fields(
+        payload,
+        (
+            "media_kind",
+            "container",
+            "video_stream",
+            "audio_stream",
+            "presentation_evidence",
+            "continuity_check",
+            "timeline_issues",
+        ),
+        "media_probe",
+    )
+    if payload.get("media_kind") not in {"audio", "video"}:
+        raise ContractError("invalid media_probe media_kind")
+
+    container = _mapping(payload.get("container"), "media_probe.container")
+    _require_fields(container, ("format_name", "start_time", "duration"), "container")
+    _string(container.get("format_name"), "container.format_name")
+    _optional_string(container.get("start_time"))
+    _optional_string(container.get("duration"))
+
+    _validate_stream_facts(payload.get("audio_stream"), "audio_stream")
+    video_stream = payload.get("video_stream")
+    if video_stream is not None:
+        _validate_stream_facts(video_stream, "video_stream")
+
+    evidence = _mapping(
+        payload.get("presentation_evidence"), "media_probe.presentation_evidence"
+    )
+    _require_fields(
+        evidence,
+        ("media_origin", "audio_start", "exact_offset"),
+        "presentation_evidence",
+    )
+    _validate_frame_evidence(evidence.get("media_origin"), "media_origin")
+    _validate_frame_evidence(evidence.get("audio_start"), "audio_start")
+    _validate_fraction_evidence(evidence.get("exact_offset"), "exact_offset")
+    _validate_continuity_evidence(payload.get("continuity_check"))
+
+    issues = payload.get("timeline_issues")
+    if not isinstance(issues, list):
+        raise ContractError("media_probe.timeline_issues must be an array")
+    for issue in issues:
+        _string(issue, "timeline_issues[]")
+
+
+def _validate_stream_facts(value: Any, name: str) -> None:
+    stream = _mapping(value, f"media_probe.{name}")
+    _require_fields(
+        stream,
+        (
+            "index",
+            "codec_name",
+            "start_pts",
+            "duration_ts",
+            "time_base_num",
+            "time_base_den",
+            "sample_rate_hz",
+            "channels",
+            "width",
+            "height",
+        ),
+        name,
+    )
+    _nullable_non_negative_integer(stream.get("index"), f"{name}.index")
+    _string(stream.get("codec_name"), f"{name}.codec_name")
+    _nullable_integer(stream.get("start_pts"), f"{name}.start_pts")
+    _nullable_integer(stream.get("duration_ts"), f"{name}.duration_ts")
+    _validate_nullable_time_base(
+        stream.get("time_base_num"), stream.get("time_base_den"), name
+    )
+    for field in ("sample_rate_hz", "channels", "width", "height"):
+        _nullable_positive_integer(stream.get(field), f"{name}.{field}")
+
+
+def _validate_frame_evidence(value: Any, name: str) -> None:
+    if value is None:
+        return
+    frame = _mapping(value, f"presentation_evidence.{name}")
+    _require_fields(
+        frame,
+        (
+            "stream_index",
+            "pts",
+            "time_base_num",
+            "time_base_den",
+            "skip_samples",
+            "nb_samples",
+            "sample_rate_hz",
+            "valid_start",
+        ),
+        name,
+    )
+    _non_negative_integer(frame.get("stream_index"), f"{name}.stream_index")
+    _integer(frame.get("pts"), f"{name}.pts")
+    _positive_integer(frame.get("time_base_num"), f"{name}.time_base_num")
+    _positive_integer(frame.get("time_base_den"), f"{name}.time_base_den")
+    _non_negative_integer(frame.get("skip_samples"), f"{name}.skip_samples")
+    _nullable_non_negative_integer(frame.get("nb_samples"), f"{name}.nb_samples")
+    _nullable_positive_integer(frame.get("sample_rate_hz"), f"{name}.sample_rate_hz")
+    _validate_fraction_evidence(frame.get("valid_start"), f"{name}.valid_start", required=True)
+
+
+def _validate_fraction_evidence(
+    value: Any, name: str, *, required: bool = False
+) -> None:
+    if value is None and not required:
+        return
+    fraction = _mapping(value, name)
+    _require_fields(fraction, ("numerator", "denominator"), name)
+    _integer(fraction.get("numerator"), f"{name}.numerator")
+    _positive_integer(fraction.get("denominator"), f"{name}.denominator")
+
+
+def _validate_continuity_evidence(value: Any) -> None:
+    continuity = _mapping(value, "media_probe.continuity_check")
+    _require_fields(
+        continuity,
+        ("status", "packets_scanned", "first_anomaly"),
+        "continuity_check",
+    )
+    status = continuity.get("status")
+    if status not in {"continuous", "discontinuous", "unavailable"}:
+        raise ContractError("invalid continuity_check.status")
+    _non_negative_integer(continuity.get("packets_scanned"), "packets_scanned")
+    anomaly_value = continuity.get("first_anomaly")
+    if status == "continuous":
+        if anomaly_value is not None:
+            raise ContractError("continuous timeline must not contain first_anomaly")
+        return
+    anomaly = _mapping(anomaly_value, "continuity_check.first_anomaly")
+    _string(anomaly.get("code"), "first_anomaly.code")
+    if "packet_ordinal" in anomaly:
+        _non_negative_integer(anomaly.get("packet_ordinal"), "first_anomaly.packet_ordinal")
+    for field in ("expected", "observed"):
+        if field in anomaly:
+            _validate_fraction_evidence(anomaly.get(field), f"first_anomaly.{field}", required=True)
+
+
+def _validate_nullable_time_base(numerator: Any, denominator: Any, name: str) -> None:
+    if numerator is None and denominator is None:
+        return
+    if numerator is None or denominator is None:
+        raise ContractError(f"{name} time base must provide numerator and denominator together")
+    _positive_integer(numerator, f"{name}.time_base_num")
+    _positive_integer(denominator, f"{name}.time_base_den")
+
+
+def _require_fields(value: Mapping[str, Any], fields: Sequence[str], name: str) -> None:
+    missing = [field for field in fields if field not in value]
+    if missing:
+        raise ContractError(f"{name} missing fields: {missing}")
 
 
 def validate_interval(value: Mapping[str, Any], start_name: str, end_name: str) -> None:
@@ -502,15 +643,19 @@ def find_unaligned_atoms(alignment: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def _validate_chunk_coverage(chunks: Iterable[Any], duration_ms: int) -> None:
+def _validate_chunk_coverage(
+    chunks: Iterable[Any], duration_ms: int, hard_limit_ms: int
+) -> None:
     expected_start = 0
-    for raw in chunks:
+    for ordinal, raw in enumerate(chunks):
         chunk = _mapping(raw, "chunks[]")
+        if _integer(chunk.get("ordinal"), "ordinal") != ordinal:
+            raise ContractError("chunk ordinals must be contiguous")
         validate_interval(chunk, "global_start_ms", "global_end_ms")
         if chunk["global_start_ms"] != expected_start:
             raise ContractError("chunks must cover timeline without gaps or overlap")
-        if chunk["global_end_ms"] - chunk["global_start_ms"] > 225_000:
-            raise ContractError("chunk exceeds frozen 225 second hard limit")
+        if chunk["global_end_ms"] - chunk["global_start_ms"] > hard_limit_ms:
+            raise ContractError("chunk exceeds its plan hard limit")
         expected_start = chunk["global_end_ms"]
     if expected_start != duration_ms:
         raise ContractError("chunks do not cover the entire timeline")
@@ -533,6 +678,32 @@ def _integer(value: Any, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ContractError(f"{name} must be an integer")
     return cast(int, value)
+
+
+def _positive_integer(value: Any, name: str) -> int:
+    result = _integer(value, name)
+    if result <= 0:
+        raise ContractError(f"{name} must be positive")
+    return result
+
+
+def _non_negative_integer(value: Any, name: str) -> int:
+    result = _integer(value, name)
+    if result < 0:
+        raise ContractError(f"{name} must be non-negative")
+    return result
+
+
+def _nullable_integer(value: Any, name: str) -> int | None:
+    return None if value is None else _integer(value, name)
+
+
+def _nullable_positive_integer(value: Any, name: str) -> int | None:
+    return None if value is None else _positive_integer(value, name)
+
+
+def _nullable_non_negative_integer(value: Any, name: str) -> int | None:
+    return None if value is None else _non_negative_integer(value, name)
 
 
 def _string(value: Any, name: str, *, allow_empty: bool = False) -> str:

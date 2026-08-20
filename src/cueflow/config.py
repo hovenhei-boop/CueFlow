@@ -10,6 +10,7 @@ SCHEMA_VERSION = "1.0.0"
 COMPONENT_VERSION = "0.1.0"
 ATOMIZER_VERSION = "0.1.0"
 GLOSSARY_NORMALIZATION_VERSION = "0.1.0"
+SEMANTIC_RETRY_RESET_LIMIT = 2
 
 LOCAL_ASR_REPO = "Qwen/Qwen3-ASR-1.7B"
 LOCAL_ASR_REVISION = "e6942fcb56f665d470e39e6fe9efe6f5f31ee254"
@@ -37,11 +38,7 @@ class MediaPrepConfig:
     sample_rate_hz: int = 16_000
     channels: int = 1
     sample_format: str = "s16le"
-    timeline_tolerance_ms: int = 20
-    proxy_max_width: int = 640
-    proxy_max_height: int = 360
-    proxy_video_bitrate_bps: int = 1_000_000
-    proxy_audio_bitrate_bps: int = 64_000
+    opening_scan_limit_ms: int = 50_000
 
 
 @dataclass(frozen=True)
@@ -82,19 +79,12 @@ class SegmenterConfig:
 class QaRulesetConfig:
     version: str = "0.1.0"
     semantic_attempt_limit: int = 4
-    structural_repair_limit: int = 1
+    alignment_structural_repair_limit: int = 1
+    qa_alignment_repair_wave_limit: int = 1
     rework_rule_codes: tuple[str, ...] = (
         "glossary_single_atom_conflict",
         "provider_marked_uncertain",
     )
-
-
-@dataclass(frozen=True)
-class FillerReviewConfig:
-    version: str = "0.1.0"
-    whitelist: tuple[str, ...] = ("啊", "呀", "哦", "嗯", "呃")
-    max_suppressions_per_cue: int = 1
-    local_pause_ms: int = 500
 
 
 @dataclass(frozen=True)
@@ -168,6 +158,5 @@ def result_config(profile: str, runtime: RuntimeConfig | None = None) -> dict[st
         "chunker": asdict(ChunkerConfig()),
         "segmenter": asdict(SegmenterConfig()),
         "qa": asdict(QaRulesetConfig()),
-        "filler_review": asdict(FillerReviewConfig()),
         "runtime_device": asdict(chosen_runtime.device),
     }

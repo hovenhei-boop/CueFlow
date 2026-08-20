@@ -3,14 +3,22 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from dataclasses import asdict
 
 import pytest
 
 from cueflow.atomizer import build_transcript_payload
 from cueflow.canonical import artifact_content_hash, canonical_bytes
-from cueflow.config import CLOUD_MODEL, LOCAL_ALIGNER_REPO, PROFILES
+from cueflow.config import (
+    CLOUD_MODEL,
+    LOCAL_ALIGNER_REPO,
+    PROFILES,
+    SEMANTIC_RETRY_RESET_LIMIT,
+    QaRulesetConfig,
+)
 from cueflow.errors import ContractError
-from cueflow.schema import ArtifactEnvelope, InputRef, Producer
+from cueflow.registry import DDL
+from cueflow.schema import ARTIFACT_KINDS, ArtifactEnvelope, InputRef, Producer
 
 
 def producer() -> Producer:
@@ -102,3 +110,31 @@ def test_profiles_fix_models_and_keep_alignment_local() -> None:
     assert PROFILES["CLOUD_PROFILE"].semantic_model == CLOUD_MODEL
     assert all(profile.aligner_model == LOCAL_ALIGNER_REPO for profile in PROFILES.values())
     assert all(profile.aligner_provider == "qwen-local" for profile in PROFILES.values())
+
+
+def test_artifact_kind_allowlist_is_the_complete_current_pipeline() -> None:
+    assert ARTIFACT_KINDS == frozenset(
+        {
+            "media_probe",
+            "timeline_audio",
+            "chunk_plan",
+            "media_chunk",
+            "system_glossary",
+            "project_glossary",
+            "effective_glossary",
+            "transcript",
+            "alignment",
+            "subtitle",
+            "qa",
+            "srt_render",
+        }
+    )
+
+
+def test_semantic_retry_reset_limit_is_a_fixed_data_model_constant() -> None:
+    assert SEMANTIC_RETRY_RESET_LIMIT == 2
+    assert "semantic_retry_reset_limit" not in asdict(QaRulesetConfig())
+    assert (
+        f"semantic_budget_window BETWEEN 0 AND {SEMANTIC_RETRY_RESET_LIMIT}" in DDL
+    )
+    assert f"window_index BETWEEN 1 AND {SEMANTIC_RETRY_RESET_LIMIT}" in DDL

@@ -16,7 +16,6 @@ def build_alignment_payload(
     transcript_artifact_id: str,
     transcript: Mapping[str, Any],
     tokens: Sequence[AlignmentToken],
-    boundary_tolerance_ms: int = 20,
 ) -> dict[str, Any]:
     if media_chunk.get("chunk_id") != transcript.get("chunk_id"):
         raise ContractError("cannot align mismatched media chunk and transcript")
@@ -53,7 +52,7 @@ def build_alignment_payload(
                 local_start >= 0
                 and local_end > local_start
                 and local_start >= previous_end
-                and local_end <= chunk_duration + boundary_tolerance_ms
+                and local_end <= chunk_duration
             )
             if not valid:
                 assignments.append(
@@ -66,15 +65,6 @@ def build_alignment_payload(
                 continue
             global_start = chunk_start + local_start
             global_end = chunk_start + local_end
-            if global_end > chunk_end:
-                assignments.append(
-                    {
-                        "atom_id": str(atom["atom_id"]),
-                        "status": "unaligned",
-                        "reason": "provider_timestamp_exceeds_boundary_tolerance",
-                    }
-                )
-                continue
             assignment: dict[str, Any] = {
                 "atom_id": str(atom["atom_id"]),
                 "status": "aligned",

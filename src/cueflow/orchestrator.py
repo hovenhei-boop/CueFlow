@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from pathlib import Path
@@ -11,8 +10,6 @@ from cueflow.atomizer import build_transcript_payload
 from cueflow.canonical import hash_json
 from cueflow.config import (
     COMPONENT_VERSION,
-    PROFILES,
-    FillerReviewConfig,
     QaRulesetConfig,
     RuntimeConfig,
     SegmenterConfig,
@@ -27,11 +24,6 @@ from cueflow.errors import (
     ProviderUnavailableError,
 )
 from cueflow.export import publish_srt
-from cueflow.filler import (
-    cloud_filler_review_payload,
-    local_filler_review_payload,
-    unavailable_cloud_filler_payload,
-)
 from cueflow.glossary import effective_glossary, glossary_payload
 from cueflow.media import MediaBundle, prepare_media, probe_source
 from cueflow.project import ProjectContext
@@ -44,6 +36,7 @@ from cueflow.providers import (
     SemanticTranscriber,
 )
 from cueflow.qa import (
+    alignment_repair_workset,
     evaluate_semantic_attempts,
     possible_chunk_boundary_duplication,
     qa_payload,
@@ -95,14 +88,7 @@ def set_project_glossary(context: ProjectContext, terms: Sequence[str]) -> Artif
         [project.artifact_id, effective.artifact_id],
         stale_targets=[
             (kind, None)
-            for kind in (
-                "transcript",
-                "alignment",
-                "subtitle",
-                "qa",
-                "filler_review",
-                "srt_render",
-            )
+            for kind in ("transcript", "alignment", "subtitle", "qa", "srt_render")
         ],
     )
     return effective
@@ -117,15 +103,13 @@ def run_project(
     aligner_factory: AlignerFactory | None = None,
 ) -> dict[str, Any]:
     chosen_runtime = runtime or RuntimeConfig.detect()
-    project_row = context.registry.project()
-    profile = str(project_row["processing_profile"])
+    profile = str(context.registry.project()["processing_profile"])
     source_asset = context.register_external_asset(media_path, asset_kind="media")
     probe = probe_source(media_path, chosen_runtime)
     context.registry.set_source_media_kind(
         context.project_id, str(source_asset["source_asset_id"]), probe.media_kind
     )
     context.verify_external_asset(str(source_asset["source_asset_id"]))
-    config = result_config(profile, chosen_runtime)
     run_id = context.registry.create_run(
         context.project_id,
         {
@@ -133,120 +117,22 @@ def run_project(
             "content_hash": source_asset["content_hash"],
             "storage_locator": source_asset["storage_locator"],
         },
-        hash_json(config),
+        hash_json(result_config(profile, chosen_runtime)),
     )
     context.registry.set_run_status(run_id, "running")
-    semantic_builder = semantic_factory or _default_semantic_factory
-    aligner_builder = aligner_factory or (lambda value: LocalQwenForcedAligner(value))
     try:
         media = prepare_media(context, source_asset, probe, chosen_runtime)
         effective = context.current_artifact("effective_glossary")
-        terms = list(effective.payload.get("terms", []))
-        transcripts: list[ArtifactEnvelope] = []
-        alignments: list[ArtifactEnvelope] = []
-        semantic_issues: list[dict[str, Any]] = []
-        for media_chunk in media.media_chunks:
-            transcript, alignment, issues = _process_chunk(
-                context,
-                run_id=run_id,
-                profile=profile,
-                runtime=chosen_runtime,
-                media_chunk=media_chunk,
-                effective_glossary=effective,
-                glossary_terms=terms,
-                semantic_factory=semantic_builder,
-                aligner_factory=aligner_builder,
-            )
-            transcripts.append(transcript)
-            alignments.append(alignment)
-            semantic_issues.extend(issues)
-        subtitle, segment_warnings = _publish_subtitle(
-            context,
-            profile,
-            media,
-            effective,
-            transcripts,
-            alignments,
-            terms,
-        )
-        structural = structural_issues(
-            media.media_chunks,
-            transcripts,
-            alignments,
-            subtitle,
-            duration_ms=probe.duration_ms,
-            registry=context.registry,
-            project_id=context.project_id,
-        )
-        if structural:
-            subtitle, segment_warnings = _publish_subtitle(
-                context,
-                profile,
-                media,
-                effective,
-                transcripts,
-                alignments,
-                terms,
-            )
-            structural = structural_issues(
-                media.media_chunks,
-                transcripts,
-                alignments,
-                subtitle,
-                duration_ms=probe.duration_ms,
-                registry=context.registry,
-                project_id=context.project_id,
-            )
-        boundary_warnings = possible_chunk_boundary_duplication(transcripts)
-        all_issues = [*semantic_issues, *segment_warnings, *boundary_warnings, *structural]
-        qa = _publish_qa(
-            context,
-            profile,
-            media,
-            effective,
-            subtitle,
-            transcripts,
-            alignments,
-            all_issues,
-        )
-        if qa.payload["result"] == "blocked":
-            raise ExportBlockedError("structural QA remained blocked after one repair pass")
-        filler = _publish_filler_review(
+        return _execute_existing_media_run(
             context,
             run_id=run_id,
             profile=profile,
-            subtitle=subtitle,
-            qa=qa,
-            transcripts=transcripts,
-            alignments=alignments,
-            duration_ms=probe.duration_ms,
+            runtime=chosen_runtime,
+            media=media,
+            effective_glossary=effective,
+            semantic_factory=semantic_factory or _default_semantic_factory,
+            aligner_factory=aligner_factory or _default_aligner_factory,
         )
-        render, output_path = publish_srt(
-            context,
-            chunk_plan=media.chunk_plan,
-            transcripts=transcripts,
-            alignments=alignments,
-            subtitle=subtitle,
-            qa=qa,
-            filler_review=filler,
-        )
-        context.registry.set_run_status(run_id, "succeeded")
-        return {
-            "run_id": run_id,
-            "status": "succeeded",
-            "source_asset_id": source_asset["source_asset_id"],
-            "srt_render_artifact_id": render.artifact_id,
-            "output": str(output_path.resolve()),
-            "warnings": [
-                issue for issue in qa.payload["issues"] if issue["severity"] == "warning"
-            ]
-            + list(filler.payload.get("warnings", []))
-            + (
-                [{"code": "timeline_status_unverified"}]
-                if probe.payload["timeline_status"] == "unverified"
-                else []
-            ),
-        }
     except BaseException as exc:
         context.registry.set_run_status(run_id, "failed", str(exc))
         raise
@@ -257,6 +143,8 @@ def retry_invocation(
     invocation_id: str,
     *,
     runtime: RuntimeConfig | None = None,
+    semantic_factory: SemanticFactory | None = None,
+    aligner_factory: AlignerFactory | None = None,
 ) -> dict[str, Any]:
     invocation = context.registry.invocation(invocation_id)
     if invocation["project_id"] != context.project_id:
@@ -267,9 +155,50 @@ def retry_invocation(
         "explicit_failure",
     }:
         raise ContractError("only a failed or ambiguous Invocation can be explicitly retried")
-    run = context.registry.run(str(invocation["run_id"]))
-    identity = json.loads(str(run["input_identity_json"]))
-    return run_project(context, Path(str(identity["storage_locator"])), runtime=runtime)
+    operation = str(invocation["operation"])
+    if operation not in {"semantic_transcription", "forced_alignment", "qa_alignment_repair"}:
+        raise ContractError("Invocation operation is not a retryable v0.1 operation")
+    run_id = str(invocation["run_id"])
+    run = context.registry.run(run_id)
+    if run["status"] not in {"failed", "interrupted"}:
+        raise ContractError("targeted retry requires a failed or interrupted Run")
+    bound_inputs = _bound_inputs(context, invocation_id)
+    media, effective, bound_transcript = _retry_graph(context, bound_inputs)
+    chunk_id = str(invocation["chunk_id"])
+    if operation == "semantic_transcription" and invocation["status"] != "definitely_not_sent":
+        context.registry.record_semantic_budget_reset(
+            run_id, context.project_id, chunk_id, invocation_id
+        )
+    context.registry.reopen_run_for_retry(run_id)
+    chosen_runtime = runtime or RuntimeConfig.detect()
+    profile = str(context.registry.project()["processing_profile"])
+    try:
+        return _execute_existing_media_run(
+            context,
+            run_id=run_id,
+            profile=profile,
+            runtime=chosen_runtime,
+            media=media,
+            effective_glossary=effective,
+            semantic_factory=semantic_factory or _default_semantic_factory,
+            aligner_factory=aligner_factory or _default_aligner_factory,
+            force_semantic_chunks=(
+                {chunk_id} if operation == "semantic_transcription" else set()
+            ),
+            force_alignment_chunks=(
+                {chunk_id} if operation in {"forced_alignment", "qa_alignment_repair"} else set()
+            ),
+            bound_transcript=bound_transcript,
+            explicit_alignment_retry=operation in {"forced_alignment", "qa_alignment_repair"},
+            forced_alignment_operation=(
+                operation
+                if operation in {"forced_alignment", "qa_alignment_repair"}
+                else "forced_alignment"
+            ),
+        )
+    except BaseException as exc:
+        context.registry.set_run_status(run_id, "failed", str(exc))
+        raise
 
 
 def project_status(context: ProjectContext) -> dict[str, Any]:
@@ -285,7 +214,7 @@ def project_status(context: ProjectContext) -> dict[str, Any]:
         for row in context.registry.current_pointers(context.project_id)
     ]
     warnings: list[Any] = []
-    for kind in ("qa", "filler_review", "media_probe"):
+    for kind in ("qa", "media_probe"):
         try:
             artifact = context.current_artifact(kind)
         except CueFlowError:
@@ -294,8 +223,6 @@ def project_status(context: ProjectContext) -> dict[str, Any]:
             warnings.extend(
                 item for item in artifact.payload.get("issues", []) if item["severity"] == "warning"
             )
-        elif kind == "filler_review":
-            warnings.extend(artifact.payload.get("warnings", []))
         elif artifact.payload.get("timeline_status") == "unverified":
             warnings.append({"code": "timeline_status_unverified"})
     return {
@@ -316,60 +243,170 @@ def project_status(context: ProjectContext) -> dict[str, Any]:
     }
 
 
-def _process_chunk(
+def _execute_existing_media_run(
     context: ProjectContext,
     *,
     run_id: str,
     profile: str,
     runtime: RuntimeConfig,
-    media_chunk: ArtifactEnvelope,
+    media: MediaBundle,
     effective_glossary: ArtifactEnvelope,
-    glossary_terms: Sequence[str],
     semantic_factory: SemanticFactory,
     aligner_factory: AlignerFactory,
-) -> tuple[ArtifactEnvelope, ArtifactEnvelope, list[dict[str, Any]]]:
-    attempt_payloads: list[Mapping[str, Any]] = []
-    attempt_artifacts: list[str] = []
+    force_semantic_chunks: set[str] | None = None,
+    force_alignment_chunks: set[str] | None = None,
+    bound_transcript: ArtifactEnvelope | None = None,
+    explicit_alignment_retry: bool = False,
+    forced_alignment_operation: str = "forced_alignment",
+) -> dict[str, Any]:
+    transcripts, semantic_issues = _run_transcription_stage(
+        context,
+        run_id=run_id,
+        profile=profile,
+        runtime=runtime,
+        media_chunks=media.media_chunks,
+        effective_glossary=effective_glossary,
+        semantic_factory=semantic_factory,
+        force_chunks=force_semantic_chunks or set(),
+    )
+    if bound_transcript is not None:
+        transcript_by_chunk = {
+            str(item.payload["chunk_id"]): item for item in transcripts
+        }
+        transcript_by_chunk[str(bound_transcript.payload["chunk_id"])] = bound_transcript
+        transcripts = tuple(
+            transcript_by_chunk[str(chunk.payload["chunk_id"])]
+            for chunk in media.media_chunks
+        )
+        context.publisher.publish(bound_transcript, make_current=True)
+    alignments = _run_alignment_stage(
+        context,
+        run_id=run_id,
+        profile=profile,
+        runtime=runtime,
+        media_chunks=media.media_chunks,
+        transcripts=transcripts,
+        aligner_factory=aligner_factory,
+        force_chunks=force_alignment_chunks or set(),
+        explicit_retry=explicit_alignment_retry,
+        forced_operation=forced_alignment_operation,
+    )
+    return _complete_downstream(
+        context,
+        run_id=run_id,
+        profile=profile,
+        runtime=runtime,
+        media=media,
+        effective_glossary=effective_glossary,
+        transcripts=transcripts,
+        alignments=alignments,
+        semantic_issues=semantic_issues,
+        aligner_factory=aligner_factory,
+    )
+
+
+def _run_transcription_stage(
+    context: ProjectContext,
+    *,
+    run_id: str,
+    profile: str,
+    runtime: RuntimeConfig,
+    media_chunks: Sequence[ArtifactEnvelope],
+    effective_glossary: ArtifactEnvelope,
+    semantic_factory: SemanticFactory,
+    force_chunks: set[str],
+) -> tuple[tuple[ArtifactEnvelope, ...], list[dict[str, Any]]]:
+    accepted: dict[str, ArtifactEnvelope] = {}
+    issues: list[dict[str, Any]] = []
+    work: list[ArtifactEnvelope] = []
+    for chunk in media_chunks:
+        chunk_id = str(chunk.payload["chunk_id"])
+        existing = None if chunk_id in force_chunks else _accepted_transcript_for_run(
+            context, run_id, chunk_id
+        )
+        if existing is None:
+            work.append(chunk)
+        else:
+            accepted[chunk_id] = existing
+            issues.extend(
+                _semantic_issues_for_accepted(
+                    context, run_id, chunk_id, existing, effective_glossary
+                )
+            )
+    if work:
+        provider = semantic_factory(profile, runtime)
+        try:
+            for chunk in work:
+                transcript, chunk_issues = _semantic_attempts_for_chunk(
+                    context,
+                    run_id=run_id,
+                    profile=profile,
+                    media_chunk=chunk,
+                    effective_glossary=effective_glossary,
+                    provider=provider,
+                )
+                accepted[str(chunk.payload["chunk_id"])] = transcript
+                issues.extend(chunk_issues)
+        finally:
+            provider.close()
+    return (
+        tuple(accepted[str(chunk.payload["chunk_id"])] for chunk in media_chunks),
+        issues,
+    )
+
+
+def _semantic_attempts_for_chunk(
+    context: ProjectContext,
+    *,
+    run_id: str,
+    profile: str,
+    media_chunk: ArtifactEnvelope,
+    effective_glossary: ArtifactEnvelope,
+    provider: SemanticTranscriber,
+) -> tuple[ArtifactEnvelope, list[dict[str, Any]]]:
+    chunk_id = str(media_chunk.payload["chunk_id"])
+    terms = [str(item) for item in effective_glossary.payload.get("terms", [])]
+    window = context.registry.semantic_budget_window(run_id, chunk_id)
+    attempts = _successful_semantic_attempts(context, run_id, chunk_id, window)
+    attempt_payloads = [item.payload for item in attempts]
     rework_context: str | None = None
-    limit = QaRulesetConfig().semantic_attempt_limit
-    for attempt_number in range(1, limit + 1):
+    if attempt_payloads:
+        decision = evaluate_semantic_attempts(attempt_payloads, terms)
+        if decision.action == "accepted":
+            transcript = attempts[-1]
+            _activate_transcript(context, transcript)
+            return transcript, [
+                _with_attempt_artifacts(item, [attempt.artifact_id for attempt in attempts])
+                for item in decision.issues
+            ]
+        rework_context = decision.rework_context
+    config = QaRulesetConfig()
+    while (
+        context.registry.sent_semantic_attempt_count(run_id, chunk_id, window)
+        < config.semantic_attempt_limit
+    ):
         transcript = _semantic_attempt(
             context,
             run_id=run_id,
             profile=profile,
-            runtime=runtime,
             media_chunk=media_chunk,
             effective_glossary=effective_glossary,
-            glossary_terms=glossary_terms,
-            attempt_number=attempt_number,
+            glossary_terms=terms,
+            budget_window=window,
             rework_context=rework_context,
-            factory=semantic_factory,
+            provider=provider,
         )
-        alignment = _alignment_with_repair(
-            context,
-            run_id=run_id,
-            profile=profile,
-            runtime=runtime,
-            media_chunk=media_chunk,
-            transcript=transcript,
-            semantic_attempt_number=attempt_number,
-            factory=aligner_factory,
-        )
-        context.registry.activate_artifacts(
-            context.project_id,
-            [transcript.artifact_id, alignment.artifact_id],
-            stale_targets=[
-                (kind, "global") for kind in ("subtitle", "qa", "filler_review", "srt_render")
-            ],
-        )
+        attempts.append(transcript)
         attempt_payloads.append(transcript.payload)
-        attempt_artifacts.append(transcript.artifact_id)
-        decision = evaluate_semantic_attempts(attempt_payloads, glossary_terms)
+        decision = evaluate_semantic_attempts(attempt_payloads, terms)
         if decision.action == "accepted":
-            issues = [_with_attempt_artifacts(item, attempt_artifacts) for item in decision.issues]
-            return transcript, alignment, issues
+            _activate_transcript(context, transcript)
+            return transcript, [
+                _with_attempt_artifacts(item, [attempt.artifact_id for attempt in attempts])
+                for item in decision.issues
+            ]
         rework_context = decision.rework_context
-    raise ContractError("semantic attempt loop exceeded its frozen limit")
+    raise ContractError("semantic attempt budget exhausted without an accepted Transcript")
 
 
 def _semantic_attempt(
@@ -377,25 +414,29 @@ def _semantic_attempt(
     *,
     run_id: str,
     profile: str,
-    runtime: RuntimeConfig,
     media_chunk: ArtifactEnvelope,
     effective_glossary: ArtifactEnvelope,
     glossary_terms: Sequence[str],
-    attempt_number: int,
+    budget_window: int,
     rework_context: str | None,
-    factory: SemanticFactory,
+    provider: SemanticTranscriber,
 ) -> ArtifactEnvelope:
-    provider = factory(profile, runtime)
     chunk_id = str(media_chunk.payload["chunk_id"])
+    logical_key = f"semantic:{chunk_id}"
     invocation_id = context.registry.create_invocation(
         run_id=run_id,
         project_id=context.project_id,
         operation="semantic_transcription",
-        logical_operation_key=f"semantic:{chunk_id}",
-        attempt_number=attempt_number,
+        logical_operation_key=logical_key,
+        attempt_number=context.registry.next_invocation_attempt_number(run_id, logical_key),
+        semantic_budget_window=budget_window,
         provider=provider.provider,
         model=provider.model,
         chunk_id=chunk_id,
+        inputs=[
+            ("media_chunk", media_chunk.artifact_id),
+            ("effective_glossary", effective_glossary.artifact_id),
+        ],
     )
     context.registry.set_invocation_status(invocation_id, "sending")
     audio_path = context.store.blob_path(str(media_chunk.payload["audio_blob"]["content_hash"]))
@@ -427,8 +468,6 @@ def _semantic_attempt(
             invocation_id, "explicit_failure", error_message=str(exc)
         )
         raise
-    finally:
-        provider.close()
     context.registry.set_invocation_status(
         invocation_id,
         "succeeded",
@@ -438,7 +477,69 @@ def _semantic_attempt(
     return transcript
 
 
-def _alignment_with_repair(
+def _run_alignment_stage(
+    context: ProjectContext,
+    *,
+    run_id: str,
+    profile: str,
+    runtime: RuntimeConfig,
+    media_chunks: Sequence[ArtifactEnvelope],
+    transcripts: Sequence[ArtifactEnvelope],
+    aligner_factory: AlignerFactory,
+    force_chunks: set[str],
+    explicit_retry: bool,
+    forced_operation: str,
+) -> tuple[ArtifactEnvelope, ...]:
+    if forced_operation not in {"forced_alignment", "qa_alignment_repair"}:
+        raise ContractError("invalid forced alignment operation")
+    transcript_by_chunk = {str(item.payload["chunk_id"]): item for item in transcripts}
+    accepted: dict[str, ArtifactEnvelope] = {}
+    work: list[tuple[ArtifactEnvelope, ArtifactEnvelope]] = []
+    for chunk in media_chunks:
+        chunk_id = str(chunk.payload["chunk_id"])
+        transcript = transcript_by_chunk[chunk_id]
+        existing = None if chunk_id in force_chunks else _successful_alignment_for_run(
+            context, run_id, chunk, transcript
+        )
+        if existing is None:
+            work.append((chunk, transcript))
+        else:
+            accepted[chunk_id] = existing
+    if work:
+        aligner = aligner_factory(runtime)
+        try:
+            for chunk, transcript in work:
+                chunk_id = str(chunk.payload["chunk_id"])
+                repair_limit = (
+                    0
+                    if explicit_retry and chunk_id in force_chunks
+                    else QaRulesetConfig().alignment_structural_repair_limit
+                )
+                accepted[chunk_id] = _alignment_with_structural_repair(
+                    context,
+                    run_id=run_id,
+                    profile=profile,
+                    runtime=runtime,
+                    media_chunk=chunk,
+                    transcript=transcript,
+                    aligner=aligner,
+                    repair_limit=repair_limit,
+                    operation=(
+                        forced_operation if chunk_id in force_chunks else "forced_alignment"
+                    ),
+                )
+        finally:
+            aligner.close()
+    ordered = tuple(accepted[str(chunk.payload["chunk_id"])] for chunk in media_chunks)
+    context.registry.activate_artifacts(
+        context.project_id,
+        [item.artifact_id for item in ordered],
+        stale_targets=[(kind, "global") for kind in ("subtitle", "qa", "srt_render")],
+    )
+    return ordered
+
+
+def _alignment_with_structural_repair(
     context: ProjectContext,
     *,
     run_id: str,
@@ -446,97 +547,363 @@ def _alignment_with_repair(
     runtime: RuntimeConfig,
     media_chunk: ArtifactEnvelope,
     transcript: ArtifactEnvelope,
-    semantic_attempt_number: int,
-    factory: AlignerFactory,
+    aligner: ForcedAligner,
+    repair_limit: int,
+    operation: str,
 ) -> ArtifactEnvelope:
-    attempts = 1 + QaRulesetConfig().structural_repair_limit
-    last: ArtifactEnvelope | None = None
-    for repair_number in range(1, attempts + 1):
-        aligner = factory(runtime)
-        chunk_id = str(media_chunk.payload["chunk_id"])
-        invocation_id = context.registry.create_invocation(
-            run_id=run_id,
-            project_id=context.project_id,
-            operation="forced_alignment",
-            logical_operation_key=f"alignment:{chunk_id}:semantic:{semantic_attempt_number}",
-            attempt_number=repair_number,
-            provider=aligner.provider,
-            model=aligner.model,
-            chunk_id=chunk_id,
-        )
-        context.registry.set_invocation_status(invocation_id, "sending")
-        audio_path = context.store.blob_path(
-            str(media_chunk.payload["audio_blob"]["content_hash"])
-        )
+    last_error = "alignment result remained structurally invalid"
+    for _ in range(1 + repair_limit):
         try:
-            tokens = aligner.align(
-                audio_path,
-                str(transcript.payload["source_text"]),
-                transcript.payload.get("language"),
+            alignment, valid = _alignment_attempt(
+                context,
+                run_id=run_id,
+                profile=profile,
+                runtime=runtime,
+                media_chunk=media_chunk,
+                transcript=transcript,
+                aligner=aligner,
+                operation=operation,
             )
-            payload = build_alignment_payload(
-                media_chunk_artifact_id=media_chunk.artifact_id,
-                media_chunk=media_chunk.payload,
-                transcript_artifact_id=transcript.artifact_id,
-                transcript=transcript.payload,
-                tokens=tokens,
-            )
-            producer = Producer(
-                component="alignment",
-                component_version=COMPONENT_VERSION,
-                processing_profile=profile,
-                provider=aligner.provider,
-                model=aligner.model,
-                config_hash=hash_json(
-                    {
-                        "revision": aligner.revision,
-                        "runtime_device": asdict(runtime.device),
-                    }
-                ),
-            )
-            last = ArtifactEnvelope.create(
-                artifact_kind="alignment",
-                scope_key=chunk_id,
-                producer=producer,
-                inputs=[
-                    InputRef(role="media_chunk", artifact_id=media_chunk.artifact_id),
-                    InputRef(role="transcript", artifact_id=transcript.artifact_id),
-                ],
-                payload=payload,
-            )
-            context.publisher.publish(last, make_current=False)
-        except ProviderUnavailableError as exc:
-            context.registry.set_invocation_status(
-                invocation_id, "definitely_not_sent", error_message=str(exc)
-            )
-            raise
-        except DeliveryAmbiguousError as exc:
-            context.registry.set_invocation_status(
-                invocation_id, "delivery_ambiguous", error_message=str(exc)
-            )
-            raise
-        except (ProviderError, ContractError) as exc:
-            context.registry.set_invocation_status(
-                invocation_id, "explicit_failure", error_message=str(exc)
-            )
-            raise
-        finally:
-            aligner.close()
-        context.registry.set_invocation_status(
-            invocation_id, "succeeded", artifact_id=last.artifact_id
-        )
-        if not find_unaligned_atoms(last.payload):
-            return last
-    if last is None:
-        raise ContractError("Alignment did not produce an Artifact")
-    context.registry.activate_artifacts(
-        context.project_id,
-        [transcript.artifact_id, last.artifact_id],
-        stale_targets=[
-            (kind, "global") for kind in ("subtitle", "qa", "filler_review", "srt_render")
+        except ContractError as exc:
+            last_error = str(exc)
+            continue
+        if valid:
+            return alignment
+        last_error = "real-sound Atoms remained unaligned"
+    raise ExportBlockedError(last_error + " after the allowed structural repair")
+
+
+def _alignment_attempt(
+    context: ProjectContext,
+    *,
+    run_id: str,
+    profile: str,
+    runtime: RuntimeConfig,
+    media_chunk: ArtifactEnvelope,
+    transcript: ArtifactEnvelope,
+    aligner: ForcedAligner,
+    operation: str,
+) -> tuple[ArtifactEnvelope, bool]:
+    chunk_id = str(media_chunk.payload["chunk_id"])
+    logical_key = f"{operation}:{chunk_id}:{transcript.artifact_id}"
+    invocation_id = context.registry.create_invocation(
+        run_id=run_id,
+        project_id=context.project_id,
+        operation=operation,
+        logical_operation_key=logical_key,
+        attempt_number=context.registry.next_invocation_attempt_number(run_id, logical_key),
+        provider=aligner.provider,
+        model=aligner.model,
+        chunk_id=chunk_id,
+        inputs=[
+            ("media_chunk", media_chunk.artifact_id),
+            ("transcript", transcript.artifact_id),
         ],
     )
-    raise ExportBlockedError("real-sound Atoms remained unaligned after one repair pass")
+    context.registry.set_invocation_status(invocation_id, "sending")
+    audio_path = context.store.blob_path(str(media_chunk.payload["audio_blob"]["content_hash"]))
+    try:
+        tokens = aligner.align(
+            audio_path,
+            str(transcript.payload["source_text"]),
+            transcript.payload.get("language"),
+        )
+        payload = build_alignment_payload(
+            media_chunk_artifact_id=media_chunk.artifact_id,
+            media_chunk=media_chunk.payload,
+            transcript_artifact_id=transcript.artifact_id,
+            transcript=transcript.payload,
+            tokens=tokens,
+        )
+        producer = Producer(
+            component="alignment",
+            component_version=COMPONENT_VERSION,
+            processing_profile=profile,
+            provider=aligner.provider,
+            model=aligner.model,
+            config_hash=hash_json(
+                {"revision": aligner.revision, "runtime_device": asdict(runtime.device)}
+            ),
+        )
+        alignment = ArtifactEnvelope.create(
+            artifact_kind="alignment",
+            scope_key=chunk_id,
+            producer=producer,
+            inputs=[
+                InputRef(role="media_chunk", artifact_id=media_chunk.artifact_id),
+                InputRef(role="transcript", artifact_id=transcript.artifact_id),
+            ],
+            payload=payload,
+        )
+        context.publisher.publish(alignment, make_current=False)
+    except ProviderUnavailableError as exc:
+        context.registry.set_invocation_status(
+            invocation_id, "definitely_not_sent", error_message=str(exc)
+        )
+        raise
+    except DeliveryAmbiguousError as exc:
+        context.registry.set_invocation_status(
+            invocation_id, "delivery_ambiguous", error_message=str(exc)
+        )
+        raise
+    except (ProviderError, ContractError) as exc:
+        context.registry.set_invocation_status(
+            invocation_id, "explicit_failure", error_message=str(exc)
+        )
+        raise
+    unaligned = find_unaligned_atoms(alignment.payload)
+    if unaligned:
+        context.registry.set_invocation_status(
+            invocation_id,
+            "explicit_failure",
+            artifact_id=alignment.artifact_id,
+            error_message=f"unaligned real-sound atoms: {unaligned}",
+        )
+        return alignment, False
+    context.registry.set_invocation_status(
+        invocation_id, "succeeded", artifact_id=alignment.artifact_id
+    )
+    return alignment, True
+
+
+def _complete_downstream(
+    context: ProjectContext,
+    *,
+    run_id: str,
+    profile: str,
+    runtime: RuntimeConfig,
+    media: MediaBundle,
+    effective_glossary: ArtifactEnvelope,
+    transcripts: Sequence[ArtifactEnvelope],
+    alignments: Sequence[ArtifactEnvelope],
+    semantic_issues: Sequence[Mapping[str, Any]],
+    aligner_factory: AlignerFactory,
+) -> dict[str, Any]:
+    terms = [str(item) for item in effective_glossary.payload.get("terms", [])]
+    subtitle, segment_warnings = _publish_subtitle(
+        context, profile, media, effective_glossary, transcripts, alignments, terms
+    )
+    structural = _structural_issues(context, media, transcripts, alignments, subtitle)
+    issues = [
+        *semantic_issues,
+        *segment_warnings,
+        *possible_chunk_boundary_duplication(transcripts),
+        *structural,
+    ]
+    qa = _publish_qa(
+        context,
+        profile,
+        media,
+        effective_glossary,
+        subtitle,
+        transcripts,
+        alignments,
+        issues,
+    )
+    if qa.payload["result"] == "blocked":
+        workset = alignment_repair_workset(structural)
+        if workset:
+            if (
+                context.registry.qa_repair_wave_count(run_id)
+                >= QaRulesetConfig().qa_alignment_repair_wave_limit
+            ):
+                raise ExportBlockedError("QA Alignment Repair Wave limit exhausted")
+            alignments = _qa_alignment_repair_wave(
+                context,
+                run_id=run_id,
+                profile=profile,
+                runtime=runtime,
+                media_chunks=media.media_chunks,
+                transcripts=transcripts,
+                alignments=alignments,
+                workset=workset,
+                aligner_factory=aligner_factory,
+            )
+        subtitle, segment_warnings = _publish_subtitle(
+            context, profile, media, effective_glossary, transcripts, alignments, terms
+        )
+        structural = _structural_issues(context, media, transcripts, alignments, subtitle)
+        issues = [
+            *semantic_issues,
+            *segment_warnings,
+            *possible_chunk_boundary_duplication(transcripts),
+            *structural,
+        ]
+        qa = _publish_qa(
+            context,
+            profile,
+            media,
+            effective_glossary,
+            subtitle,
+            transcripts,
+            alignments,
+            issues,
+        )
+    if qa.payload["result"] == "blocked":
+        raise ExportBlockedError("structural QA remained blocked after the allowed repair")
+    render, output_path = publish_srt(
+        context,
+        chunk_plan=media.chunk_plan,
+        transcripts=transcripts,
+        alignments=alignments,
+        subtitle=subtitle,
+        qa=qa,
+    )
+    context.registry.set_run_status(run_id, "succeeded")
+    source_id = next(
+        item.source_asset_id for item in media.probe.inputs if item.role == "source_media"
+    )
+    warnings = [item for item in qa.payload["issues"] if item["severity"] == "warning"]
+    if media.probe.payload["timeline_status"] == "unverified":
+        warnings.append({"code": "timeline_status_unverified"})
+    return {
+        "run_id": run_id,
+        "status": "succeeded",
+        "source_asset_id": source_id,
+        "srt_render_artifact_id": render.artifact_id,
+        "output": str(output_path.resolve()),
+        "warnings": warnings,
+    }
+
+
+def _qa_alignment_repair_wave(
+    context: ProjectContext,
+    *,
+    run_id: str,
+    profile: str,
+    runtime: RuntimeConfig,
+    media_chunks: Sequence[ArtifactEnvelope],
+    transcripts: Sequence[ArtifactEnvelope],
+    alignments: Sequence[ArtifactEnvelope],
+    workset: Sequence[str],
+    aligner_factory: AlignerFactory,
+) -> tuple[ArtifactEnvelope, ...]:
+    chunk_by_id = {str(item.payload["chunk_id"]): item for item in media_chunks}
+    transcript_by_id = {str(item.payload["chunk_id"]): item for item in transcripts}
+    alignment_by_id = {str(item.payload["chunk_id"]): item for item in alignments}
+    aligner = aligner_factory(runtime)
+    replacements: list[ArtifactEnvelope] = []
+    try:
+        for chunk_id in workset:
+            alignment = _alignment_with_structural_repair(
+                context,
+                run_id=run_id,
+                profile=profile,
+                runtime=runtime,
+                media_chunk=chunk_by_id[chunk_id],
+                transcript=transcript_by_id[chunk_id],
+                aligner=aligner,
+                repair_limit=0,
+                operation="qa_alignment_repair",
+            )
+            alignment_by_id[chunk_id] = alignment
+            replacements.append(alignment)
+    finally:
+        aligner.close()
+    context.registry.activate_artifacts(
+        context.project_id,
+        [item.artifact_id for item in replacements],
+        stale_targets=[(kind, "global") for kind in ("subtitle", "qa", "srt_render")],
+    )
+    return tuple(alignment_by_id[str(chunk.payload["chunk_id"])] for chunk in media_chunks)
+
+
+def _structural_issues(
+    context: ProjectContext,
+    media: MediaBundle,
+    transcripts: Sequence[ArtifactEnvelope],
+    alignments: Sequence[ArtifactEnvelope],
+    subtitle: ArtifactEnvelope,
+) -> list[dict[str, Any]]:
+    return structural_issues(
+        media.media_chunks,
+        transcripts,
+        alignments,
+        subtitle,
+        duration_ms=int(media.chunk_plan.payload["duration_ms"]),
+        registry=context.registry,
+        project_id=context.project_id,
+    )
+
+
+def _publish_subtitle(
+    context: ProjectContext,
+    profile: str,
+    media: MediaBundle,
+    effective_glossary: ArtifactEnvelope,
+    transcripts: Sequence[ArtifactEnvelope],
+    alignments: Sequence[ArtifactEnvelope],
+    terms: Sequence[str],
+) -> tuple[ArtifactEnvelope, list[dict[str, Any]]]:
+    payload, warnings = segment_subtitles(
+        transcripts,
+        alignments,
+        terms,
+        duration_ms=int(media.chunk_plan.payload["duration_ms"]),
+    )
+    envelope = ArtifactEnvelope.create(
+        artifact_kind="subtitle",
+        scope_key="global",
+        producer=Producer(
+            component="segmenter",
+            component_version=COMPONENT_VERSION,
+            processing_profile=profile,
+            provider=None,
+            model=None,
+            config_hash=hash_json(asdict(SegmenterConfig())),
+        ),
+        inputs=[
+            *[InputRef(role="transcript", artifact_id=item.artifact_id) for item in transcripts],
+            *[InputRef(role="alignment", artifact_id=item.artifact_id) for item in alignments],
+            InputRef(role="effective_glossary", artifact_id=effective_glossary.artifact_id),
+        ],
+        payload=payload,
+    )
+    context.publisher.publish(
+        envelope, stale_targets=[("qa", "global"), ("srt_render", "global")]
+    )
+    return envelope, warnings
+
+
+def _publish_qa(
+    context: ProjectContext,
+    profile: str,
+    media: MediaBundle,
+    effective_glossary: ArtifactEnvelope,
+    subtitle: ArtifactEnvelope,
+    transcripts: Sequence[ArtifactEnvelope],
+    alignments: Sequence[ArtifactEnvelope],
+    issues: Sequence[Mapping[str, Any]],
+) -> ArtifactEnvelope:
+    subjects = [
+        media.chunk_plan.artifact_id,
+        subtitle.artifact_id,
+        effective_glossary.artifact_id,
+        *[item.artifact_id for item in transcripts],
+        *[item.artifact_id for item in alignments],
+    ]
+    envelope = ArtifactEnvelope.create(
+        artifact_kind="qa",
+        scope_key="global",
+        producer=Producer(
+            component="qa",
+            component_version=COMPONENT_VERSION,
+            processing_profile=profile,
+            provider=None,
+            model=None,
+            config_hash=hash_json(asdict(QaRulesetConfig())),
+        ),
+        inputs=[
+            InputRef(role="chunk_plan", artifact_id=media.chunk_plan.artifact_id),
+            InputRef(role="subtitle", artifact_id=subtitle.artifact_id),
+            InputRef(role="effective_glossary", artifact_id=effective_glossary.artifact_id),
+            *[InputRef(role="transcript", artifact_id=item.artifact_id) for item in transcripts],
+            *[InputRef(role="alignment", artifact_id=item.artifact_id) for item in alignments],
+        ],
+        payload=qa_payload(subjects, issues),
+    )
+    context.publisher.publish(envelope, stale_targets=[("srt_render", "global")])
+    return envelope
 
 
 def _transcript_envelope(
@@ -559,25 +926,24 @@ def _transcript_envelope(
         provider_uncertain_spans=result.provider_uncertain_spans,
     )
     payload["provider_model_revision"] = provider.revision
-    producer = Producer(
-        component="semantic_transcriber",
-        component_version=COMPONENT_VERSION,
-        processing_profile=profile,
-        provider=provider.provider,
-        model=provider.model,
-        config_hash=hash_json(
-            {
-                "revision": provider.revision,
-                "effective_glossary_artifact_id": effective_glossary.artifact_id,
-                "rework_context": rework_context,
-                "verbatim_transcription": True,
-            }
-        ),
-    )
     return ArtifactEnvelope.create(
         artifact_kind="transcript",
         scope_key=str(media_chunk.payload["chunk_id"]),
-        producer=producer,
+        producer=Producer(
+            component="semantic_transcriber",
+            component_version=COMPONENT_VERSION,
+            processing_profile=profile,
+            provider=provider.provider,
+            model=provider.model,
+            config_hash=hash_json(
+                {
+                    "revision": provider.revision,
+                    "effective_glossary_artifact_id": effective_glossary.artifact_id,
+                    "rework_context": rework_context,
+                    "verbatim_transcription": True,
+                }
+            ),
+        ),
         inputs=[
             InputRef(role="media_chunk", artifact_id=media_chunk.artifact_id),
             InputRef(role="effective_glossary", artifact_id=effective_glossary.artifact_id),
@@ -586,197 +952,164 @@ def _transcript_envelope(
     )
 
 
-def _publish_subtitle(
-    context: ProjectContext,
-    profile: str,
-    media: MediaBundle,
-    effective_glossary: ArtifactEnvelope,
-    transcripts: Sequence[ArtifactEnvelope],
-    alignments: Sequence[ArtifactEnvelope],
-    terms: Sequence[str],
-) -> tuple[ArtifactEnvelope, list[dict[str, Any]]]:
-    payload, warnings = segment_subtitles(
-        transcripts,
-        alignments,
-        terms,
-        duration_ms=int(media.chunk_plan.payload["duration_ms"]),
-    )
-    producer = Producer(
-        component="segmenter",
-        component_version=COMPONENT_VERSION,
-        processing_profile=profile,
-        provider=None,
-        model=None,
-        config_hash=hash_json(asdict(SegmenterConfig())),
-    )
-    inputs = [
-        *[InputRef(role="transcript", artifact_id=item.artifact_id) for item in transcripts],
-        *[InputRef(role="alignment", artifact_id=item.artifact_id) for item in alignments],
-        InputRef(role="effective_glossary", artifact_id=effective_glossary.artifact_id),
+def _accepted_transcript_for_run(
+    context: ProjectContext, run_id: str, chunk_id: str
+) -> ArtifactEnvelope | None:
+    pointer = context.registry.current_pointer(context.project_id, "transcript", chunk_id)
+    if pointer is None or bool(pointer["is_stale"]):
+        return None
+    artifact_id = str(pointer["artifact_id"])
+    if not any(
+        row["operation"] == "semantic_transcription"
+        and row["chunk_id"] == chunk_id
+        and row["status"] == "succeeded"
+        and row["artifact_id"] == artifact_id
+        for row in context.registry.invocations_for_run(run_id)
+    ):
+        return None
+    return context.artifact(artifact_id)
+
+
+def _successful_semantic_attempts(
+    context: ProjectContext, run_id: str, chunk_id: str, budget_window: int
+) -> list[ArtifactEnvelope]:
+    return [
+        context.artifact(str(row["artifact_id"]))
+        for row in context.registry.invocations_for_run(run_id)
+        if row["operation"] == "semantic_transcription"
+        and row["chunk_id"] == chunk_id
+        and row["semantic_budget_window"] == budget_window
+        and row["status"] == "succeeded"
+        and row["artifact_id"] is not None
     ]
-    envelope = ArtifactEnvelope.create(
-        artifact_kind="subtitle",
-        scope_key="global",
-        producer=producer,
-        inputs=inputs,
-        payload=payload,
-    )
-    context.publisher.publish(
-        envelope,
-        stale_targets=[("qa", "global"), ("filler_review", "global"), ("srt_render", "global")],
-    )
-    return envelope, warnings
 
 
-def _publish_qa(
+def _semantic_issues_for_accepted(
     context: ProjectContext,
-    profile: str,
-    media: MediaBundle,
-    effective_glossary: ArtifactEnvelope,
-    subtitle: ArtifactEnvelope,
-    transcripts: Sequence[ArtifactEnvelope],
-    alignments: Sequence[ArtifactEnvelope],
-    issues: Sequence[Mapping[str, Any]],
-) -> ArtifactEnvelope:
-    subjects = [
-        media.chunk_plan.artifact_id,
-        subtitle.artifact_id,
-        effective_glossary.artifact_id,
-        *[item.artifact_id for item in transcripts],
-        *[item.artifact_id for item in alignments],
-    ]
-    payload = qa_payload(subjects, issues)
-    producer = Producer(
-        component="qa",
-        component_version=COMPONENT_VERSION,
-        processing_profile=profile,
-        provider=None,
-        model=None,
-        config_hash=hash_json(asdict(QaRulesetConfig())),
-    )
-    envelope = ArtifactEnvelope.create(
-        artifact_kind="qa",
-        scope_key="global",
-        producer=producer,
-        inputs=[
-            InputRef(role="chunk_plan", artifact_id=media.chunk_plan.artifact_id),
-            InputRef(role="subtitle", artifact_id=subtitle.artifact_id),
-            InputRef(
-                role="effective_glossary", artifact_id=effective_glossary.artifact_id
-            ),
-            *[InputRef(role="transcript", artifact_id=item.artifact_id) for item in transcripts],
-            *[InputRef(role="alignment", artifact_id=item.artifact_id) for item in alignments],
-        ],
-        payload=payload,
-    )
-    context.publisher.publish(
-        envelope,
-        stale_targets=[("filler_review", "global"), ("srt_render", "global")],
-    )
-    return envelope
-
-
-def _publish_filler_review(
-    context: ProjectContext,
-    *,
     run_id: str,
-    profile: str,
-    subtitle: ArtifactEnvelope,
-    qa: ArtifactEnvelope,
-    transcripts: Sequence[ArtifactEnvelope],
-    alignments: Sequence[ArtifactEnvelope],
-    duration_ms: int,
-) -> ArtifactEnvelope:
-    response_id: str | None = None
-    invocation_id: str | None = None
-    if profile == "LOCAL_PROFILE":
-        payload = local_filler_review_payload(
-            subtitle.artifact_id, subtitle.payload, duration_ms=duration_ms
-        )
-        provider = None
-        model = None
-    else:
-        provider = "dashscope-openai-compatible"
-        model = PROFILES[profile].semantic_model
-        invocation_id = context.registry.create_invocation(
-            run_id=run_id,
-            project_id=context.project_id,
-            operation="filler_review",
-            logical_operation_key=f"filler:{subtitle.artifact_id}",
-            attempt_number=1,
-            provider=provider,
-            model=model,
-        )
-        context.registry.set_invocation_status(invocation_id, "sending")
-        try:
-            payload, response_id = cloud_filler_review_payload(
-                subtitle.artifact_id, subtitle.payload, duration_ms=duration_ms
-            )
-        except ProviderUnavailableError as exc:
-            context.registry.set_invocation_status(
-                invocation_id, "definitely_not_sent", error_message=str(exc)
-            )
-            payload = unavailable_cloud_filler_payload(
-                subtitle.artifact_id,
-                subtitle.payload,
-                duration_ms=duration_ms,
-                reason="definitely_not_sent",
-            )
-        except DeliveryAmbiguousError as exc:
-            context.registry.set_invocation_status(
-                invocation_id, "delivery_ambiguous", error_message=str(exc)
-            )
-            payload = unavailable_cloud_filler_payload(
-                subtitle.artifact_id,
-                subtitle.payload,
-                duration_ms=duration_ms,
-                reason="delivery_ambiguous",
-            )
-        except (ProviderError, ContractError) as exc:
-            context.registry.set_invocation_status(
-                invocation_id, "explicit_failure", error_message=str(exc)
-            )
-            payload = unavailable_cloud_filler_payload(
-                subtitle.artifact_id,
-                subtitle.payload,
-                duration_ms=duration_ms,
-                reason="invalid_or_explicit_failure",
-            )
-    producer = Producer(
-        component="filler_review",
-        component_version=COMPONENT_VERSION,
-        processing_profile=profile,
-        provider=provider,
-        model=model,
-        config_hash=hash_json(asdict(FillerReviewConfig())),
+    chunk_id: str,
+    accepted: ArtifactEnvelope,
+    effective_glossary: ArtifactEnvelope,
+) -> list[dict[str, Any]]:
+    matching = next(
+        row
+        for row in context.registry.invocations_for_run(run_id)
+        if row["operation"] == "semantic_transcription"
+        and row["artifact_id"] == accepted.artifact_id
+        and row["status"] == "succeeded"
     )
-    envelope = ArtifactEnvelope.create(
-        artifact_kind="filler_review",
-        scope_key="global",
-        producer=producer,
-        inputs=[
-            InputRef(role="subtitle", artifact_id=subtitle.artifact_id),
-            InputRef(role="qa", artifact_id=qa.artifact_id),
-            *[
-                InputRef(role="transcript", artifact_id=item.artifact_id)
-                for item in transcripts
-            ],
-            *[
-                InputRef(role="alignment", artifact_id=item.artifact_id)
-                for item in alignments
-            ],
+    attempts = _successful_semantic_attempts(
+        context, run_id, chunk_id, int(matching["semantic_budget_window"])
+    )
+    accepted_index = next(
+        index for index, item in enumerate(attempts) if item.artifact_id == accepted.artifact_id
+    )
+    attempts = attempts[: accepted_index + 1]
+    decision = evaluate_semantic_attempts(
+        [item.payload for item in attempts],
+        [str(item) for item in effective_glossary.payload.get("terms", [])],
+    )
+    return [
+        _with_attempt_artifacts(issue, [item.artifact_id for item in attempts])
+        for issue in decision.issues
+    ]
+
+
+def _successful_alignment_for_run(
+    context: ProjectContext,
+    run_id: str,
+    media_chunk: ArtifactEnvelope,
+    transcript: ArtifactEnvelope,
+) -> ArtifactEnvelope | None:
+    expected = [
+        ("media_chunk", media_chunk.artifact_id),
+        ("transcript", transcript.artifact_id),
+    ]
+    for row in reversed(context.registry.invocations_for_run(run_id)):
+        if (
+            row["operation"] not in {"forced_alignment", "qa_alignment_repair"}
+            or row["chunk_id"] != media_chunk.scope_key
+            or row["status"] != "succeeded"
+            or row["artifact_id"] is None
+        ):
+            continue
+        if _bound_inputs(context, str(row["invocation_id"])) != expected:
+            continue
+        alignment = context.artifact(str(row["artifact_id"]))
+        if not find_unaligned_atoms(alignment.payload):
+            return alignment
+    return None
+
+
+def _activate_transcript(context: ProjectContext, transcript: ArtifactEnvelope) -> None:
+    context.registry.activate_artifacts(
+        context.project_id,
+        [transcript.artifact_id],
+        stale_targets=[
+            ("alignment", transcript.scope_key),
+            ("subtitle", "global"),
+            ("qa", "global"),
+            ("srt_render", "global"),
         ],
-        payload=payload,
     )
-    context.publisher.publish(envelope, stale_targets=[("srt_render", "global")])
-    if invocation_id is not None and payload["status"] == "completed":
-        context.registry.set_invocation_status(
-            invocation_id,
-            "succeeded",
-            response_id=response_id,
-            artifact_id=envelope.artifact_id,
+
+
+def _bound_inputs(context: ProjectContext, invocation_id: str) -> list[tuple[str, str]]:
+    rows = context.registry.invocation_inputs(invocation_id)
+    if not rows:
+        raise ContractError("Invocation has no bound upstream Artifacts")
+    return [(str(row["role"]), str(row["input_artifact_id"])) for row in rows]
+
+
+def _retry_graph(
+    context: ProjectContext, bound_inputs: Sequence[tuple[str, str]]
+) -> tuple[MediaBundle, ArtifactEnvelope, ArtifactEnvelope | None]:
+    by_role = {role: artifact_id for role, artifact_id in bound_inputs}
+    media_chunk_id = by_role.get("media_chunk")
+    if media_chunk_id is None:
+        raise ContractError("retry Invocation is missing its media_chunk input")
+    target_chunk = context.artifact(media_chunk_id)
+    chunk_plan_id = next(
+        (item.artifact_id for item in target_chunk.inputs if item.role == "chunk_plan"), None
+    )
+    if chunk_plan_id is None:
+        raise ContractError("retry MediaChunk is missing its ChunkPlan dependency")
+    chunk_plan = context.artifact(chunk_plan_id)
+    timeline_id = next(
+        (item.artifact_id for item in chunk_plan.inputs if item.role == "timeline_audio"), None
+    )
+    if timeline_id is None:
+        raise ContractError("retry ChunkPlan is missing its TimelineAudio dependency")
+    timeline = context.artifact(timeline_id)
+    probe_id = next(
+        (item.artifact_id for item in timeline.inputs if item.role == "media_probe"), None
+    )
+    if probe_id is None:
+        raise ContractError("retry TimelineAudio is missing its MediaProbe dependency")
+    probe = context.artifact(probe_id)
+    chunk_rows = context.registry.dependent_artifacts(
+        context.project_id, chunk_plan.artifact_id, "media_chunk"
+    )
+    chunks = tuple(
+        sorted(
+            (context.artifact(str(row["artifact_id"])) for row in chunk_rows),
+            key=lambda item: int(item.payload["ordinal"]),
         )
-    return envelope
+    )
+    expected_chunk_ids = [str(item["chunk_id"]) for item in chunk_plan.payload["chunks"]]
+    if [str(item.payload["chunk_id"]) for item in chunks] != expected_chunk_ids:
+        raise ContractError("retry media graph does not exactly cover its ChunkPlan")
+    transcript = context.artifact(by_role["transcript"]) if "transcript" in by_role else None
+    glossary_id = by_role.get("effective_glossary")
+    if glossary_id is None and transcript is not None:
+        glossary_id = next(
+            (item.artifact_id for item in transcript.inputs if item.role == "effective_glossary"),
+            None,
+        )
+    if glossary_id is None:
+        raise ContractError("retry graph is missing its EffectiveGlossary dependency")
+    effective = context.artifact(glossary_id)
+    return MediaBundle(probe, timeline, chunk_plan, chunks), effective, transcript
 
 
 def _publish_glossaries(
@@ -829,6 +1162,10 @@ def _default_semantic_factory(profile: str, runtime: RuntimeConfig) -> SemanticT
     if profile == "LOCAL_PROFILE":
         return LocalQwenSemanticTranscriber(runtime)
     return CloudOmniSemanticTranscriber()
+
+
+def _default_aligner_factory(runtime: RuntimeConfig) -> ForcedAligner:
+    return LocalQwenForcedAligner(runtime)
 
 
 def _with_attempt_artifacts(
