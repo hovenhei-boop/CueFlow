@@ -7,7 +7,7 @@ from importlib import import_module
 from typing import Any
 
 SCHEMA_VERSION = "1.0.0"
-COMPONENT_VERSION = "0.1.0"
+COMPONENT_VERSION = "0.1.1"
 ATOMIZER_VERSION = "0.1.0"
 GLOSSARY_NORMALIZATION_VERSION = "0.1.0"
 SEMANTIC_RETRY_RESET_LIMIT = 2
@@ -77,7 +77,7 @@ class SegmenterConfig:
 
 @dataclass(frozen=True)
 class QaRulesetConfig:
-    version: str = "0.1.0"
+    version: str = "0.1.1"
     semantic_attempt_limit: int = 4
     alignment_structural_repair_limit: int = 1
     qa_alignment_repair_wave_limit: int = 1

@@ -1,4 +1,4 @@
-# CueFlow v0.1 Schema Contracts
+# CueFlow v0.1.1 Schema Contracts
 
 状态：冻结基线
 
@@ -10,7 +10,7 @@ Artifact Envelope 包含 `schema_version`、`artifact_id`、kind、scope、conte
 
 ## 2. SourceAsset
 
-SourceAsset 必须包含 `source_asset_id`、asset/media kind、format、完整 SHA-256、byte length、`storage_mode = external_reference`、绝对 storage locator 和 registration time。登记时读取完整文件；Media Prep 前路径必须存在且完整身份相同。
+SourceAsset 必须包含 `source_asset_id`、精确 filename、asset/media kind、format、`storage_mode = external_reference`、绝对 storage locator 和 registration time。`(project_id, filename)` 唯一，Source identity 只取 filename；Source 不包含内容 hash 或 byte length。Media Prep 前 locator 必须存在、是普通文件且可读取，但不比较外部内容。
 
 ## 3. 时间与 MediaProbe
 
@@ -72,7 +72,7 @@ Subtitle payload 保存 Segmenter Config hash、精确 Transcript/Alignment ID a
 
 ## 8. QA 与 SRT
 
-QA payload 保存 `subject_artifact_ids`、`qa_ruleset_version = 0.1.0`、`result = passed | warnings | blocked` 与 issues。每个 issue 有唯一 ID、severity、code、resolution status、locations 和 evidence。
+QA payload 保存 `subject_artifact_ids`、`qa_ruleset_version = 0.1.1`、`result = passed | warnings | blocked` 与 issues。每个 issue 有唯一 ID、severity、code、resolution status、locations 和 evidence。
 
 SrtRender payload 保存精确 Subtitle/QA IDs、UTF-8、byte length 和 text，只依赖 current Subtitle 与非 blocked QA。SRT 不删除任何可发音 Atom。
 
@@ -80,8 +80,10 @@ SrtRender payload 保存精确 Subtitle/QA IDs、UTF-8、byte length 和 text，
 
 SQLite 至少包含 Project、SourceAsset、Artifact、ArtifactDependency、CurrentPointer、Run、Invocation、InvocationInput 和 SemanticBudgetReset。
 
+Registry 使用明确的 SQLite `user_version = 1` 表示 v0.1.1 schema。全新空数据库可初始化；已有表但没有受支持版本号、或声明版本与实际必要表/SourceAsset columns 不一致时必须拒绝，不迁移、不补表。
+
 InvocationInput 主键为 `(invocation_id, ordinal)`，每行保存 role 与精确 `input_artifact_id`。Targeted retry 只能读取这些绑定。
 
-SemanticBudgetReset 主键包含 Run、Chunk 与 window index；window index 固定只允许 1 或 2，并绑定触发 reset 的失败 Invocation。两次上限是 v0.1 数据模型常量，不属于 versioned runtime config；唯一约束保证同一 Run/Chunk 最多两次。
+SemanticBudgetReset 主键包含 Run、Chunk 与 window index；window index 固定只允许 1 或 2，并绑定触发 reset 的失败 Invocation。两次上限是 v0.1.1 数据模型常量，不属于 versioned runtime config；唯一约束保证同一 Run/Chunk 最多两次。
 
-Artifact 文件必须先落盘，再在同一 SQLite 写事务中登记 Artifact/dependency 与切换 pointer。Invocation、reset 和 Run reopen 必须可审计且持久化。
+Artifact 文件必须按 temp → fsync → atomic replace → read-back validation 顺序完成落盘，再在同一 SQLite 写事务中登记 Artifact/dependency 与切换 pointer。Invocation、reset、crash recovery 和 Run reopen 必须可审计且持久化。

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cueflow"
-version = "0.1.0"
+version = "0.1.1"
 description = "Content-addressed subtitle generation and QA engine"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -35,6 +35,9 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+cueflow = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --basetemp=.tmp"
@@ -49,4 +52,4 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.mypy]
 python_version = "3.10"
 strict = true
-packages = ["cueflow"]
+files = ["src/cueflow"]

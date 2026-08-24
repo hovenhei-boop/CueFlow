@@ -1,16 +1,16 @@
-# CueFlow v0.1 Domain Model
+# CueFlow v0.1.1 Domain Model
 
 状态：冻结基线
 
 ## 1. Project 与 SourceAsset
 
-Project 保存 `project_id`、显示名、创建时间和固定 `processing_profile`。v0.1 假设同一项目同一时间只有一个活动 Orchestrator。
+Project 保存 `project_id`、显示名、创建时间和固定 `processing_profile`。v0.1.1 假设同一项目同一时间只有一个活动 Orchestrator。
 
-SourceAsset 表示外部输入身份，包括原文件完整 SHA-256、byte length、format、`storage_mode = external_reference`、绝对路径和登记时间。路径不是内容身份。CueFlow 不复制、移动或删除外部媒体；Media Prep 时路径缺失产生 `SourceMissingError`，内容变化产生完整性错误。已提交的下游 Artifact 可供同一 Run 的 targeted retry 使用，无需重新访问外部源。
+SourceAsset 是可变的外部文件引用，identity 只取 `Path.name` 精确字符串；保存 filename、format、`storage_mode = external_reference`、绝对 locator 和登记时间，不保存内容 SHA-256 或 byte length。CueFlow 不复制、移动、删除或搜索外部媒体；Media Prep 时 locator 缺失、不是普通文件或不可读取产生 `SourceMissingError`。用户可在原 locator 覆盖同名文件后创建新 Run。v0.1.1 不提供 relink。已提交的下游 Artifact 仍不可变，同一 Run 的 targeted retry 只读取原 Invocation 绑定的项目内 Artifact，无需重新访问外部 Source。
 
 ## 2. Artifact 基础模型
 
-v0.1 Artifact kinds：`media_probe`、`timeline_audio`、`chunk_plan`、`media_chunk`、三类 Glossary、`transcript`、`alignment`、`subtitle`、`qa`、`srt_render`。
+v0.1.1 Artifact kinds：`media_probe`、`timeline_audio`、`chunk_plan`、`media_chunk`、三类 Glossary、`transcript`、`alignment`、`subtitle`、`qa`、`srt_render`。
 
 Artifact 是不可变、内容寻址的 Envelope。身份覆盖 kind、scope、Schema semantic version、Producer identity、按顺序排列的 exact inputs 和 payload；不覆盖创建时间与存储路径。`scope_key` 对 `media_chunk`、`transcript`、`alignment` 使用 `chunk_id`，其余 Artifact 使用 `global`。
 
@@ -57,7 +57,7 @@ System 与 Project Glossary 经 NFC、trim、精确字符串去重和确定性�
 
 每个 Invocation 持久化 `semantic_budget_window`。进入 sending 的 Attempt 消耗当前 window slot；`definitely_not_sent` 不消耗。Budget reset 作为持久化、可审计记录保存，不能由自动流程触发。
 
-最终 accepted Transcript 是稳定性规则结束时的实际 Semantic 结果。Glossary 永不直接替换文字。
+每个返工 Attempt 都完整扫描当前 Chunk 文本，下一轮以当前实际 conflict 为准；达到 4 次上限后仍存在或无法稳定的 conflict 按现有 warning 语义报告。最终 accepted Transcript 是稳定性规则结束时的实际 Semantic 结果。Glossary 永不直接替换文字，QA 不额外扫描整篇 Transcript。
 
 ## 5. Alignment 与 Subtitle
 
@@ -78,6 +78,8 @@ QA 不能修改 Transcript。一个 Run 最多执行一个 QA Alignment Repair W
 Run 保存 input identity、完整 config hash、状态和错误。`run` 始终创建新 Run。显式 retry 可以把原 `failed`/`interrupted` Run reopen 为 `running`。
 
 Invocation 保存 run/chunk、operation、logical key、attempt number、Semantic budget window、provider/model、status、response/output/error，以及 ordered exact input Artifact bindings。状态至少包含 `created`、`sending`、`succeeded`、`definitely_not_sent`、`delivery_ambiguous`、`explicit_failure`。
+
+开始 `run` 或 `retry` 时，单 Orchestrator recovery 将遗留 `created` 转为 `definitely_not_sent`、`sending` 转为 `delivery_ambiguous`，并把对应 Run 转为 `interrupted`。当前 Ctrl+C 产生 `interrupted`，其他未预期异常产生 `failed`；Run 与 in-flight Invocation 原子收口。普通打开和管理命令不执行 recovery。
 
 SemanticBudgetReset 只由显式 targeted retry 创建，绑定原 Run、Chunk、触发 Invocation和新 window index。每个 Run/Chunk 最多两行。它不是通用 retry/cache 抽象。
 

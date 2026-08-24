@@ -524,6 +524,10 @@ def test_new_run_reexecutes_semantic_and_alignment(tmp_path: Path) -> None:
             semantic_factory=semantic_factory,
             aligner_factory=aligner_factory,
         )
+        first_timeline_hash = str(
+            context.current_artifact("timeline_audio").payload["audio_blob"]["content_hash"]
+        )
+        _silent_wave(source, 3)
         second = run_project(
             context,
             source,
@@ -532,6 +536,20 @@ def test_new_run_reexecutes_semantic_and_alignment(tmp_path: Path) -> None:
             aligner_factory=aligner_factory,
         )
         assert first["run_id"] != second["run_id"]
+        assert first["source_asset_id"] == second["source_asset_id"]
+        assert (
+            context.current_artifact("timeline_audio").payload["audio_blob"]["content_hash"]
+            != first_timeline_hash
+        )
+        source_row = context.registry.source_asset(
+            context.project_id, str(second["source_asset_id"])
+        )
+        assert source_row["filename"] == source.name
+        assert "content_hash" not in source_row.keys()
+        assert "byte_length" not in source_row.keys()
+        second_run = context.registry.run(str(second["run_id"]))
+        assert "content_hash" not in str(second_run["input_identity_json"])
+        assert "storage_locator" not in str(second_run["input_identity_json"])
         assert len(providers) == 2 and [item.calls for item in providers] == [1, 1]
         assert len(aligners) == 2 and [item.calls for item in aligners] == [1, 1]
         assert len(_operation_rows(context, str(first["run_id"]), "semantic_transcription")) == 1

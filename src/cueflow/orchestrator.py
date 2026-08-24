@@ -102,25 +102,25 @@ def run_project(
     semantic_factory: SemanticFactory | None = None,
     aligner_factory: AlignerFactory | None = None,
 ) -> dict[str, Any]:
+    context.registry.recover_running_runs()
     chosen_runtime = runtime or RuntimeConfig.detect()
     profile = str(context.registry.project()["processing_profile"])
     source_asset = context.register_external_asset(media_path, asset_kind="media")
-    probe = probe_source(media_path, chosen_runtime)
-    context.registry.set_source_media_kind(
-        context.project_id, str(source_asset["source_asset_id"]), probe.media_kind
-    )
-    context.verify_external_asset(str(source_asset["source_asset_id"]))
     run_id = context.registry.create_run(
         context.project_id,
         {
             "source_asset_id": source_asset["source_asset_id"],
-            "content_hash": source_asset["content_hash"],
-            "storage_locator": source_asset["storage_locator"],
+            "filename": source_asset["filename"],
         },
         hash_json(result_config(profile, chosen_runtime)),
     )
-    context.registry.set_run_status(run_id, "running")
     try:
+        context.registry.set_run_status(run_id, "running")
+        source_path = context.verify_external_asset(str(source_asset["source_asset_id"]))
+        probe = probe_source(source_path, chosen_runtime)
+        context.registry.set_source_media_kind(
+            context.project_id, str(source_asset["source_asset_id"]), probe.media_kind
+        )
         media = prepare_media(context, source_asset, probe, chosen_runtime)
         effective = context.current_artifact("effective_glossary")
         return _execute_existing_media_run(
@@ -134,7 +134,11 @@ def run_project(
             aligner_factory=aligner_factory or _default_aligner_factory,
         )
     except BaseException as exc:
-        context.registry.set_run_status(run_id, "failed", str(exc))
+        context.registry.finalize_interrupted_run(
+            run_id,
+            run_status="interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
+            error_message=str(exc) or type(exc).__name__,
+        )
         raise
 
 
@@ -146,6 +150,7 @@ def retry_invocation(
     semantic_factory: SemanticFactory | None = None,
     aligner_factory: AlignerFactory | None = None,
 ) -> dict[str, Any]:
+    context.registry.recover_running_runs()
     invocation = context.registry.invocation(invocation_id)
     if invocation["project_id"] != context.project_id:
         raise ContractError("Invocation belongs to a different project")
@@ -157,7 +162,7 @@ def retry_invocation(
         raise ContractError("only a failed or ambiguous Invocation can be explicitly retried")
     operation = str(invocation["operation"])
     if operation not in {"semantic_transcription", "forced_alignment", "qa_alignment_repair"}:
-        raise ContractError("Invocation operation is not a retryable v0.1 operation")
+        raise ContractError("Invocation operation is not a retryable v0.1.1 operation")
     run_id = str(invocation["run_id"])
     run = context.registry.run(run_id)
     if run["status"] not in {"failed", "interrupted"}:
@@ -165,14 +170,17 @@ def retry_invocation(
     bound_inputs = _bound_inputs(context, invocation_id)
     media, effective, bound_transcript = _retry_graph(context, bound_inputs)
     chunk_id = str(invocation["chunk_id"])
-    if operation == "semantic_transcription" and invocation["status"] != "definitely_not_sent":
-        context.registry.record_semantic_budget_reset(
-            run_id, context.project_id, chunk_id, invocation_id
-        )
-    context.registry.reopen_run_for_retry(run_id)
-    chosen_runtime = runtime or RuntimeConfig.detect()
-    profile = str(context.registry.project()["processing_profile"])
     try:
+        if (
+            operation == "semantic_transcription"
+            and invocation["status"] != "definitely_not_sent"
+        ):
+            context.registry.record_semantic_budget_reset(
+                run_id, context.project_id, chunk_id, invocation_id
+            )
+        context.registry.reopen_run_for_retry(run_id)
+        chosen_runtime = runtime or RuntimeConfig.detect()
+        profile = str(context.registry.project()["processing_profile"])
         return _execute_existing_media_run(
             context,
             run_id=run_id,
@@ -197,7 +205,11 @@ def retry_invocation(
             ),
         )
     except BaseException as exc:
-        context.registry.set_run_status(run_id, "failed", str(exc))
+        context.registry.finalize_interrupted_run(
+            run_id,
+            run_status="interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
+            error_message=str(exc) or type(exc).__name__,
+        )
         raise
 
 

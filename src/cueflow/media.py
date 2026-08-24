@@ -79,7 +79,7 @@ def probe_source(path: Path, runtime: RuntimeConfig) -> ProbeResult:
     stream_items = [cast(dict[str, Any], item) for item in streams if isinstance(item, dict)]
     audio = next((item for item in stream_items if item.get("codec_type") == "audio"), None)
     if audio is None:
-        raise ContractError("CueFlow v0.1 requires an audio stream")
+        raise ContractError("CueFlow v0.1.1 requires an audio stream")
     continuity = scan_packet_continuity(path, runtime, audio)
     return analyze_presentation_timeline(metadata, opening, continuity, config=config)
 
@@ -99,7 +99,7 @@ def analyze_presentation_timeline(
     video = next((item for item in streams if item.get("codec_type") == "video"), None)
     audio = next((item for item in streams if item.get("codec_type") == "audio"), None)
     if audio is None:
-        raise ContractError("CueFlow v0.1 requires an audio stream")
+        raise ContractError("CueFlow v0.1.1 requires an audio stream")
     media_kind = "video" if video is not None else "audio"
     format_value = metadata.get("format")
     format_info: Mapping[str, Any] = (

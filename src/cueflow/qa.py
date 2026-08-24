@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -74,74 +74,95 @@ def evaluate_semantic_attempts(
         raise ContractError("semantic stability evaluation requires at least one attempt")
     if len(attempts) > chosen.semantic_attempt_limit:
         raise ContractError("semantic attempt limit exceeded")
-    initial_conflicts = glossary_single_atom_conflicts(attempts[0], terms)
-    triggered_terms = sorted({str(item["term"]) for item in initial_conflicts})
-    provider_triggered = bool(attempts[0].get("provider_uncertain_spans"))
-    if not triggered_terms and not provider_triggered:
-        return SemanticDecision(action="accepted", issues=())
+    conflict_history = [glossary_single_atom_conflicts(attempt, terms) for attempt in attempts]
+    latest_conflicts = conflict_history[-1]
+    provider_history = [bool(attempt.get("provider_uncertain_spans")) for attempt in attempts]
+    latest_provider_triggered = provider_history[-1]
     if len(attempts) == 1:
+        if not latest_conflicts and not latest_provider_triggered:
+            return SemanticDecision(action="accepted", issues=())
         return SemanticDecision(
             action="rework",
-            issues=tuple(_rework_issues(initial_conflicts, provider_triggered, 1)),
-            rework_context=_rework_context(initial_conflicts, provider_triggered),
+            issues=tuple(_rework_issues(latest_conflicts, latest_provider_triggered, 1)),
+            rework_context=_rework_context(latest_conflicts, latest_provider_triggered),
         )
 
     previous = attempts[-2]
     latest = attempts[-1]
-    previous_signature = _attempt_candidate_signature(previous, initial_conflicts)
-    latest_signature = _attempt_candidate_signature(latest, initial_conflicts)
-    stable = previous_signature == latest_signature and _all_candidates_present(latest_signature)
-    latest_conflicts = glossary_single_atom_conflicts(latest, terms)
+    previous_conflicts = conflict_history[-2]
+    previous_signature = _attempt_candidate_signature(previous, previous_conflicts)
+    latest_signature = _attempt_candidate_signature(latest, previous_conflicts)
+    previous_conflict_keys = {
+        (str(conflict["term"]), int(conflict["start_position"]))
+        for conflict in previous_conflicts
+    }
+    latest_conflict_keys = {
+        (str(conflict["term"]), int(conflict["start_position"]))
+        for conflict in latest_conflicts
+    }
+    historical_conflicts = _unique_conflicts(
+        conflict for conflicts in conflict_history for conflict in conflicts
+    )
+    historical_candidates_present = all(
+        _candidate_for_conflict(latest, conflict) is not None
+        for conflict in historical_conflicts
+    )
+    stable = (
+        previous_signature == latest_signature
+        and _all_candidates_present(latest_signature)
+        and historical_candidates_present
+        and latest_conflict_keys.issubset(previous_conflict_keys)
+        and provider_history[-2] == latest_provider_triggered
+    )
     if stable:
         issues: list[dict[str, Any]] = []
-        for initial_conflict in initial_conflicts:
-            candidate = _candidate_for_conflict(latest, initial_conflict)
-            if candidate is None:
-                raise ContractError("stable glossary candidate unexpectedly disappeared")
-            matching_conflict = next(
-                (
-                    item
-                    for item in latest_conflicts
-                    if item["term"] == initial_conflict["term"]
-                    and item["start_position"] == candidate["start_position"]
-                ),
-                None,
+        latest_keys = {
+            (str(conflict["term"]), int(conflict["start_position"]))
+            for conflict in latest_conflicts
+        }
+        for conflict in latest_conflicts:
+            issues.append(
+                {
+                    "severity": "warning",
+                    "code": "stable_glossary_conflict",
+                    "resolution_status": "unresolved",
+                    "semantic_attempts": len(attempts),
+                    "locations": [
+                        {
+                            "chunk_id": latest.get("chunk_id"),
+                            "atom_span": [
+                                conflict["start_position"],
+                                conflict["end_position_exclusive"],
+                            ],
+                        }
+                    ],
+                    "observed": conflict,
+                }
             )
-            if matching_conflict is not None:
-                issues.append(
-                    {
-                        "severity": "warning",
-                        "code": "stable_glossary_conflict",
-                        "resolution_status": "unresolved",
-                        "semantic_attempts": len(attempts),
-                        "locations": [
-                            {
-                                "chunk_id": latest.get("chunk_id"),
-                                "atom_span": [
-                                    matching_conflict["start_position"],
-                                    matching_conflict["end_position_exclusive"],
-                                ],
-                            }
-                        ],
-                        "observed": matching_conflict,
-                    }
-                )
-            else:
-                issues.append(
-                    {
-                        "severity": "warning",
-                        "code": "glossary_single_atom_conflict",
-                        "resolution_status": "resolved",
-                        "semantic_attempts": len(attempts),
-                        "locations": [{"chunk_id": latest.get("chunk_id")}],
-                        "observed": {
-                            "term": initial_conflict["term"],
-                            "stable_match": True,
-                            "candidate_sequence": candidate["candidate_sequence"],
-                        },
-                    }
-                )
-        if provider_triggered and latest.get("provider_uncertain_spans"):
+        for historical_conflict in historical_conflicts:
+            key = (
+                str(historical_conflict["term"]),
+                int(historical_conflict["start_position"]),
+            )
+            if key in latest_keys:
+                continue
+            candidate = _candidate_for_conflict(latest, historical_conflict)
+            assert candidate is not None
+            issues.append(
+                {
+                    "severity": "warning",
+                    "code": "glossary_single_atom_conflict",
+                    "resolution_status": "resolved",
+                    "semantic_attempts": len(attempts),
+                    "locations": [{"chunk_id": latest.get("chunk_id")}],
+                    "observed": {
+                        "term": historical_conflict["term"],
+                        "stable_match": True,
+                        "candidate_sequence": candidate["candidate_sequence"],
+                    },
+                }
+            )
+        if latest_provider_triggered:
             issues.append(
                 {
                     "severity": "warning",
@@ -158,6 +179,9 @@ def evaluate_semantic_attempts(
         return SemanticDecision(action="accepted", issues=tuple(issues))
 
     if len(attempts) >= chosen.semantic_attempt_limit:
+        triggered_terms = sorted(
+            {str(item["term"]) for item in historical_conflicts}
+        )
         code = "unstable_glossary_conflict" if triggered_terms else "provider_marked_uncertain"
         issue = {
             "severity": "warning",
@@ -167,14 +191,20 @@ def evaluate_semantic_attempts(
             "locations": [{"chunk_id": latest.get("chunk_id")}],
             "observed": {
                 "terms": triggered_terms,
+                "current_conflicts": [dict(item) for item in latest_conflicts],
                 "consecutive_candidate_sequences_equal": False,
             },
         }
         return SemanticDecision(action="accepted", issues=(issue,))
+    rework_conflicts = latest_conflicts or historical_conflicts
     return SemanticDecision(
         action="rework",
-        issues=tuple(_rework_issues(latest_conflicts, provider_triggered, len(attempts))),
-        rework_context=_rework_context(latest_conflicts or initial_conflicts, provider_triggered),
+        issues=tuple(
+            _rework_issues(latest_conflicts, latest_provider_triggered, len(attempts))
+        ),
+        rework_context=_rework_context(
+            rework_conflicts, latest_provider_triggered or provider_history[-2]
+        ),
     )
 
 
@@ -322,6 +352,19 @@ def qa_payload(
         "result": result,
         "issues": copied,
     }
+
+
+def _unique_conflicts(
+    conflicts: Iterable[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    unique: list[Mapping[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for conflict in conflicts:
+        key = (str(conflict["term"]), int(conflict["start_position"]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(conflict)
+    return unique
 
 
 def _attempt_candidate_signature(

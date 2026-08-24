@@ -12,6 +12,32 @@ from cueflow.config import SEMANTIC_RETRY_RESET_LIMIT
 from cueflow.errors import ContractError, IntegrityError
 from cueflow.schema import ArtifactEnvelope, utc_now
 
+REGISTRY_SCHEMA_VERSION = 1
+REQUIRED_TABLES = frozenset(
+    {
+        "projects",
+        "source_assets",
+        "artifacts",
+        "artifact_dependencies",
+        "current_pointers",
+        "runs",
+        "invocations",
+        "invocation_inputs",
+        "semantic_budget_resets",
+    }
+)
+SOURCE_ASSET_COLUMNS = (
+    "project_id",
+    "source_asset_id",
+    "filename",
+    "asset_kind",
+    "media_kind",
+    "format",
+    "storage_mode",
+    "storage_locator",
+    "registered_at",
+)
+
 DDL = f"""
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
@@ -26,15 +52,15 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE TABLE IF NOT EXISTS source_assets (
     project_id TEXT NOT NULL,
     source_asset_id TEXT NOT NULL,
+    filename TEXT NOT NULL,
     asset_kind TEXT NOT NULL CHECK (asset_kind IN ('media','auxiliary')),
     media_kind TEXT,
     format TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    byte_length INTEGER NOT NULL CHECK (byte_length >= 0),
     storage_mode TEXT NOT NULL,
     storage_locator TEXT NOT NULL,
     registered_at TEXT NOT NULL,
     PRIMARY KEY (project_id, source_asset_id),
+    UNIQUE (project_id, filename),
     FOREIGN KEY (project_id) REFERENCES projects(project_id)
 );
 
@@ -137,6 +163,8 @@ CREATE TABLE IF NOT EXISTS semantic_budget_resets (
     FOREIGN KEY (run_id) REFERENCES runs(run_id),
     FOREIGN KEY (trigger_invocation_id) REFERENCES invocations(invocation_id)
 );
+
+PRAGMA user_version = {REGISTRY_SCHEMA_VERSION};
 """
 
 
@@ -146,7 +174,43 @@ class Registry:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(path)
         self._connection.row_factory = sqlite3.Row
-        self._connection.executescript(DDL)
+        try:
+            self._initialize_or_validate_schema()
+        except BaseException:
+            self._connection.close()
+            raise
+
+    def _initialize_or_validate_schema(self) -> None:
+        self._connection.execute("PRAGMA foreign_keys = ON")
+        tables = {
+            str(row[0])
+            for row in self._connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
+        version_row = self._connection.execute("PRAGMA user_version").fetchone()
+        assert version_row is not None
+        version = int(version_row[0])
+        if not tables and version == 0:
+            self._connection.executescript(DDL)
+            return
+        if version != REGISTRY_SCHEMA_VERSION:
+            raise IntegrityError(
+                "unsupported CueFlow registry schema version: "
+                f"expected {REGISTRY_SCHEMA_VERSION}, found {version}; migration is unavailable"
+            )
+        missing_tables = REQUIRED_TABLES.difference(tables)
+        if missing_tables:
+            raise IntegrityError(
+                f"CueFlow registry schema is incomplete: missing tables {sorted(missing_tables)}"
+            )
+        source_columns = tuple(
+            str(row[1])
+            for row in self._connection.execute("PRAGMA table_info(source_assets)").fetchall()
+        )
+        if source_columns != SOURCE_ASSET_COLUMNS:
+            raise IntegrityError("CueFlow registry SourceAsset schema does not match v0.1.1")
 
     def close(self) -> None:
         self._connection.close()
@@ -182,13 +246,13 @@ class Registry:
             raise IntegrityError(f"project registry expected one project, found {len(rows)}")
         return cast(sqlite3.Row, rows[0])
 
-    def register_source_asset(self, project_id: str, value: Mapping[str, Any]) -> None:
+    def register_source_asset(
+        self, project_id: str, value: Mapping[str, Any]
+    ) -> sqlite3.Row:
         required = {
-            "source_asset_id",
+            "filename",
             "asset_kind",
             "format",
-            "content_hash",
-            "byte_length",
             "storage_mode",
             "storage_locator",
             "registered_at",
@@ -196,27 +260,61 @@ class Registry:
         missing = required.difference(value)
         if missing:
             raise ContractError(f"source asset missing fields: {sorted(missing)}")
+        existing = self.source_asset_by_filename(project_id, str(value["filename"]))
+        if existing is not None:
+            if existing["storage_locator"] != value["storage_locator"]:
+                raise ContractError(
+                    "source filename is already registered at a different locator; "
+                    "Source relink is not available"
+                )
+            self._connection.execute(
+                """
+                UPDATE source_assets
+                SET asset_kind=?, format=?
+                WHERE project_id=? AND source_asset_id=?
+                """,
+                (
+                    value["asset_kind"],
+                    value["format"],
+                    project_id,
+                    existing["source_asset_id"],
+                ),
+            )
+            self._connection.commit()
+            return self.source_asset(project_id, str(existing["source_asset_id"]))
+        source_asset_id = "src_" + uuid.uuid4().hex
         self._connection.execute(
             """
-            INSERT OR IGNORE INTO source_assets
-            (project_id, source_asset_id, asset_kind, media_kind, format, content_hash,
-             byte_length, storage_mode, storage_locator, registered_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO source_assets
+            (project_id, source_asset_id, filename, asset_kind, media_kind, format,
+             storage_mode, storage_locator, registered_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 project_id,
-                value["source_asset_id"],
+                source_asset_id,
+                value["filename"],
                 value["asset_kind"],
                 value.get("media_kind"),
                 value["format"],
-                value["content_hash"],
-                value["byte_length"],
                 value["storage_mode"],
                 value["storage_locator"],
                 value["registered_at"],
             ),
         )
         self._connection.commit()
+        return self.source_asset(project_id, source_asset_id)
+
+    def source_asset_by_filename(
+        self, project_id: str, filename: str
+    ) -> sqlite3.Row | None:
+        return cast(
+            sqlite3.Row | None,
+            self._connection.execute(
+                "SELECT * FROM source_assets WHERE project_id=? AND filename=?",
+                (project_id, filename),
+            ).fetchone(),
+        )
 
     def source_asset(self, project_id: str, source_asset_id: str) -> sqlite3.Row:
         row = self._connection.execute(
@@ -234,7 +332,7 @@ class Registry:
             raise ContractError("invalid source media kind")
         self._connection.execute(
             "UPDATE source_assets SET media_kind=? "
-            "WHERE project_id=? AND source_asset_id=? AND media_kind IS NULL",
+            "WHERE project_id=? AND source_asset_id=?",
             (media_kind, project_id, source_asset_id),
         )
         self._connection.commit()
@@ -454,7 +552,7 @@ class Registry:
         return run_id
 
     def set_run_status(self, run_id: str, status: str, error_message: str | None = None) -> None:
-        if status not in {"created", "running", "succeeded", "failed", "cancelled", "interrupted"}:
+        if status not in {"created", "running", "succeeded", "failed", "interrupted"}:
             raise ContractError("invalid run status")
         self._connection.execute(
             "UPDATE runs SET status=?, error_message=?, updated_at=? WHERE run_id=?",
@@ -485,13 +583,79 @@ class Registry:
             ).fetchone(),
         )
 
-    def interrupt_running_runs(self) -> int:
-        cursor = self._connection.execute(
-            "UPDATE runs SET status='interrupted', updated_at=? WHERE status='running'",
-            (utc_now(),),
+    def recover_running_runs(self) -> list[str]:
+        run_ids = [
+            str(row[0])
+            for row in self._connection.execute(
+                "SELECT run_id FROM runs WHERE status='running' ORDER BY created_at"
+            ).fetchall()
+        ]
+        if not run_ids:
+            return []
+        with self.transaction() as connection:
+            self._recover_inflight_invocations(
+                connection,
+                "run_id IN (SELECT run_id FROM runs WHERE status='running')",
+                (),
+                "previous Orchestrator stopped before Invocation completion",
+            )
+            connection.execute(
+                """
+                UPDATE runs
+                SET status='interrupted',
+                    error_message='previous Orchestrator execution was interrupted',
+                    updated_at=?
+                WHERE status='running'
+                """,
+                (utc_now(),),
+            )
+        return run_ids
+
+    def finalize_interrupted_run(
+        self, run_id: str, *, run_status: str, error_message: str
+    ) -> None:
+        if run_status not in {"failed", "interrupted"}:
+            raise ContractError("interrupted execution must finish as failed or interrupted")
+        with self.transaction() as connection:
+            self._recover_inflight_invocations(
+                connection,
+                "run_id=?",
+                (run_id,),
+                error_message,
+            )
+            connection.execute(
+                "UPDATE runs SET status=?, error_message=?, updated_at=? WHERE run_id=?",
+                (run_status, error_message, utc_now(), run_id),
+            )
+
+    @staticmethod
+    def _recover_inflight_invocations(
+        connection: sqlite3.Connection,
+        where_clause: str,
+        parameters: Sequence[Any],
+        error_message: str,
+    ) -> None:
+        connection.execute(
+            f"""
+            UPDATE invocations
+            SET status=CASE status
+                    WHEN 'created' THEN 'definitely_not_sent'
+                    WHEN 'sending' THEN 'delivery_ambiguous'
+                END,
+                error_message=CASE status
+                    WHEN 'created' THEN ?
+                    WHEN 'sending' THEN ?
+                END,
+                updated_at=?
+            WHERE {where_clause} AND status IN ('created', 'sending')
+            """,
+            (
+                f"{error_message}; request was definitely not sent",
+                f"{error_message}; delivery outcome is ambiguous",
+                utc_now(),
+                *parameters,
+            ),
         )
-        self._connection.commit()
-        return cursor.rowcount
 
     def create_invocation(
         self,

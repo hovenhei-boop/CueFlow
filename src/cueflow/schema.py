@@ -385,7 +385,7 @@ def validate_qa_payload(payload: Mapping[str, Any]) -> None:
     subjects = payload.get("subject_artifact_ids")
     if not isinstance(subjects, list) or any(not isinstance(item, str) for item in subjects):
         raise ContractError("qa.subject_artifact_ids must be an array of Artifact IDs")
-    if payload.get("qa_ruleset_version") != "0.1.0":
+    if payload.get("qa_ruleset_version") != "0.1.1":
         raise ContractError("unsupported QA ruleset version")
     if payload.get("result") not in {"passed", "warnings", "blocked"}:
         raise ContractError("invalid QA result")

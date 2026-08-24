@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,7 +42,6 @@ class ProjectContext:
         if not database.is_file():
             raise IntegrityError(f"not a CueFlow project: {root}")
         registry = Registry(database)
-        registry.interrupt_running_runs()
         project_id = str(registry.project()["project_id"])
         return cls(root=root, registry=registry, store=ArtifactStore(root), project_id=project_id)
 
@@ -53,48 +51,24 @@ class ProjectContext:
     def register_external_asset(
         self, path: Path, *, asset_kind: str, media_kind: str | None = None
     ) -> dict[str, Any]:
-        if not path.is_file():
-            if asset_kind == "media":
-                raise SourceMissingError(f"source_missing: {path}")
-            raise ContractError(f"source file does not exist: {path}")
         if asset_kind not in {"media", "auxiliary"}:
             raise ContractError("asset_kind must be media or auxiliary")
-        digest = hashlib.sha256()
-        byte_length = 0
-        with path.open("rb") as input_file:
-            while chunk := input_file.read(1024 * 1024):
-                digest.update(chunk)
-                byte_length += len(chunk)
-        content_hash = "sha256:" + digest.hexdigest()
+        resolved = _readable_source_path(path)
         value: dict[str, Any] = {
-            "source_asset_id": "src_" + digest.hexdigest(),
+            "filename": path.name,
             "asset_kind": asset_kind,
             "media_kind": media_kind,
             "format": path.suffix.lower().lstrip(".") or "unknown",
-            "content_hash": content_hash,
-            "byte_length": byte_length,
             "storage_mode": "external_reference",
-            "storage_locator": str(path.resolve()),
+            "storage_locator": str(resolved),
             "registered_at": utc_now(),
         }
-        self.registry.register_source_asset(self.project_id, value)
-        return value
+        return dict(self.registry.register_source_asset(self.project_id, value))
 
     def verify_external_asset(self, source_asset_id: str) -> Path:
         row = self.registry.source_asset(self.project_id, source_asset_id)
         path = Path(str(row["storage_locator"]))
-        if not path.is_file():
-            raise SourceMissingError(f"source_missing: {path}")
-        digest = hashlib.sha256()
-        byte_length = 0
-        with path.open("rb") as input_file:
-            while chunk := input_file.read(1024 * 1024):
-                digest.update(chunk)
-                byte_length += len(chunk)
-        content_changed = "sha256:" + digest.hexdigest() != row["content_hash"]
-        if byte_length != row["byte_length"] or content_changed:
-            raise IntegrityError("external source content no longer matches SourceAsset identity")
-        return path
+        return _readable_source_path(path)
 
     def current_artifact(
         self, artifact_kind: str, scope_key: str = "global"
@@ -109,3 +83,16 @@ class ProjectContext:
     def artifact(self, artifact_id: str) -> ArtifactEnvelope:
         row = self.registry.artifact(self.project_id, artifact_id)
         return self.store.read_envelope(Path(str(row["storage_locator"])))
+
+
+def _readable_source_path(path: Path) -> Path:
+    try:
+        if not path.is_file():
+            raise SourceMissingError(f"source_missing: {path}")
+        with path.open("rb"):
+            pass
+        return path.resolve()
+    except SourceMissingError:
+        raise
+    except OSError as exc:
+        raise SourceMissingError(f"source_missing: {path}") from exc

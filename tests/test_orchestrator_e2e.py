@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import hashlib
+import json
 import os
 import subprocess
 import wave
@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import cueflow.cli as cli_module
 import cueflow.orchestrator as orchestrator_module
 from cueflow.atomizer import atomize
 from cueflow.config import RuntimeConfig, RuntimeDeviceConfig
@@ -87,10 +88,15 @@ class StableConflictSemantic(FakeSemantic):
         rework_context: str | None = None,
     ) -> SemanticResult:
         type(self).calls += 1
-        assert glossary_terms == ["顾华玺"]
+        assert glossary_terms == ["秦明", "顾华玺"]
         if type(self).calls > 1:
-            assert rework_context is not None and "顾华玺" in rework_context
-        return SemanticResult(source_text="顾华西老师", language="Chinese")
+            assert rework_context is not None
+        values = (
+            "顾华西老师，秦明",
+            "顾华玺老师，秦民",
+            "顾华玺老师，秦民",
+        )
+        return SemanticResult(source_text=values[type(self).calls - 1], language="Chinese")
 
 
 def _runtime() -> RuntimeConfig:
@@ -106,7 +112,7 @@ def _runtime() -> RuntimeConfig:
     )
 
 
-def _video(path: Path, runtime: RuntimeConfig) -> str:
+def _video(path: Path, runtime: RuntimeConfig) -> None:
     subprocess.run(
         [
             runtime.ffmpeg,
@@ -139,13 +145,13 @@ def _video(path: Path, runtime: RuntimeConfig) -> str:
         ],
         check=True,
     )
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def test_full_orchestrator_preserves_source_and_exports_only_srt(tmp_path: Path) -> None:
     runtime = _runtime()
     source = tmp_path / "external-source.mp4"
-    source_hash = _video(source, runtime)
+    _video(source, runtime)
+    source_bytes = source.read_bytes()
     context = initialize_project(tmp_path / "project", "E2E", "LOCAL_PROFILE")
     try:
         (context.root / "output" / "subtitles.srt").write_text("old", encoding="utf-8")
@@ -157,7 +163,7 @@ def test_full_orchestrator_preserves_source_and_exports_only_srt(tmp_path: Path)
             aligner_factory=lambda value: FakeAligner(),
         )
         assert result["status"] == "succeeded"
-        assert hashlib.sha256(source.read_bytes()).hexdigest() == source_hash
+        assert source.read_bytes() == source_bytes
         assert context.registry.source_asset(
             context.project_id, str(result["source_asset_id"])
         )["storage_mode"] == "external_reference"
@@ -175,7 +181,11 @@ def test_full_orchestrator_preserves_source_and_exports_only_srt(tmp_path: Path)
             assert timeline_wave.getnchannels() == 1
             assert timeline_wave.getsampwidth() == 2
             assert timeline_wave.getnframes() == timeline.payload["total_sample_count"]
-        assert not context.store.blob_path("sha256:" + source_hash).exists()
+        assert all(
+            path.read_bytes() != source_bytes
+            for path in context.store.blobs_root.rglob("*")
+            if path.is_file()
+        )
         output_files = sorted(
             path.name for path in (context.root / "output").iterdir() if path.is_file()
         )
@@ -222,7 +232,7 @@ def test_glossary_rework_publishes_new_versions_and_stable_warning(tmp_path: Pat
     _video(source, runtime)
     context = initialize_project(tmp_path / "project", "Rework", "LOCAL_PROFILE")
     set_glossary = orchestrator_module.set_project_glossary
-    set_glossary(context, ["顾华玺"])
+    set_glossary(context, ["顾华玺", "秦明"])
     StableConflictSemantic.calls = 0
     try:
         result = run_project(
@@ -233,20 +243,32 @@ def test_glossary_rework_publishes_new_versions_and_stable_warning(tmp_path: Pat
             aligner_factory=lambda value: FakeAligner(),
         )
         assert result["status"] == "succeeded"
-        assert StableConflictSemantic.calls == 2
+        assert StableConflictSemantic.calls == 3
         latest = context.registry.latest_run(context.project_id)
         assert latest is not None
         invocations = context.registry.invocations_for_run(str(latest["run_id"]))
         semantic_invocations = [
             row for row in invocations if row["operation"] == "semantic_transcription"
         ]
-        assert len(semantic_invocations) == 2
-        assert semantic_invocations[0]["artifact_id"] != semantic_invocations[1]["artifact_id"]
+        assert len(semantic_invocations) == 3
+        assert len({row["artifact_id"] for row in semantic_invocations}) == 3
         qa = context.current_artifact("qa")
         issue = next(
-            item for item in qa.payload["issues"] if item["code"] == "stable_glossary_conflict"
+            item
+            for item in qa.payload["issues"]
+            if item["code"] == "stable_glossary_conflict"
+            and item["observed"]["term"] == "秦明"
         )
-        assert issue["replacement_artifact_ids"] == [semantic_invocations[1]["artifact_id"]]
+        assert issue["replacement_artifact_ids"] == [
+            semantic_invocations[1]["artifact_id"],
+            semantic_invocations[2]["artifact_id"],
+        ]
+        assert any(
+            item["code"] == "glossary_single_atom_conflict"
+            and item["resolution_status"] == "resolved"
+            and item["observed"]["term"] == "顾华玺"
+            for item in qa.payload["issues"]
+        )
     finally:
         context.close()
 
@@ -306,7 +328,7 @@ def test_source_missing_fails_without_relink_or_guessing(tmp_path: Path) -> None
 
 
 def test_delivery_ambiguous_semantic_invocation_is_not_automatically_retried(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     runtime = _runtime()
     source = tmp_path / "external-source.mp4"
@@ -325,7 +347,130 @@ def test_delivery_ambiguous_semantic_invocation_is_not_automatically_retried(
         assert AmbiguousSemantic.calls == 1
         latest = context.registry.latest_run(context.project_id)
         assert latest is not None
+        run_id = str(latest["run_id"])
         invocations = context.registry.invocations_for_run(str(latest["run_id"]))
         assert [row["status"] for row in invocations] == ["delivery_ambiguous"]
+        invocation_id = str(invocations[0]["invocation_id"])
+        assert context.registry.run(run_id)["status"] == "failed"
+
+        def ambiguous_retry(context_value: object, target_id: str) -> dict[str, object]:
+            assert target_id == invocation_id
+            raise DeliveryAmbiguousError("still ambiguous")
+
+        monkeypatch.setattr(cli_module, "retry_invocation", ambiguous_retry)
+        assert cli_module.main(["retry", str(context.root), invocation_id]) == 2
+        failure = json.loads(capsys.readouterr().err)
+        assert failure["run_id"] == run_id
+        assert failure["invocation_id"] == invocation_id
+        assert failure["invocation_status"] == "delivery_ambiguous"
+        assert failure["next_actions"][0] == {
+            "action": "retry",
+            "invocation_id": invocation_id,
+            "requires_explicit_user_action": True,
+            "automatic_retry": False,
+        }
+        assert "will not retry automatically" in failure["delivery_warning"]
+
+        def interrupted_retry(context_value: object, target_id: str) -> dict[str, object]:
+            assert target_id == invocation_id
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(cli_module, "retry_invocation", interrupted_retry)
+        assert cli_module.main(["retry", str(context.root), invocation_id]) == 130
+        interrupted_failure = json.loads(capsys.readouterr().err)
+        assert interrupted_failure["status"] == "failed"
+        assert interrupted_failure["run_id"] == run_id
+        assert interrupted_failure["invocation_status"] == "delivery_ambiguous"
     finally:
         context.close()
+
+    class InterruptedSemantic(FakeSemantic):
+        def transcribe(
+            self,
+            audio_path: Path,
+            glossary_terms: list[str],
+            *,
+            rework_context: str | None = None,
+        ) -> SemanticResult:
+            raise KeyboardInterrupt
+
+    class CrashedSemantic(FakeSemantic):
+        def transcribe(
+            self,
+            audio_path: Path,
+            glossary_terms: list[str],
+            *,
+            rework_context: str | None = None,
+        ) -> SemanticResult:
+            raise RuntimeError("unexpected provider crash")
+
+    for name, provider_type, error_type, expected_run_status in (
+        ("ctrl-c", InterruptedSemantic, KeyboardInterrupt, "interrupted"),
+        ("crash", CrashedSemantic, RuntimeError, "failed"),
+    ):
+        interrupted_context = initialize_project(
+            tmp_path / name, name, "LOCAL_PROFILE"
+        )
+        try:
+            with pytest.raises(error_type):
+                run_project(
+                    interrupted_context,
+                    source,
+                    runtime=runtime,
+                    semantic_factory=lambda profile, value, cls=provider_type: cls(),
+                    aligner_factory=lambda value: FakeAligner(),
+                )
+            interrupted_run = interrupted_context.registry.latest_run(
+                interrupted_context.project_id
+            )
+            assert interrupted_run is not None
+            assert interrupted_run["status"] == expected_run_status
+            interrupted_invocations = interrupted_context.registry.invocations_for_run(
+                str(interrupted_run["run_id"])
+            )
+            assert [row["status"] for row in interrupted_invocations] == [
+                "delivery_ambiguous"
+            ]
+        finally:
+            interrupted_context.close()
+
+    created_context = initialize_project(
+        tmp_path / "created-ctrl-c", "created-ctrl-c", "LOCAL_PROFILE"
+    )
+    real_set_invocation_status = created_context.registry.set_invocation_status
+
+    def interrupt_before_sending(
+        target_id: str, status: str, **kwargs: object
+    ) -> None:
+        if status == "sending":
+            raise KeyboardInterrupt
+        real_set_invocation_status(target_id, status, **kwargs)
+
+    monkeypatch.setattr(
+        created_context.registry, "set_invocation_status", interrupt_before_sending
+    )
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run_project(
+                created_context,
+                source,
+                runtime=runtime,
+                semantic_factory=lambda profile, value: FakeSemantic(),
+                aligner_factory=lambda value: FakeAligner(),
+            )
+        created_run = created_context.registry.latest_run(created_context.project_id)
+        assert created_run is not None and created_run["status"] == "interrupted"
+        created_invocations = created_context.registry.invocations_for_run(
+            str(created_run["run_id"])
+        )
+        assert [row["status"] for row in created_invocations] == [
+            "definitely_not_sent"
+        ]
+        assert (
+            created_context.registry.sent_semantic_attempt_count(
+                str(created_run["run_id"]), "chunk_0001", 0
+            )
+            == 0
+        )
+    finally:
+        created_context.close()

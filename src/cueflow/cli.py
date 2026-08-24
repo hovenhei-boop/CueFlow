@@ -18,7 +18,7 @@ from cueflow.project import ProjectContext
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cueflow", description="CueFlow v0.1 CLI")
+    parser = argparse.ArgumentParser(prog="cueflow", description="CueFlow v0.1.1 CLI")
     commands = parser.add_subparsers(dest="command", required=True)
 
     init = commands.add_parser("init", help="create a CueFlow project")
@@ -57,8 +57,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         result = _dispatch(args)
-    except (CueFlowError, OSError, json.JSONDecodeError) as exc:
-        _write_json({"status": "failed", "error": str(exc)}, stream=sys.stderr)
+    except _CliFailure as exc:
+        _write_json(exc.payload, stream=sys.stderr)
+        return exc.exit_code
+    except KeyboardInterrupt as exc:
+        _write_json(_generic_failure_payload(exc), stream=sys.stderr)
+        return 130
+    except Exception as exc:
+        _write_json(_generic_failure_payload(exc), stream=sys.stderr)
         return 2
     _write_json(result)
     return 0
@@ -77,6 +83,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         finally:
             context.close()
     context = ProjectContext.open(args.project_dir)
+    previous = context.registry.latest_run(context.project_id)
+    previous_run_id = str(previous["run_id"]) if previous is not None else None
     try:
         if args.command == "glossary" and args.glossary_command == "set":
             value = json.loads(args.glossary_json.read_text(encoding="utf-8"))
@@ -106,6 +114,14 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         if args.command == "retry":
             return retry_invocation(context, args.invocation_id)
         raise CueFlowError("unsupported CLI command")
+    except KeyboardInterrupt as exc:
+        raise _CliFailure(
+            _command_failure_payload(context, args, exc, previous_run_id), 130
+        ) from exc
+    except Exception as exc:
+        raise _CliFailure(
+            _command_failure_payload(context, args, exc, previous_run_id), 2
+        ) from exc
     finally:
         context.close()
 
@@ -115,6 +131,84 @@ def _write_json(value: MappingLike, *, stream: Any = sys.stdout) -> None:
 
 
 MappingLike = dict[str, Any]
+
+
+class _CliFailure(Exception):
+    def __init__(self, payload: MappingLike, exit_code: int) -> None:
+        super().__init__(str(payload.get("error", "CueFlow command failed")))
+        self.payload = payload
+        self.exit_code = exit_code
+
+
+def _command_failure_payload(
+    context: ProjectContext,
+    args: argparse.Namespace,
+    exc: BaseException,
+    previous_run_id: str | None,
+) -> MappingLike:
+    run_id: str | None = None
+    if args.command == "retry":
+        try:
+            run_id = str(context.registry.invocation(args.invocation_id)["run_id"])
+        except CueFlowError:
+            pass
+    elif args.command == "run":
+        latest = context.registry.latest_run(context.project_id)
+        if latest is not None and str(latest["run_id"]) != previous_run_id:
+            run_id = str(latest["run_id"])
+
+    invocation = None
+    if run_id is not None:
+        invocations = context.registry.invocations_for_run(run_id)
+        if invocations and invocations[-1]["status"] in {
+            "definitely_not_sent",
+            "delivery_ambiguous",
+            "explicit_failure",
+        }:
+            invocation = invocations[-1]
+
+    payload = _generic_failure_payload(exc)
+    payload["run_id"] = run_id
+    if invocation is not None:
+        invocation_id = str(invocation["invocation_id"])
+        invocation_status = str(invocation["status"])
+        payload["invocation_id"] = invocation_id
+        payload["invocation_status"] = invocation_status
+        payload["next_actions"] = [
+            {
+                "action": "retry",
+                "invocation_id": invocation_id,
+                "requires_explicit_user_action": True,
+                "automatic_retry": False,
+            },
+            {"action": "status"},
+        ]
+        if invocation_status == "delivery_ambiguous":
+            payload["delivery_warning"] = (
+                "delivery may have occurred; CueFlow will not retry automatically"
+            )
+    elif args.command == "run":
+        payload["next_actions"] = [
+            {
+                "action": "run",
+                "media": str(args.media),
+                "creates_new_run": True,
+                "automatic_retry": False,
+            },
+            {"action": "status"},
+        ]
+    else:
+        payload["next_actions"] = [{"action": "status"}]
+    return payload
+
+
+def _generic_failure_payload(exc: BaseException) -> MappingLike:
+    return {
+        "status": "failed",
+        "error": str(exc) or type(exc).__name__,
+        "run_id": None,
+        "next_actions": [],
+    }
 
 
 if __name__ == "__main__":

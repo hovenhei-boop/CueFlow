@@ -205,7 +205,7 @@ def test_export_gate_enumerates_every_chunk_in_current_plan() -> None:
         inputs=[InputRef(role="subtitle", artifact_id=subtitle.artifact_id)],
         payload={
             "subject_artifact_ids": [subtitle.artifact_id],
-            "qa_ruleset_version": "0.1.0",
+            "qa_ruleset_version": "0.1.1",
             "result": "passed",
             "issues": [],
         },
@@ -282,7 +282,7 @@ def test_export_gate_allows_warnings_but_rejects_blocking_qa() -> None:
             inputs=[InputRef(role="subtitle", artifact_id=subtitle.artifact_id)],
             payload={
                 "subject_artifact_ids": [subtitle.artifact_id],
-                "qa_ruleset_version": "0.1.0",
+                "qa_ruleset_version": "0.1.1",
                 "result": result,
                 "issues": [
                     {
@@ -387,6 +387,42 @@ def test_glossary_conflict_stability_rules_and_single_atom_exclusion() -> None:
         ["顾华玺"],
     )
     assert exact_elsewhere.issues[0]["code"] == "stable_glossary_conflict"
+
+    new_conflict = evaluate_semantic_attempts(
+        [
+            _attempt("顾华西老师，秦明"),
+            _attempt("顾华玺老师，秦民"),
+        ],
+        ["顾华玺", "秦明"],
+    )
+    assert new_conflict.action == "rework"
+    assert new_conflict.rework_context is not None
+    assert "秦明" in new_conflict.rework_context
+    assert "顾华玺" not in new_conflict.rework_context
+    stable_old_with_new_conflict = evaluate_semantic_attempts(
+        [
+            _attempt("顾华西老师，秦明"),
+            _attempt("顾华西老师，秦民"),
+        ],
+        ["顾华玺", "秦明"],
+    )
+    assert stable_old_with_new_conflict.action == "rework"
+    assert stable_old_with_new_conflict.rework_context is not None
+    assert "秦明" in stable_old_with_new_conflict.rework_context
+    accepted_new_conflict = evaluate_semantic_attempts(
+        [
+            _attempt("顾华西老师，秦明"),
+            _attempt("顾华玺老师，秦民"),
+            _attempt("顾华玺老师，秦民"),
+        ],
+        ["顾华玺", "秦明"],
+    )
+    assert accepted_new_conflict.action == "accepted"
+    assert any(
+        item["code"] == "stable_glossary_conflict"
+        and item["observed"]["term"] == "秦明"
+        for item in accepted_new_conflict.issues
+    )
 
 
 def test_subtitle_and_srt_keep_terminal_pronounceable_atoms() -> None:

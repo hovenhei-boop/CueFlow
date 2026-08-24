@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -8,11 +9,12 @@ from cueflow.alignment import build_alignment_payload
 from cueflow.artifact_store import ArtifactStore
 from cueflow.atomizer import build_transcript_payload
 from cueflow.canonical import hash_json
-from cueflow.errors import ContractError
+from cueflow.errors import ContractError, IntegrityError, SourceMissingError
 from cueflow.glossary import glossary_payload
-from cueflow.orchestrator import initialize_project, set_project_glossary
+from cueflow.orchestrator import initialize_project, project_status, set_project_glossary
 from cueflow.project import ProjectContext
 from cueflow.providers import AlignmentToken
+from cueflow.registry import REGISTRY_SCHEMA_VERSION, Registry
 from cueflow.schema import ArtifactEnvelope, InputRef, Producer
 
 
@@ -39,6 +41,36 @@ def publish_glossary(project: ProjectContext, terms: list[str]) -> ArtifactEnvel
 
 
 def test_artifact_file_precedes_pointer_and_pointer_rolls_back(tmp_path: Path) -> None:
+    empty_database = tmp_path / "empty.sqlite3"
+    sqlite3.connect(empty_database).close()
+    empty_registry = Registry(empty_database)
+    empty_registry.close()
+    with sqlite3.connect(empty_database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (
+            REGISTRY_SCHEMA_VERSION,
+        )
+
+    old_database = tmp_path / "old.sqlite3"
+    with sqlite3.connect(old_database) as connection:
+        connection.execute("CREATE TABLE projects (project_id TEXT PRIMARY KEY)")
+    with pytest.raises(IntegrityError, match="migration is unavailable"):
+        Registry(old_database)
+    with sqlite3.connect(old_database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (0,)
+        assert {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        } == {"projects"}
+
+    incomplete_database = tmp_path / "incomplete.sqlite3"
+    with sqlite3.connect(incomplete_database) as connection:
+        connection.execute("CREATE TABLE projects (project_id TEXT PRIMARY KEY)")
+        connection.execute(f"PRAGMA user_version = {REGISTRY_SCHEMA_VERSION}")
+    with pytest.raises(IntegrityError, match="schema is incomplete"):
+        Registry(incomplete_database)
+
     project = ProjectContext.create(tmp_path / "project", "Test", "LOCAL_PROFILE")
     try:
         first = publish_glossary(project, ["顾华玺"])
@@ -191,17 +223,52 @@ def test_chunk_scope_switch_and_stale_routes_are_independent(tmp_path: Path) -> 
         project.close()
 
 
-def test_auxiliary_asset_does_not_bypass_effective_glossary(tmp_path: Path) -> None:
+def test_auxiliary_asset_does_not_bypass_effective_glossary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     project = initialize_project(tmp_path / "project", "Test", "LOCAL_PROFILE")
     auxiliary = tmp_path / "notes.txt"
     auxiliary.write_text("顾华玺", encoding="utf-8")
     try:
         before = project.current_artifact("effective_glossary")
         registered = project.register_external_asset(auxiliary, asset_kind="auxiliary")
+        auxiliary.write_text("新版顾华玺", encoding="utf-8")
+        replaced = project.register_external_asset(auxiliary, asset_kind="auxiliary")
+        other = tmp_path / "other.txt"
+        other.write_text("other", encoding="utf-8")
+        other_registered = project.register_external_asset(other, asset_kind="auxiliary")
         after = project.current_artifact("effective_glossary")
         assert registered["asset_kind"] == "auxiliary"
+        assert registered["filename"] == "notes.txt"
+        assert "content_hash" not in registered and "byte_length" not in registered
+        assert replaced["source_asset_id"] == registered["source_asset_id"]
+        assert other_registered["source_asset_id"] != registered["source_asset_id"]
         assert after.artifact_id == before.artifact_id
         assert after.payload["terms"] == []
+
+        duplicate_dir = tmp_path / "duplicate"
+        duplicate_dir.mkdir()
+        duplicate = duplicate_dir / auxiliary.name
+        duplicate.write_text("different locator", encoding="utf-8")
+        with pytest.raises(ContractError, match="relink is not available"):
+            project.register_external_asset(duplicate, asset_kind="auxiliary")
+        with pytest.raises(SourceMissingError, match="source_missing"):
+            project.register_external_asset(tmp_path / "missing.txt", asset_kind="auxiliary")
+        with pytest.raises(SourceMissingError, match="source_missing"):
+            project.register_external_asset(duplicate_dir, asset_kind="auxiliary")
+
+        denied = tmp_path / "denied.txt"
+        denied.write_text("denied", encoding="utf-8")
+        real_open = Path.open
+
+        def denied_open(path: Path, *args: object, **kwargs: object) -> object:
+            if path == denied:
+                raise PermissionError("denied")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", denied_open)
+        with pytest.raises(SourceMissingError, match="source_missing"):
+            project.register_external_asset(denied, asset_kind="auxiliary")
     finally:
         project.close()
 
@@ -214,11 +281,54 @@ def test_interrupted_run_can_only_reopen_for_targeted_retry(tmp_path: Path) -> N
             {"source_asset_id": "fixture"},
             "sha256:" + "0" * 64,
         )
-        project.registry.set_run_status(run_id, "interrupted")
+        project.registry.set_run_status(run_id, "running")
+        created_id = project.registry.create_invocation(
+            run_id=run_id,
+            project_id=project.project_id,
+            operation="semantic_transcription",
+            logical_operation_key="semantic:chunk_0001:created",
+            attempt_number=1,
+            provider="fixture",
+            model="fixture",
+            chunk_id="chunk_0001",
+        )
+        sending_id = project.registry.create_invocation(
+            run_id=run_id,
+            project_id=project.project_id,
+            operation="semantic_transcription",
+            logical_operation_key="semantic:chunk_0001:sending",
+            attempt_number=1,
+            provider="fixture",
+            model="fixture",
+            chunk_id="chunk_0001",
+        )
+        project.registry.set_invocation_status(sending_id, "sending")
+        project.close()
+
+        project = ProjectContext.open(tmp_path / "project")
+        assert project.registry.run(run_id)["status"] == "running"
+        assert project.registry.invocation(created_id)["status"] == "created"
+        assert project.registry.invocation(sending_id)["status"] == "sending"
+        assert project_status(project)["latest_run"]["status"] == "running"
+        set_project_glossary(project, ["管理命令"])
+        management_asset = tmp_path / "management.txt"
+        management_asset.write_text("management", encoding="utf-8")
+        project.register_external_asset(management_asset, asset_kind="auxiliary")
+        assert project.registry.run(run_id)["status"] == "running"
+        assert project.registry.invocation(created_id)["status"] == "created"
+        assert project.registry.invocation(sending_id)["status"] == "sending"
+
+        assert project.registry.recover_running_runs() == [run_id]
+        assert project.registry.run(run_id)["status"] == "interrupted"
+        assert project.registry.invocation(created_id)["status"] == "definitely_not_sent"
+        assert project.registry.invocation(sending_id)["status"] == "delivery_ambiguous"
+        assert project.registry.sent_semantic_attempt_count(run_id, "chunk_0001", 0) == 1
         project.registry.reopen_run_for_retry(run_id)
         assert project.registry.run(run_id)["status"] == "running"
         project.registry.set_run_status(run_id, "succeeded")
         with pytest.raises(ContractError, match="failed or interrupted"):
             project.registry.reopen_run_for_retry(run_id)
+        with pytest.raises(ContractError, match="invalid run status"):
+            project.registry.set_run_status(run_id, "cancelled")
     finally:
         project.close()

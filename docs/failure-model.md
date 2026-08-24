@@ -1,4 +1,4 @@
-# CueFlow v0.1 Failure Model
+# CueFlow v0.1.1 Failure Model
 
 状态：冻结基线
 
@@ -8,7 +8,7 @@
 
 ## 2. Source failure
 
-新 Run 或重新 Media Prep 时，SourceAsset 路径不存在或不可访问，抛 `SourceMissingError`；路径存在但 SHA-256/长度改变，抛 IntegrityError。系统不猜路径、不 relink、不从项目内备用媒体恢复。
+新 Run 或重新 Media Prep 时，SourceAsset locator 不存在、不是普通文件或不可读取，抛 `SourceMissingError`。系统不比较外部 Source 内容 hash/长度，不猜路径、不搜索同名文件、不 relink，也不从项目内备用媒体恢复；原 locator 上覆盖后的同名文件可用于新 Run。
 
 若原 Run 已完成 Media Prep，targeted retry 使用 Invocation 绑定的项目内 Artifact 和 blob，不因外部源之后缺失而重新做 Media Prep。
 
@@ -20,7 +20,7 @@ Unverified 是非阻塞 warning。Render 执行已记录 action，不猜补偿�
 
 ## 4. Artifact publication 与恢复
 
-Artifact 发布顺序：临时写入、flush/fsync、校验 hash、原子移动到内容路径、SQLite 事务登记 Artifact/dependency/current pointer。中途崩溃最多留下 temp/orphan；现有 current 状态保持有效。
+Artifact 发布顺序：临时写入、flush/fsync、原子替换到内容路径、read-back validation、SQLite 事务登记 Artifact/dependency/current pointer。中途崩溃最多留下 temp/orphan；现有 current 状态保持有效。
 
 恢复只信任已登记、文件/hash 完整、Schema 可解释且依赖匹配的 Artifact。不同 Run 的 Artifact 即使内容相同，也不能使新 Run 跳过 Provider/阶段执行。
 
@@ -37,6 +37,8 @@ created → sending → succeeded
 
 凭据/依赖/模型在发送前不可用时为 definitely_not_sent。请求可能已送达但无确定结果时为 delivery_ambiguous，禁止自动重试。Provider 明确错误或非法契约为 explicit_failure。每个阶段在 finally 中关闭已创建 Provider；阶段无工作时不实例化。
 
+真正开始 `run`/`retry` 时执行单 Orchestrator recovery：遗留 `created` 原子收口为 `definitely_not_sent`，遗留 `sending` 原子收口为 `delivery_ambiguous`，对应 `running` Run 收口为 `interrupted`。本次 Ctrl+C 使 Run 进入 `interrupted`，其他未预期异常进入 `failed`，并在同一事务中收口对应 in-flight Invocation。普通项目打开、`status`、glossary 和 asset 操作不恢复或中断 Run。
+
 ## 6. Semantic budget 与 retry reset
 
 新 Run 每 Chunk 的 window 0 最多 4 个 Semantic Attempt。进入 sending 即消耗 slot；definitely_not_sent 不消耗。成功 Attempt 产生 Transcript；失败/ambiguous Invocation 仍保留审计。
@@ -45,7 +47,7 @@ created → sending → succeeded
 
 ## 7. Semantic stability failure
 
-Glossary conflict 与 Provider uncertainty 只能请求重听当前 Chunk。每个成功 Attempt 创建新 Transcript/Invocation；rejected Transcript 不进入 Alignment。连续两次稳定但仍冲突时接受实际结果并产生 stable warning；当前 window 用尽仍不稳定时产生 unstable warning并接受最后实际结果。Glossary 不覆盖文字。
+Glossary conflict 与 Provider uncertainty 只能请求重听当前 Chunk。每个成功 Attempt 创建新 Transcript/Invocation，并对当前 Attempt 的完整 Chunk 文本重新执行 conflict scan；下一轮以当前实际 conflict 为准。Rejected Transcript 不进入 Alignment。连续两次稳定但仍冲突时接受实际结果并产生 stable warning；4-attempt window 用尽仍不稳定时产生 unstable warning并接受最后实际结果。Glossary 不覆盖文字，QA 不额外重扫整篇 Transcript。
 
 ## 8. Alignment execution repair
 
@@ -69,4 +71,4 @@ Retry 读取原 InvocationInputs，重放相同 operation，使用同一 Run 已
 
 ## 12. 必测失败路径
 
-Source missing/content mismatch；opening timestamp 缺失、AAC priming、negative PTS、edit-list；中段 discontinuity；unknown action；4-attempt window、两次 reset和12次硬上限；rejected Transcript 无 Alignment；两个独立 repair 预算；多 Chunk QA batch；targeted retry exact inputs/Run reopen；structural QA 阻止 SRT；Artifact/Registry dependency/current pointer 不完整。
+Source missing/unreadable 与同名覆盖；旧 Registry version rejection；Invocation `created`/`sending` crash recovery；opening timestamp 缺失、AAC priming、negative PTS、edit-list；中段 discontinuity；unknown action；4-attempt window、两次 reset和12次硬上限；新 glossary conflict；rejected Transcript 无 Alignment；两个独立 repair 预算；多 Chunk QA batch；targeted retry exact inputs/Run reopen；structural QA 阻止 SRT；Artifact/Registry dependency/current pointer 不完整。
