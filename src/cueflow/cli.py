@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from cueflow.errors import CueFlowError
+from cueflow.errors import CueFlowError, ReferenceRunFailedError
 from cueflow.orchestrator import (
     initialize_project,
     project_status,
@@ -15,10 +15,16 @@ from cueflow.orchestrator import (
     set_project_glossary,
 )
 from cueflow.project import ProjectContext
+from cueflow.reference_assets import register_reference_asset, relocate_references
+from cueflow.reference_orchestrator import (
+    extract_reference,
+    reference_status,
+    retry_reference_work_item,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cueflow", description="CueFlow v0.1.1 CLI")
+    parser = argparse.ArgumentParser(prog="cueflow", description="CueFlow v0.2.1 CLI")
     commands = parser.add_subparsers(dest="command", required=True)
 
     init = commands.add_parser("init", help="create a CueFlow project")
@@ -49,6 +55,40 @@ def build_parser() -> argparse.ArgumentParser:
     retry = commands.add_parser("retry", help="explicitly retry a failed Invocation's run")
     retry.add_argument("project_dir", type=Path)
     retry.add_argument("invocation_id")
+
+    reference = commands.add_parser("reference", help="manage Reference Materials")
+    reference_commands = reference.add_subparsers(dest="reference_command", required=True)
+
+    reference_add = reference_commands.add_parser("add", help="register a Reference Material")
+    reference_add.add_argument("project_dir", type=Path)
+    reference_add.add_argument("file", type=Path)
+
+    reference_extract = reference_commands.add_parser(
+        "extract", help="create a new Reference extraction Run"
+    )
+    reference_extract.add_argument("project_dir", type=Path)
+    reference_extract.add_argument("reference_asset_id")
+    reference_extract.add_argument(
+        "--pixel-subtitle-mode", choices=("burned", "none"), default=None
+    )
+
+    reference_relocate = reference_commands.add_parser(
+        "relocate", help="repair missing Reference locators from one folder"
+    )
+    reference_relocate.add_argument("project_dir", type=Path)
+    reference_relocate.add_argument("folder", type=Path)
+
+    reference_status_parser = reference_commands.add_parser(
+        "status", help="show Reference assets and Runs"
+    )
+    reference_status_parser.add_argument("project_dir", type=Path)
+    reference_status_parser.add_argument("reference_asset_id", nargs="?", default=None)
+
+    reference_retry = reference_commands.add_parser(
+        "retry", help="retry one failed Reference work item in its original Run"
+    )
+    reference_retry.add_argument("project_dir", type=Path)
+    reference_retry.add_argument("work_item_id")
     return parser
 
 
@@ -83,8 +123,13 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         finally:
             context.close()
     context = ProjectContext.open(args.project_dir)
-    previous = context.registry.latest_run(context.project_id)
+    previous = context.registry.latest_source_run(context.project_id)
     previous_run_id = str(previous["run_id"]) if previous is not None else None
+    previous_reference_run_id: str | None = None
+    if args.command == "reference" and args.reference_command == "extract":
+        prior_runs = context.registry.reference_runs(args.reference_asset_id)
+        if prior_runs:
+            previous_reference_run_id = str(prior_runs[-1]["run_id"])
     try:
         if args.command == "glossary" and args.glossary_command == "set":
             value = json.loads(args.glossary_json.read_text(encoding="utf-8"))
@@ -113,21 +158,44 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             return project_status(context)
         if args.command == "retry":
             return retry_invocation(context, args.invocation_id)
+        if args.command == "reference":
+            if args.reference_command == "add":
+                asset = register_reference_asset(context, args.file)
+                return {"status": "registered", **asset}
+            if args.reference_command == "extract":
+                return extract_reference(
+                    context,
+                    args.reference_asset_id,
+                    pixel_subtitle_mode=args.pixel_subtitle_mode,
+                )
+            if args.reference_command == "relocate":
+                return relocate_references(context, args.folder)
+            if args.reference_command == "status":
+                return reference_status(context, args.reference_asset_id)
+            if args.reference_command == "retry":
+                return retry_reference_work_item(context, args.work_item_id)
         raise CueFlowError("unsupported CLI command")
     except KeyboardInterrupt as exc:
         raise _CliFailure(
-            _command_failure_payload(context, args, exc, previous_run_id), 130
+            _command_failure_payload(
+                context, args, exc, previous_run_id, previous_reference_run_id
+            ),
+            130,
         ) from exc
     except Exception as exc:
         raise _CliFailure(
-            _command_failure_payload(context, args, exc, previous_run_id), 2
+            _command_failure_payload(
+                context, args, exc, previous_run_id, previous_reference_run_id
+            ),
+            2,
         ) from exc
     finally:
         context.close()
 
 
-def _write_json(value: MappingLike, *, stream: Any = sys.stdout) -> None:
-    stream.write(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+def _write_json(value: MappingLike, *, stream: Any | None = None) -> None:
+    target = sys.stdout if stream is None else stream
+    target.write(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
 MappingLike = dict[str, Any]
@@ -145,6 +213,7 @@ def _command_failure_payload(
     args: argparse.Namespace,
     exc: BaseException,
     previous_run_id: str | None,
+    previous_reference_run_id: str | None,
 ) -> MappingLike:
     run_id: str | None = None
     if args.command == "retry":
@@ -153,9 +222,21 @@ def _command_failure_payload(
         except CueFlowError:
             pass
     elif args.command == "run":
-        latest = context.registry.latest_run(context.project_id)
+        latest = context.registry.latest_source_run(context.project_id)
         if latest is not None and str(latest["run_id"]) != previous_run_id:
             run_id = str(latest["run_id"])
+    elif args.command == "reference":
+        if isinstance(exc, ReferenceRunFailedError):
+            run_id = exc.run_id
+        elif args.reference_command == "retry":
+            try:
+                run_id = str(context.registry.reference_work_item(args.work_item_id)["run_id"])
+            except CueFlowError:
+                pass
+        elif args.reference_command == "extract":
+            runs = context.registry.reference_runs(args.reference_asset_id)
+            if runs and str(runs[-1]["run_id"]) != previous_reference_run_id:
+                run_id = str(runs[-1]["run_id"])
 
     invocation = None
     if run_id is not None:
@@ -169,7 +250,7 @@ def _command_failure_payload(
 
     payload = _generic_failure_payload(exc)
     payload["run_id"] = run_id
-    if invocation is not None:
+    if invocation is not None and args.command != "reference":
         invocation_id = str(invocation["invocation_id"])
         invocation_status = str(invocation["status"])
         payload["invocation_id"] = invocation_id
@@ -187,6 +268,29 @@ def _command_failure_payload(
             payload["delivery_warning"] = (
                 "delivery may have occurred; CueFlow will not retry automatically"
             )
+    elif args.command == "reference" and run_id is not None:
+        failed_items = [
+            row
+            for row in context.registry.reference_work_items_for_run(run_id)
+            if row["status"] in {"failed", "interrupted"}
+        ]
+        payload["next_actions"] = [
+            {
+                "action": "reference retry",
+                "work_item_id": str(row["work_item_id"]),
+                "run_id": run_id,
+                "creates_new_run": False,
+                "requires_explicit_user_action": True,
+            }
+            for row in failed_items
+        ] + [{"action": "reference status"}]
+        if invocation is not None:
+            payload["invocation_id"] = str(invocation["invocation_id"])
+            payload["invocation_status"] = str(invocation["status"])
+            if invocation["status"] == "delivery_ambiguous":
+                payload["delivery_warning"] = (
+                    "delivery may have occurred; CueFlow will not retry automatically"
+                )
     elif args.command == "run":
         payload["next_actions"] = [
             {

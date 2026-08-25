@@ -127,6 +127,9 @@ def test_artifact_kind_allowlist_is_the_complete_current_pipeline() -> None:
             "subtitle",
             "qa",
             "srt_render",
+            "reference_input",
+            "reference_evidence",
+            "reference_bundle",
         }
     )
 

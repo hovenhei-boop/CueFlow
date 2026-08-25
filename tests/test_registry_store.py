@@ -309,7 +309,7 @@ def test_interrupted_run_can_only_reopen_for_targeted_retry(tmp_path: Path) -> N
         assert project.registry.run(run_id)["status"] == "running"
         assert project.registry.invocation(created_id)["status"] == "created"
         assert project.registry.invocation(sending_id)["status"] == "sending"
-        assert project_status(project)["latest_run"]["status"] == "running"
+        assert project_status(project)["latest_source_run"]["status"] == "running"
         set_project_glossary(project, ["管理命令"])
         management_asset = tmp_path / "management.txt"
         management_asset.write_text("management", encoding="utf-8")

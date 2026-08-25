@@ -1,6 +1,6 @@
-# CueFlow v0.1.1 Failure Model
+# CueFlow v0.2.1 Failure Model
 
-状态：冻结基线
+状态：v0.1.1 Source failure 语义冻结；v0.2.1 Reference failure 语义冻结
 
 ## 1. 原则
 
@@ -72,3 +72,17 @@ Retry 读取原 InvocationInputs，重放相同 operation，使用同一 Run 已
 ## 12. 必测失败路径
 
 Source missing/unreadable 与同名覆盖；旧 Registry version rejection；Invocation `created`/`sending` crash recovery；opening timestamp 缺失、AAC priming、negative PTS、edit-list；中段 discontinuity；unknown action；4-attempt window、两次 reset和12次硬上限；新 glossary conflict；rejected Transcript 无 Alignment；两个独立 repair 预算；多 Chunk QA batch；targeted retry exact inputs/Run reopen；structural QA 阻止 SRT；Artifact/Registry dependency/current pointer 不完整。
+
+Reference 必测：filename identity/duplicate no-op；relocate 只匹配直接子项；v1→v2 原子迁移；格式/signature 损坏和加密；无字幕时缺少 pixel mode；不支持字幕 codec 不降级；无音频的 success/partial/failed 聚合；PGS/VobSub clear/empty、原始像素去重和全部 occurrence；独立有效 VobSub 与异常时长 stop gate；mixed PDF 整体 Cloud/Local unsupported；extractous OCR/URL 禁用；Cloud document 身份/权限/格式区分与 finally delete；local/provider 双时长不混用；两个 sent attempt；retry 不建新 Run且不重跑成功项；Reference status 不覆盖 Source。
+
+## 13. Reference failure 与 partial
+
+Reference locator 缺失明确报错并要求用户显式 relocate；系统不猜测、不搜索、不从 Source 恢复。损坏、加密、无法可靠识别、不支持的字幕 codec、Local scanned PDF、Local image Vision 和缺失 office extra 均明确失败，不静默选择其他路线。
+
+Reference work item 相互隔离。全成功使 Run `succeeded/complete`；至少一个成功与至少一个失败使 Run `failed/partial` 并发布 partial bundle；没有成功使 Run `failed/failed`。单资产失败不改变其他资产的 Run。
+
+只有真实模型调用创建 Invocation。每个模型 work item 每 Run 最多两个 sent attempt；`definitely_not_sent` 不占，`delivery_ambiguous` 占且不会自动重放。显式 `reference retry WORK_ITEM_ID` 只在原 Run 追加 attempt；成功项不重跑。不能通过质量参数无限返工。
+
+Cloud document 在上传得到 file_id 后，无论 poll、Provider、响应解析或本地流程如何结束都在 finally 请求删除。身份 401、权限 403、格式/provider 400/415/422 分别报告；删除未确认是独立 cleanup failure。Provider 未返回 usage/cost 时存 null。
+
+Source recovery 只由 Source run/retry 触发；Reference recovery 只由 Reference extract/retry 触发。add、relocate、status 和打开项目不会改变 running Run。

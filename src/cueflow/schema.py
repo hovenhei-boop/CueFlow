@@ -23,10 +23,28 @@ ARTIFACT_KINDS = frozenset(
         "subtitle",
         "qa",
         "srt_render",
+        "reference_input",
+        "reference_evidence",
+        "reference_bundle",
     }
 )
 CHUNK_KINDS = frozenset({"media_chunk", "transcript", "alignment"})
 GLOSSARY_KINDS = frozenset({"system_glossary", "project_glossary", "effective_glossary"})
+REFERENCE_KINDS = frozenset(
+    {"reference_input", "reference_evidence", "reference_bundle"}
+)
+REFERENCE_EVIDENCE_ROLES = frozenset(
+    {
+        "text_subtitle",
+        "bitmap_subtitle",
+        "burned_subtitle",
+        "cloud_reference_asr",
+        "local_reference_asr",
+        "document_text",
+        "cloud_document_parse",
+        "image_visual",
+    }
+)
 ATOM_CLASSES = frozenset({"word", "cjk_character", "number", "pronounceable_symbol"})
 INT64_MAX = 2**63 - 1
 
@@ -60,11 +78,16 @@ class InputRef:
     role: str
     artifact_id: str | None = None
     source_asset_id: str | None = None
+    reference_asset_id: str | None = None
     coordinate_range: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        if bool(self.artifact_id) == bool(self.source_asset_id):
-            raise ContractError("InputRef requires exactly one artifact_id or source_asset_id")
+        identities = (self.artifact_id, self.source_asset_id, self.reference_asset_id)
+        if sum(value is not None for value in identities) != 1:
+            raise ContractError(
+                "InputRef requires exactly one artifact_id, source_asset_id, "
+                "or reference_asset_id"
+            )
 
     def as_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {"role": self.role}
@@ -72,6 +95,8 @@ class InputRef:
             result["artifact_id"] = self.artifact_id
         if self.source_asset_id is not None:
             result["source_asset_id"] = self.source_asset_id
+        if self.reference_asset_id is not None:
+            result["reference_asset_id"] = self.reference_asset_id
         if self.coordinate_range is not None:
             result["coordinate_range"] = dict(self.coordinate_range)
         return result
@@ -146,6 +171,7 @@ class ArtifactEnvelope:
                 role=_string(item.get("role"), "inputs.role"),
                 artifact_id=_optional_string(item.get("artifact_id")),
                 source_asset_id=_optional_string(item.get("source_asset_id")),
+                reference_asset_id=_optional_string(item.get("reference_asset_id")),
                 coordinate_range=item.get("coordinate_range"),
             )
             for raw in inputs_value
@@ -205,6 +231,10 @@ def validate_scope(kind: str, scope_key: str, payload: Mapping[str, Any]) -> Non
         chunk_id = payload.get("chunk_id")
         if not isinstance(chunk_id, str) or chunk_id != scope_key:
             raise ContractError(f"{kind} scope_key must equal payload.chunk_id")
+    elif kind in REFERENCE_KINDS:
+        reference_asset_id = payload.get("reference_asset_id")
+        if not isinstance(reference_asset_id, str) or reference_asset_id != scope_key:
+            raise ContractError(f"{kind} scope_key must equal payload.reference_asset_id")
     elif scope_key != "global":
         raise ContractError(f"{kind} must use global scope_key")
 
@@ -266,6 +296,73 @@ def validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
         _string(payload.get("qa_artifact_id"), "qa_artifact_id")
         if not isinstance(payload.get("text"), str):
             raise ContractError("srt_render.text must be a string")
+    elif kind == "reference_input":
+        validate_reference_input_payload(payload)
+    elif kind == "reference_evidence":
+        validate_reference_evidence_payload(payload)
+    elif kind == "reference_bundle":
+        validate_reference_bundle_payload(payload)
+
+
+def validate_reference_input_payload(payload: Mapping[str, Any]) -> None:
+    _string(payload.get("reference_asset_id"), "reference_input.reference_asset_id")
+    _string(payload.get("run_id"), "reference_input.run_id")
+    _string(payload.get("work_item_id"), "reference_input.work_item_id")
+    _string(payload.get("input_kind"), "reference_input.input_kind")
+    _string(payload.get("branch"), "reference_input.branch")
+    _string(payload.get("detected_format"), "reference_input.detected_format")
+    _nullable_number(
+        payload.get("local_measured_duration"),
+        "reference_input.local_measured_duration",
+    )
+    _mapping(payload.get("manifest"), "reference_input.manifest")
+
+
+def validate_reference_evidence_payload(payload: Mapping[str, Any]) -> None:
+    _string(payload.get("reference_asset_id"), "reference_evidence.reference_asset_id")
+    _string(payload.get("run_id"), "reference_evidence.run_id")
+    _string(payload.get("work_item_id"), "reference_evidence.work_item_id")
+    role = _string(payload.get("evidence_role"), "reference_evidence.evidence_role")
+    if role not in REFERENCE_EVIDENCE_ROLES:
+        raise ContractError(f"unsupported Reference evidence role: {role}")
+    _string(payload.get("branch"), "reference_evidence.branch")
+    if "content" not in payload:
+        raise ContractError("reference_evidence.content is required")
+    _mapping(payload.get("provenance"), "reference_evidence.provenance")
+    _nullable_number(
+        payload.get("local_measured_duration"),
+        "reference_evidence.local_measured_duration",
+    )
+    _nullable_number(
+        payload.get("provider_usage_duration"),
+        "reference_evidence.provider_usage_duration",
+    )
+    provider_usage = payload.get("provider_usage")
+    if provider_usage is not None:
+        _mapping(provider_usage, "reference_evidence.provider_usage")
+    _nullable_number(payload.get("provider_cost"), "reference_evidence.provider_cost")
+    if "media_duration" in payload:
+        raise ContractError(
+            "Reference evidence must not use media_duration; use local_measured_duration"
+        )
+
+
+def validate_reference_bundle_payload(payload: Mapping[str, Any]) -> None:
+    _string(payload.get("reference_asset_id"), "reference_bundle.reference_asset_id")
+    _string(payload.get("run_id"), "reference_bundle.run_id")
+    outcome = _string(payload.get("outcome"), "reference_bundle.outcome")
+    if outcome not in {"complete", "partial"}:
+        raise ContractError("Reference bundle outcome must be complete or partial")
+    evidence_ids = payload.get("evidence_artifact_ids")
+    if (
+        not isinstance(evidence_ids, list)
+        or not evidence_ids
+        or any(not isinstance(value, str) or not value for value in evidence_ids)
+    ):
+        raise ContractError("Reference bundle requires evidence Artifact ids")
+    failures = payload.get("failures")
+    if not isinstance(failures, list) or any(not isinstance(value, Mapping) for value in failures):
+        raise ContractError("reference_bundle.failures must be an array of objects")
 
 
 def validate_glossary_payload(payload: Mapping[str, Any]) -> None:
@@ -704,6 +801,17 @@ def _nullable_positive_integer(value: Any, name: str) -> int | None:
 
 def _nullable_non_negative_integer(value: Any, name: str) -> int | None:
     return None if value is None else _non_negative_integer(value, name)
+
+
+def _nullable_number(value: Any, name: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ContractError(f"{name} must be a number or null")
+    result = float(value)
+    if result < 0:
+        raise ContractError(f"{name} must be non-negative")
+    return result
 
 
 def _string(value: Any, name: str, *, allow_empty: bool = False) -> str:

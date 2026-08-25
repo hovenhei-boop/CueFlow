@@ -14,6 +14,14 @@ class SourceMissingError(IntegrityError):
     """The registered external source path is unavailable."""
 
 
+class ReferenceMissingError(IntegrityError):
+    """A registered Reference locator is missing or unreadable."""
+
+
+class UnsupportedReferenceError(ContractError):
+    """A Reference format or route is explicitly unsupported."""
+
+
 class ProviderError(CueFlowError):
     """Base provider failure."""
 
@@ -24,6 +32,31 @@ class ProviderUnavailableError(ProviderError):
 
 class DeliveryAmbiguousError(ProviderError):
     """A remote request may have been delivered but no definite result was received."""
+
+
+class ProviderIdentityError(ProviderError):
+    """Provider credentials are missing or rejected."""
+
+
+class ProviderPermissionError(ProviderError):
+    """Provider credentials do not grant the requested operation."""
+
+
+class ProviderFormatError(ProviderError):
+    """The provider rejected the supplied Reference format."""
+
+
+class ProviderCleanupError(ProviderError):
+    """A provider-owned temporary resource could not be deleted."""
+
+
+class ReferenceRunFailedError(CueFlowError):
+    """A Reference Run reached the frozen partial or failed outcome."""
+
+    def __init__(self, run_id: str, outcome: str) -> None:
+        super().__init__(f"Reference Run {run_id} finished with outcome={outcome}")
+        self.run_id = run_id
+        self.outcome = outcome
 
 
 class ExportBlockedError(CueFlowError):

@@ -1,10 +1,10 @@
-# CueFlow v0.1.1 Architecture
+# CueFlow v0.2.1 Architecture
 
-状态：冻结基线
+状态：v0.1.1 Source 主链冻结；v0.2.1 Reference 旁路冻结
 
 ## 1. 产品边界
 
-CueFlow v0.1.1 处理已经剪辑完成的视频或音频，唯一主链为：
+CueFlow v0.2.1 保持已经剪辑完成视频或音频的唯一 Source 主链：
 
 ```text
 Source Media
@@ -19,7 +19,7 @@ Source Media
 → output/subtitles.srt
 ```
 
-目标是忠实转写、精确时间轴、纠错和导出。v0.1.1 不主动编辑或净化成片内容，不删除实际说出的 Atom，不做视频编辑、视觉理解或额外用户界面。
+目标是忠实转写、精确时间轴、纠错和导出。v0.2.1 不改变这条主链的任何行为，另加 `Reference Material → deterministic extraction / optional Reference ASR, Vision, Cloud Document Parse → Reference Evidence` 旁路。该旁路不创建 Transcript、Alignment、Subtitle、QA 或 SRT，不做 glossary/terminology/candidate/acceptance，也不增加 UI。
 
 ## 2. 核心不变量
 
@@ -123,7 +123,7 @@ Artifact publish 顺序为：写临时文件、flush/fsync、原子替换到内�
 
 Invocation 保存 operation、provider/model、attempt number、状态、输出 Artifact，以及按顺序绑定的上游 Artifact IDs。失败或 delivery ambiguous 的 Invocation 不被自动重放。
 
-只有真正开始 `run` 或 `retry` 时才执行单 Orchestrator crash recovery：遗留 `created` Invocation 收口为 `definitely_not_sent`，遗留 `sending` 收口为 `delivery_ambiguous`，对应 `running` Run 收口为 `interrupted`。本次 Ctrl+C 同样使 Run 进入 `interrupted`；其他未预期异常使 Run 进入 `failed`。Run 与 in-flight Invocation 在一个 SQLite 事务中收口。打开项目、`status`、glossary 和 asset 管理不会触发恢复。
+只有真正开始 Source `run/retry` 或 Reference `extract/retry` 时才执行对应类别的单 Orchestrator crash recovery：遗留 `created` Invocation 收口为 `definitely_not_sent`，遗留 `sending` 收口为 `delivery_ambiguous`，对应 `running` Run 收口为 `interrupted`。Source 入口不恢复 Reference，Reference 入口不恢复 Source。本次 Ctrl+C 同样使 Run 进入 `interrupted`；其他未预期异常使 Run 进入 `failed`。Run 与 in-flight Invocation 在一个 SQLite 事务中收口。打开项目、`status`、glossary、asset、Reference add/relocate/status 不触发恢复。
 
 显式 retry 可以把同一个 `failed` 或 `interrupted` Run 重新置为 `running`。Retry 从绑定输入读取项目内 Artifact，不重新访问源媒体，不依据当前 pointer 猜测输入，不重跑其他已成功 Chunk；目标完成后只重建真正必要的下游。
 
@@ -138,6 +138,21 @@ failed/interrupted --explicit targeted retry→ running
 
 ## 10. CLI 与输出
 
-v0.1.1 唯一界面是现有 CLI：`init`、`glossary set`、`asset add`、`run`、`status`、`retry`。不增加模型、Provider、Chunk 或字幕风格选择。失败 JSON 在可用时包含 Run/Invocation identity、Invocation 当前状态和合法下一步；它只描述显式操作，不自动 retry。
+v0.1.1 的 `init`、`glossary set`、`asset add`、`run`、`status`、`retry` 保持不变。v0.2.1 只新增 `reference add/extract/relocate/status/retry`。不提供 `--document-visual` 或 `--audio-upload-format`。失败 JSON 在可用时包含 Run/Invocation/work-item identity、当前状态和合法下一步；它只描述显式操作，不自动 retry。
 
 唯一正常用户输出是 `output/subtitles.srt`。内部 Artifact、SQLite、blob 和临时文件位于 `.cueflow/`；临时文件完成后清理。
+
+## 11. Reference 旁路架构
+
+ReferenceAsset 与 SourceAsset 是两个独立领域对象；二者都使用 filename 精确 identity，但 Reference 不挂为 auxiliary Source。顶层仍是 Project → Run；Reference Run 与 Source Run 都是 Project 任务实例，`reference_runs` 只是 runs 扩展，不形成 ReferenceAsset → Run 层级。
+
+每次 `reference extract` 新建 Run，先确定性识别当前文件，再生成 ordered work items。确定性 TXT/MD、cue、OOXML 和完整 text-layer PDF 分支不创建 Invocation。真实 Reference ASR、Vision 或 Cloud document work item 才创建 Invocation；各 evidence role 独立，bundle 只收集引用，不融合。Retry 在原 Run 内只追加失败 work item 的 attempt，成功项及其 Evidence 保持不变。
+
+Artifact 图只新增：
+
+```text
+ReferenceAsset → ReferenceInput → ReferenceEvidence[role]
+all succeeded ReferenceEvidence in one Run → ReferenceBundle
+```
+
+Cloud Profile 的显式 Reference extract 可能上传 legacy Office/scanned 或 mixed PDF、唯一位图 cue、临时 full-frame window、独立图片和 PCM/WAV 音频段。full-frame 只保留 manifest/hash/timestamp/profile，图像请求正文不持久化；Cloud document file_id 在 finally 删除。完整格式与路由见 `reference-extraction.md`。

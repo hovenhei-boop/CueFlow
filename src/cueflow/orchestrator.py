@@ -215,7 +215,17 @@ def retry_invocation(
 
 def project_status(context: ProjectContext) -> dict[str, Any]:
     project = context.registry.project()
-    latest = context.registry.latest_run(context.project_id)
+    latest = context.registry.latest_source_run(context.project_id)
+    reference_runs = [
+        {
+            "run_id": str(row["run_id"]),
+            "reference_asset_id": str(row["reference_asset_id"]),
+            "status": str(row["status"]),
+            "outcome": row["outcome"],
+            "error_message": row["error_message"],
+        }
+        for row in context.registry.reference_runs()
+    ]
     pointers = [
         {
             "artifact_kind": str(row["artifact_kind"]),
@@ -241,7 +251,7 @@ def project_status(context: ProjectContext) -> dict[str, Any]:
         "project_id": context.project_id,
         "display_name": str(project["display_name"]),
         "processing_profile": str(project["processing_profile"]),
-        "latest_run": (
+        "latest_source_run": (
             {
                 "run_id": str(latest["run_id"]),
                 "status": str(latest["status"]),
@@ -250,6 +260,7 @@ def project_status(context: ProjectContext) -> dict[str, Any]:
             if latest is not None
             else None
         ),
+        "reference_runs": reference_runs,
         "current_artifacts": pointers,
         "warnings": warnings,
     }

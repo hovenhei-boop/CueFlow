@@ -1,6 +1,6 @@
-# CueFlow v0.1.1 Domain Model
+# CueFlow v0.2.1 Domain Model
 
-状态：冻结基线
+状态：v0.1.1 Source 领域冻结；v0.2.1 Reference 领域冻结
 
 ## 1. Project 与 SourceAsset
 
@@ -10,11 +10,11 @@ SourceAsset 是可变的外部文件引用，identity 只取 `Path.name` 精确�
 
 ## 2. Artifact 基础模型
 
-v0.1.1 Artifact kinds：`media_probe`、`timeline_audio`、`chunk_plan`、`media_chunk`、三类 Glossary、`transcript`、`alignment`、`subtitle`、`qa`、`srt_render`。
+Artifact kinds 在 v0.1.1 集合上新增 `reference_input`、`reference_evidence`、`reference_bundle`。
 
-Artifact 是不可变、内容寻址的 Envelope。身份覆盖 kind、scope、Schema semantic version、Producer identity、按顺序排列的 exact inputs 和 payload；不覆盖创建时间与存储路径。`scope_key` 对 `media_chunk`、`transcript`、`alignment` 使用 `chunk_id`，其余 Artifact 使用 `global`。
+Artifact 是不可变、内容寻址的 Envelope。身份覆盖 kind、scope、Schema semantic version、Producer identity、按顺序排列的 exact inputs 和 payload；不覆盖创建时间与存储路径。`scope_key` 对 `media_chunk`、`transcript`、`alignment` 使用 `chunk_id`，Reference kinds 使用 `reference_asset_id`，其余 Artifact 使用 `global`。
 
-Artifact input 必须精确引用一个 Artifact 或 SourceAsset，并保存 role 与可选 coordinate range。依赖引用具体版本，不引用“当前同类对象”。
+Artifact input 必须精确引用一个 Artifact、SourceAsset 或 ReferenceAsset，并保存 role 与可选 coordinate range；三种 identity 恰好出现一个。依赖引用具体版本，不引用“当前同类对象”。
 
 `(project_id, artifact_kind, scope_key)` 的 CurrentPointer 指向当前 Artifact 并携带 stale 状态。历史 Artifact 保持不可变。内容寻址可以避免重复存储相同 bytes，但不能让新 Run 跳过实际阶段执行。
 
@@ -86,3 +86,23 @@ SemanticBudgetReset 只由显式 targeted retry 创建，绑定原 Run、Chunk�
 ## 8. SrtRender
 
 SrtRenderArtifact 引用 current Subtitle 与非 blocked QA，保存 UTF-8 SRT text 与 byte length。发布 Artifact 成功后，使用同目录临时文件和原子替换更新唯一用户输出 `output/subtitles.srt`。
+
+## 9. ReferenceAsset
+
+ReferenceAsset 与 SourceAsset 完全分离，不能使用 `asset_kind=auxiliary` 模拟。其 identity 只取 `Path.name` 精确字符串；表中只保存 id、filename、locator、检测后的格式/媒体类别和登记时间，不含内容 hash、size、mtime 或 location history。同名重复登记返回原对象且不更新 locator。
+
+`relocate` 只为 missing/unreadable locator 在用户指定文件夹的直接子项中找精确 filename；它不是 relink，不递归、不扫描其他目录、不碰 Source。Reference 外部文件可原位覆盖；之后的每次 extract 新建独立 Run 并读取当前内容。
+
+## 10. Reference Artifact 与 Evidence role
+
+Reference Artifact 使用 ReferenceAsset id 作为 scope。`reference_input` 保存当次 work item 的稳定 manifest、内部 blob 引用、权威时间和 local facts；外部 Reference 本体不因此获得内容 identity。`reference_evidence` 保存独立 content/provenance/usage；`reference_bundle` 引用同一 Run 已成功 Evidence，并列出失败项。
+
+Evidence role 只允许：`text_subtitle`、`bitmap_subtitle`、`burned_subtitle`、`cloud_reference_asr`、`local_reference_asr`、`document_text`、`cloud_document_parse`、`image_visual`。不同 role 不自动融合。`image_visual` 只用于独立 PNG/JPEG/WebP，不用于 PDF 页面。
+
+## 11. Reference Run、work item 与 Invocation detail
+
+Project → Run 是唯一顶层关系。Reference Run 是现有 Run 加 `reference_asset_id`、聚合 outcome 和当前 bundle 的扩展；同一 ReferenceAsset 可有任意多个 Run。`reference status` 按资产列出全部 Run。
+
+每个 Reference work item 保存有序 ordinal、branch、evidence role、冻结 work spec、状态、成功 Evidence 或失败详情。Reference Invocation detail 扩展现有 Invocation，保存 work item/branch、provider/model、实际 config、有序 input Artifact、response id、`local_measured_duration`、`provider_usage_duration`、provider usage/cost、retry parent/reason、failure 和 Cloud cleanup facts。Provider 未报告的数据为 null，不伪造成 0。
+
+聚合映射固定为 `succeeded/complete`、`failed/partial`、`failed/failed`。Retry 只在原 Run 内追加失败 work item 的 attempt；成功项永不重跑，成功后发布新 bundle 并引用旧成功 Evidence。每模型 work item 每 Run 最多两个 sent attempt。

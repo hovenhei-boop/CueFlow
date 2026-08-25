@@ -199,7 +199,7 @@ def test_full_orchestrator_preserves_source_and_exports_only_srt(tmp_path: Path)
             row["scope_key"] == "global"
             for row in context.registry.current_pointers(context.project_id, "alignment")
         )
-        assert project_status(context)["latest_run"]["status"] == "succeeded"
+        assert project_status(context)["latest_source_run"]["status"] == "succeeded"
     finally:
         context.close()
 
@@ -221,7 +221,7 @@ def test_unaligned_atoms_get_one_repair_then_block_export(tmp_path: Path) -> Non
             )
         assert UnalignableAligner.calls == 2
         assert not (context.root / "output" / "subtitles.srt").exists()
-        assert project_status(context)["latest_run"]["status"] == "failed"
+        assert project_status(context)["latest_source_run"]["status"] == "failed"
     finally:
         context.close()
 
