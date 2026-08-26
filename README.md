@@ -1,6 +1,6 @@
 # CueFlow
 
-CueFlow v0.2.1 是面向已剪辑完成媒体的项目式字幕生成与检查引擎。v0.1.1 的 Source Media → Transcript → Alignment → Subtitle → QA → SRT 主链保持冻结；v0.2.1 只新增 Reference Material → 确定性提取/可选 Reference ASR、Vision、Cloud Document Parse → 带 provenance 的 Reference Evidence 旁路。Reference Evidence 不进入 Transcript、Alignment 或 SRT。
+CueFlow v0.3.0 是面向已剪辑完成媒体的项目式字幕生成与检查引擎。Source 主链为 Media Prep → 远端语义转写与纠错 → 本地 Forced Alignment → Subtitle → QA → SRT。独立的 Reference 旁路通过确定性提取或远端 ASR、Vision、Document Parse 生成带 provenance 的 Evidence，不进入 Source Transcript、Alignment 或 SRT。
 
 ## 安装
 
@@ -8,17 +8,19 @@ Python 3.10 或更高版本：
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\python -m pip install -e ".[local,cloud,office,dev]"
+.venv\Scripts\python -m pip install -e ".[alignment,cloud,dev]"
 ```
 
 运行媒体链需要可执行的 `ffmpeg` 与 `ffprobe`。可通过 PATH，或使用
-`CUEFLOW_FFMPEG`、`CUEFLOW_FFPROBE` 指定绝对路径。Cloud Profile 只从
+`CUEFLOW_FFMPEG`、`CUEFLOW_FFPROBE` 指定绝对路径。远端 Provider 从
 `DASHSCOPE_API_KEY` 与 `DASHSCOPE_BASE_URL` 读取凭据和地域 endpoint。
+`alignment` extra 提供本地 Forced Aligner 所需的 `qwen-asr`；设备与 dtype 由运行时检测，
+模型缓存可由 `CUEFLOW_MODEL_CACHE` 指定。完整 Source 主链需要 `alignment` 和 `cloud`，确定性 Reference 提取不加载模型。
 
 ## CLI
 
 ```text
-cueflow init PROJECT_DIR --name NAME --profile LOCAL_PROFILE|CLOUD_PROFILE
+cueflow init PROJECT_DIR --name NAME
 cueflow glossary set PROJECT_DIR GLOSSARY.json
 cueflow asset add PROJECT_DIR FILE --kind auxiliary
 cueflow run PROJECT_DIR MEDIA
@@ -37,4 +39,6 @@ CueFlow 分别以 `Path.name` 精确字符串作为 Source 与 Reference identit
 
 CLI 执行失败时以结构化 JSON 报告可用的 `run_id`，并在存在失败 Invocation 时报告 `invocation_id`、当前状态和合法 `next_actions`。`delivery_ambiguous` 从不自动 retry；Source 使用显式 `cueflow retry`，Reference 使用显式 work-item `cueflow reference retry`。
 
-Reference 的详细格式、视频路由、云端上传范围、模型常量、usage 双时长和限制见 [Reference Extraction](docs/reference-extraction.md)；版本边界见 [Roadmap](docs/roadmap.md)。
+执行 `run` 会将音频 Chunk 发送到远端语义 Provider；`reference extract` 按输入格式使用确定性提取或上传指定 Reference 的文档、音频段和图像。登记、查看状态与确定性提取不上传文件。
+
+Reference 的详细格式、视频路由、云端上传范围、模型常量、usage 双时长和限制见 [Reference Extraction](docs/reference-extraction.md)；后续范围见 [Roadmap](docs/roadmap.md)。

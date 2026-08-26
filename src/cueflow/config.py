@@ -6,14 +6,12 @@ from dataclasses import asdict, dataclass
 from importlib import import_module
 from typing import Any
 
-SCHEMA_VERSION = "1.1.0"
-COMPONENT_VERSION = "0.2.1"
+SCHEMA_VERSION = "2.0.0"
+COMPONENT_VERSION = "0.3.0"
 ATOMIZER_VERSION = "0.1.0"
 GLOSSARY_NORMALIZATION_VERSION = "0.1.0"
 SEMANTIC_RETRY_RESET_LIMIT = 2
 
-LOCAL_ASR_REPO = "Qwen/Qwen3-ASR-1.7B"
-LOCAL_ASR_REVISION = "e6942fcb56f665d470e39e6fe9efe6f5f31ee254"
 LOCAL_ALIGNER_REPO = "Qwen/Qwen3-ForcedAligner-0.6B"
 LOCAL_ALIGNER_REVISION = "ff5efe6a75df02f6d1d05ac939a673f7909b1849"
 CLOUD_MODEL = "qwen3.5-omni-plus-2026-03-15"
@@ -101,33 +99,6 @@ class QaRulesetConfig:
 
 
 @dataclass(frozen=True)
-class ProfileConfig:
-    name: str
-    semantic_provider: str
-    semantic_model: str
-    semantic_revision: str
-    aligner_provider: str = "qwen-local"
-    aligner_model: str = LOCAL_ALIGNER_REPO
-    aligner_revision: str = LOCAL_ALIGNER_REVISION
-
-
-PROFILES: dict[str, ProfileConfig] = {
-    "LOCAL_PROFILE": ProfileConfig(
-        name="LOCAL_PROFILE",
-        semantic_provider="qwen-local",
-        semantic_model=LOCAL_ASR_REPO,
-        semantic_revision=LOCAL_ASR_REVISION,
-    ),
-    "CLOUD_PROFILE": ProfileConfig(
-        name="CLOUD_PROFILE",
-        semantic_provider="dashscope-openai-compatible",
-        semantic_model=CLOUD_MODEL,
-        semantic_revision=CLOUD_MODEL,
-    ),
-}
-
-
-@dataclass(frozen=True)
 class RuntimeDeviceConfig:
     device: str
     dtype: str
@@ -163,10 +134,9 @@ class RuntimeConfig:
         )
 
 
-def result_config(profile: str, runtime: RuntimeConfig | None = None) -> dict[str, Any]:
+def result_config(runtime: RuntimeConfig | None = None) -> dict[str, Any]:
     chosen_runtime = runtime or RuntimeConfig.detect()
     return {
-        "profile": asdict(PROFILES[profile]),
         "media": asdict(MediaPrepConfig()),
         "chunker": asdict(ChunkerConfig()),
         "segmenter": asdict(SegmenterConfig()),

@@ -12,8 +12,8 @@ from cueflow.config import SEMANTIC_RETRY_RESET_LIMIT
 from cueflow.errors import ContractError, IntegrityError
 from cueflow.schema import ArtifactEnvelope, utc_now
 
-REGISTRY_SCHEMA_VERSION = 2
-V1_REQUIRED_TABLES = frozenset(
+REGISTRY_SCHEMA_VERSION = 3
+SOURCE_TABLES = frozenset(
     {
         "projects",
         "source_assets",
@@ -35,7 +35,7 @@ REFERENCE_TABLES = frozenset(
         "artifact_reference_dependencies",
     }
 )
-REQUIRED_TABLES = V1_REQUIRED_TABLES | REFERENCE_TABLES
+REQUIRED_TABLES = SOURCE_TABLES | REFERENCE_TABLES
 SOURCE_ASSET_COLUMNS = (
     "project_id",
     "source_asset_id",
@@ -48,8 +48,8 @@ SOURCE_ASSET_COLUMNS = (
     "registered_at",
 )
 
-V1_TABLE_COLUMNS = {
-    "projects": ("project_id", "display_name", "created_at", "processing_profile"),
+SOURCE_TABLE_COLUMNS = {
+    "projects": ("project_id", "display_name", "created_at"),
     "source_assets": SOURCE_ASSET_COLUMNS,
     "artifacts": (
         "project_id",
@@ -277,8 +277,7 @@ PRAGMA journal_mode = WAL;
 CREATE TABLE IF NOT EXISTS projects (
     project_id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    processing_profile TEXT NOT NULL CHECK (processing_profile IN ('LOCAL_PROFILE','CLOUD_PROFILE'))
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS source_assets (
@@ -422,17 +421,14 @@ class Registry:
         version = int(version_row[0])
         if not tables and version == 0:
             self._connection.executescript(DDL)
-            self._validate_v2_schema(self._table_names())
-            return
-        if version == 1:
-            self._migrate_v1_to_v2(tables)
+            self._validate_schema(self._table_names())
             return
         if version != REGISTRY_SCHEMA_VERSION:
             raise IntegrityError(
-                "registry migration is unavailable for unsupported CueFlow schema version: "
-                f"expected 1 or {REGISTRY_SCHEMA_VERSION}, found {version}"
+                "incompatible CueFlow registry schema version: "
+                f"expected {REGISTRY_SCHEMA_VERSION}, found {version}"
             )
-        self._validate_v2_schema(tables)
+        self._validate_schema(tables)
 
     def _table_names(self) -> set[str]:
         return {
@@ -443,30 +439,16 @@ class Registry:
             ).fetchall()
         }
 
-    def _validate_v1_schema(self, tables: set[str]) -> None:
-        missing_tables = V1_REQUIRED_TABLES.difference(tables)
-        if missing_tables:
-            raise IntegrityError(
-                "CueFlow v0.1.1 registry schema is incomplete: "
-                f"missing tables {sorted(missing_tables)}"
-            )
-        for table, expected_columns in V1_TABLE_COLUMNS.items():
-            if self._table_columns(table) != expected_columns:
-                raise IntegrityError(
-                    f"CueFlow registry {table} schema does not match v0.1.1"
-                )
-
-    def _validate_v2_schema(self, tables: set[str]) -> None:
-        self._validate_v1_schema(tables)
-        missing_tables = REFERENCE_TABLES.difference(tables)
+    def _validate_schema(self, tables: set[str]) -> None:
+        missing_tables = REQUIRED_TABLES.difference(tables)
         if missing_tables:
             raise IntegrityError(
                 f"CueFlow registry schema is incomplete: missing tables {sorted(missing_tables)}"
             )
-        for table, expected_columns in REFERENCE_TABLE_COLUMNS.items():
+        for table, expected_columns in (SOURCE_TABLE_COLUMNS | REFERENCE_TABLE_COLUMNS).items():
             if self._table_columns(table) != expected_columns:
                 raise IntegrityError(
-                    f"CueFlow registry {table} schema does not match v0.2.1"
+                    f"CueFlow registry {table} schema does not match the current contract"
                 )
 
     def _table_columns(self, table: str) -> tuple[str, ...]:
@@ -474,26 +456,6 @@ class Registry:
             str(row[1])
             for row in self._connection.execute(f"PRAGMA table_info({table})").fetchall()
         )
-
-    def _migrate_v1_to_v2(self, tables: set[str]) -> None:
-        self._connection.execute("BEGIN IMMEDIATE")
-        try:
-            self._validate_v1_schema(tables)
-            unexpected_reference_tables = REFERENCE_TABLES.intersection(tables)
-            if unexpected_reference_tables:
-                raise IntegrityError(
-                    "CueFlow v1 registry contains unexpected Reference tables: "
-                    f"{sorted(unexpected_reference_tables)}"
-                )
-            for statement in REFERENCE_DDL_STATEMENTS:
-                self._connection.execute(statement)
-            self._connection.execute(f"PRAGMA user_version = {REGISTRY_SCHEMA_VERSION}")
-            self._validate_v2_schema(self._table_names())
-        except BaseException:
-            self._connection.rollback()
-            raise
-        else:
-            self._connection.commit()
 
     def close(self) -> None:
         self._connection.close()
@@ -512,13 +474,11 @@ class Registry:
         else:
             self._connection.commit()
 
-    def create_project(self, display_name: str, processing_profile: str) -> str:
-        if processing_profile not in {"LOCAL_PROFILE", "CLOUD_PROFILE"}:
-            raise ContractError("invalid processing profile")
+    def create_project(self, display_name: str) -> str:
         project_id = "prj_" + uuid.uuid4().hex
         self._connection.execute(
-            "INSERT INTO projects VALUES (?, ?, ?, ?)",
-            (project_id, display_name, utc_now(), processing_profile),
+            "INSERT INTO projects VALUES (?, ?, ?)",
+            (project_id, display_name, utc_now()),
         )
         self._connection.commit()
         return project_id
@@ -1147,11 +1107,11 @@ class Registry:
         return cast(sqlite3.Row, row)
 
     def latest_run(self, project_id: str) -> sqlite3.Row | None:
-        """Return the latest Source Run, preserving the v0.1.1 API meaning."""
+        """Return the latest Source Run."""
         return self.latest_source_run(project_id)
 
     def recover_running_runs(self) -> list[str]:
-        """Recover Source Runs; retained as the frozen v0.1.1 entry point."""
+        """Recover Source Runs without changing Reference Runs."""
         return self.recover_running_source_runs()
 
     def recover_running_source_runs(self) -> list[str]:

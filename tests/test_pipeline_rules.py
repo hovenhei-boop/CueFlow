@@ -16,7 +16,7 @@ from cueflow.segmentation import segment_subtitles
 
 
 def _producer(component: str) -> Producer:
-    return Producer(component, "0.1.0", None, None, None, hash_json({"component": component}))
+    return Producer(component, "0.1.0", None, None, hash_json({"component": component}))
 
 
 def _aligned_chunk(

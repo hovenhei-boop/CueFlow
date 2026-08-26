@@ -157,11 +157,8 @@ def probe_reference_media(path: Path, runtime: RuntimeConfig) -> ReferenceMediaP
 
 def plan_reference_media_work(
     probe: ReferenceMediaProbe,
-    processing_profile: str,
     pixel_subtitle_mode: Literal["burned", "none"] | None,
 ) -> tuple[ReferenceWorkSpec, ...]:
-    if processing_profile not in {"LOCAL_PROFILE", "CLOUD_PROFILE"}:
-        raise ContractError("invalid processing profile")
     codecs = [str(stream.get("codec_name") or "") for stream in probe.subtitle_streams]
     unsupported = [
         codec
@@ -197,23 +194,21 @@ def plan_reference_media_work(
         if str(stream.get("codec_name")) in BITMAP_SUBTITLE_CODECS
     ]
     if bitmap_streams:
-        if processing_profile == "CLOUD_PROFILE":
-            return tuple(
-                ReferenceWorkSpec(
-                    branch="bitmap_subtitle",
-                    evidence_role="bitmap_subtitle",
-                    kind="bitmap_vision",
-                    config={
-                        "stream_index": int(stream["index"]),
-                        "codec": str(stream["codec_name"]),
-                    },
-                )
-                for stream in bitmap_streams
+        return tuple(
+            ReferenceWorkSpec(
+                branch="bitmap_subtitle",
+                evidence_role="bitmap_subtitle",
+                kind="bitmap_vision",
+                config={
+                    "stream_index": int(stream["index"]),
+                    "codec": str(stream["codec_name"]),
+                },
             )
-        return _asr_specs(probe, cloud=False)
+            for stream in bitmap_streams
+        )
 
     if probe.width is None or probe.height is None:
-        return _asr_specs(probe, cloud=processing_profile == "CLOUD_PROFILE")
+        return _asr_specs(probe)
     if pixel_subtitle_mode is None:
         raise ContractError(
             "video without an independent subtitle track requires "
@@ -221,10 +216,8 @@ def plan_reference_media_work(
         )
     if pixel_subtitle_mode not in {"burned", "none"}:
         raise ContractError("pixel_subtitle_mode must be burned or none")
-    if processing_profile == "LOCAL_PROFILE":
-        return _asr_specs(probe, cloud=False)
     if pixel_subtitle_mode == "none":
-        return _asr_specs(probe, cloud=True)
+        return _asr_specs(probe)
 
     specs: list[ReferenceWorkSpec] = []
     for start_ms in range(0, probe.local_measured_duration_ms, REFERENCE_VISION_WINDOW_MS):
@@ -237,7 +230,7 @@ def plan_reference_media_work(
                 config={"start_ms": start_ms, "end_ms": end_ms},
             )
         )
-    specs.extend(_asr_specs(probe, cloud=True))
+    specs.extend(_asr_specs(probe))
     return tuple(specs)
 
 
@@ -485,8 +478,8 @@ def extract_bitmap_cues(
     )
 
 
-def _asr_specs(probe: ReferenceMediaProbe, *, cloud: bool) -> tuple[ReferenceWorkSpec, ...]:
-    role = "cloud_reference_asr" if cloud else "local_reference_asr"
+def _asr_specs(probe: ReferenceMediaProbe) -> tuple[ReferenceWorkSpec, ...]:
+    role = "cloud_reference_asr"
     branch = role
     if not probe.has_audio:
         return (

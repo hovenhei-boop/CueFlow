@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cueflow"
-version = "0.2.1"
+version = "0.3.0"
 description = "Content-addressed subtitle generation and QA engine"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,14 +14,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-local = [
+alignment = [
   "qwen-asr==0.0.6",
 ]
 cloud = [
   "openai>=2,<3",
-]
-office = [
-  "extractous>=0.3,<0.4",
 ]
 dev = [
   "build>=1.2,<2",

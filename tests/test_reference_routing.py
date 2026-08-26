@@ -44,7 +44,6 @@ def test_reference_evidence_roles_are_frozen_and_not_fusion_roles() -> None:
             "bitmap_subtitle",
             "burned_subtitle",
             "cloud_reference_asr",
-            "local_reference_asr",
             "document_text",
             "cloud_document_parse",
             "image_visual",
@@ -55,11 +54,10 @@ def test_reference_evidence_roles_are_frozen_and_not_fusion_roles() -> None:
 
 def test_frozen_video_routing_matrix_and_negative_routes() -> None:
     text = _probe(subtitles=({"index": 2, "codec_name": "subrip"},))
-    for profile in ("CLOUD_PROFILE", "LOCAL_PROFILE"):
-        specs = plan_reference_media_work(text, profile, None)
-        assert [(item.kind, item.evidence_role) for item in specs] == [
-            ("text_subtitle", "text_subtitle")
-        ]
+    specs = plan_reference_media_work(text, None)
+    assert [(item.kind, item.evidence_role) for item in specs] == [
+        ("text_subtitle", "text_subtitle")
+    ]
 
     bitmap = _probe(
         subtitles=(
@@ -71,33 +69,25 @@ def test_frozen_video_routing_matrix_and_negative_routes() -> None:
             },
         )
     )
-    assert [item.kind for item in plan_reference_media_work(bitmap, "CLOUD_PROFILE", None)] == [
+    assert [item.kind for item in plan_reference_media_work(bitmap, None)] == [
         "bitmap_vision"
     ]
-    assert [item.kind for item in plan_reference_media_work(bitmap, "LOCAL_PROFILE", None)] == [
-        "asr"
-    ]
 
-    burned_cloud = plan_reference_media_work(_probe(), "CLOUD_PROFILE", "burned")
+    burned_cloud = plan_reference_media_work(_probe(), "burned")
     assert {item.kind for item in burned_cloud} == {"frame_vision", "asr"}
     assert {item.evidence_role for item in burned_cloud} == {
         "burned_subtitle",
         "cloud_reference_asr",
     }
-    assert [item.kind for item in plan_reference_media_work(_probe(), "CLOUD_PROFILE", "none")] == [
+    assert [item.kind for item in plan_reference_media_work(_probe(), "none")] == [
         "asr"
     ]
-    assert [
-        item.evidence_role
-        for item in plan_reference_media_work(_probe(), "LOCAL_PROFILE", "burned")
-    ] == ["local_reference_asr"]
 
     with pytest.raises(ContractError, match="pixel_subtitle_mode"):
-        plan_reference_media_work(_probe(), "CLOUD_PROFILE", None)
+        plan_reference_media_work(_probe(), None)
     with pytest.raises(UnsupportedReferenceError, match="will not downgrade"):
         plan_reference_media_work(
             _probe(subtitles=({"index": 2, "codec_name": "unsupported_codec"},)),
-            "CLOUD_PROFILE",
             None,
         )
 
@@ -116,15 +106,11 @@ def test_no_audio_routes_are_explicit_and_burned_cloud_can_be_partial() -> None:
     )
     assert [
         item.kind
-        for item in plan_reference_media_work(bitmap_without_audio, "CLOUD_PROFILE", None)
+        for item in plan_reference_media_work(bitmap_without_audio, None)
     ] == ["bitmap_vision"]
-    assert [
-        item.kind
-        for item in plan_reference_media_work(bitmap_without_audio, "LOCAL_PROFILE", None)
-    ] == ["asr_unavailable"]
 
     burned = plan_reference_media_work(
-        _probe(audio=False, duration_ms=30_001), "CLOUD_PROFILE", "burned"
+        _probe(audio=False, duration_ms=30_001), "burned"
     )
     assert [item.kind for item in burned] == [
         "frame_vision",
@@ -135,7 +121,7 @@ def test_no_audio_routes_are_explicit_and_burned_cloud_can_be_partial() -> None:
 
 def test_asr_segmentation_is_pcm_work_item_bounded_and_covers_source_timeline() -> None:
     specs = plan_reference_media_work(
-        _probe(video=False, duration_ms=450_001), "CLOUD_PROFILE", None
+        _probe(video=False, duration_ms=450_001), None
     )
     assert [(item.config["start_ms"], item.config["end_ms"]) for item in specs] == [
         (0, 225_000),

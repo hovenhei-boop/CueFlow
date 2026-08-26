@@ -17,12 +17,10 @@ from cueflow.errors import (
     ProviderFormatError,
     ProviderIdentityError,
     ProviderPermissionError,
-    UnsupportedReferenceError,
 )
 from cueflow.reference_documents import (
     PdfClassification,
     classify_pdf,
-    extract_legacy_office_local,
     extract_ooxml,
 )
 from cueflow.reference_providers import (
@@ -38,7 +36,6 @@ def _producer() -> Producer:
     return Producer(
         component="reference-test",
         component_version="0.2.1",
-        processing_profile="CLOUD_PROFILE",
         provider="fixture",
         model="fixture",
         config_hash=hash_json({"fixture": True}),
@@ -121,63 +118,30 @@ def test_mixed_pdf_routes_entire_document_to_cloud_and_never_page_vision(
         tmp_path / "mixed.pdf",
         detected_format="pdf",
         media_category="document",
-        profile="CLOUD_PROFILE",
-        pixel_subtitle_mode=None,
-        runtime=SimpleNamespace(),
-    )
-    local = reference_orchestrator._plan_work(
-        tmp_path / "mixed.pdf",
-        detected_format="pdf",
-        media_category="document",
-        profile="LOCAL_PROFILE",
         pixel_subtitle_mode=None,
         runtime=SimpleNamespace(),
     )
     assert [(item.kind, item.evidence_role) for item in cloud] == [
         ("cloud_document", "cloud_document_parse")
     ]
-    assert local[0].kind == "unsupported"
-    assert all(item.evidence_role != "image_visual" for item in cloud + local)
+    assert all(item.evidence_role != "image_visual" for item in cloud)
 
 
-def test_extractous_office_extra_uses_local_file_api_without_ocr_or_url(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("detected_format", ["doc", "ppt", "xls", "png", "jpeg", "webp"])
+def test_document_and_image_routes_use_remote_work_items(
+    tmp_path: Path, detected_format: str
 ) -> None:
-    calls: list[tuple[str, str]] = []
-
-    class Extractor:
-        def set_ocr_config(self, _config: object) -> None:
-            raise AssertionError("OCR must remain disabled")
-
-        def extract_url(self, _url: str) -> None:
-            raise AssertionError("URL extraction must remain disabled")
-
-        def extract_file_to_string(self, path: str) -> tuple[str, dict[str, str]]:
-            calls.append(("extract_file_to_string", path))
-            return "legacy Office text", {"fixture": "local"}
-
-    monkeypatch.setattr(
-        reference_documents.importlib,
-        "import_module",
-        lambda name: SimpleNamespace(Extractor=Extractor) if name == "extractous" else None,
+    image = detected_format in {"png", "jpeg", "webp"}
+    specs = reference_orchestrator._plan_work(
+        tmp_path / f"reference.{detected_format}",
+        detected_format=detected_format,
+        media_category="image" if image else "document",
+        pixel_subtitle_mode=None,
+        runtime=SimpleNamespace(),
     )
-    path = tmp_path / "legacy.doc"
-    path.write_bytes(b"fixture")
-    extraction = extract_legacy_office_local(path, "doc")
-    assert calls == [("extract_file_to_string", str(path))]
-    assert extraction.metadata["parser"] == "extractous"
-    assert "legacy Office text" in json.dumps(extraction.content())
-
-
-def test_missing_office_extra_reports_install_or_cloud(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def missing(_name: str) -> object:
-        raise ImportError
-
-    monkeypatch.setattr(reference_documents.importlib, "import_module", missing)
-    with pytest.raises(UnsupportedReferenceError, match=r"cueflow\[office\].*CLOUD_PROFILE"):
-        extract_legacy_office_local(tmp_path / "legacy.xls", "xls")
+    assert [(item.kind, item.evidence_role) for item in specs] == [
+        ("image_vision", "image_visual") if image else ("cloud_document", "cloud_document_parse")
+    ]
 
 
 class _StatusError(Exception):

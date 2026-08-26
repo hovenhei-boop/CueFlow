@@ -39,7 +39,6 @@ REFERENCE_EVIDENCE_ROLES = frozenset(
         "bitmap_subtitle",
         "burned_subtitle",
         "cloud_reference_asr",
-        "local_reference_asr",
         "document_text",
         "cloud_document_parse",
         "image_visual",
@@ -57,7 +56,6 @@ def utc_now() -> str:
 class Producer:
     component: str
     component_version: str
-    processing_profile: str | None
     provider: str | None
     model: str | None
     config_hash: str
@@ -66,7 +64,6 @@ class Producer:
         return {
             "component": self.component,
             "component_version": self.component_version,
-            "processing_profile": self.processing_profile,
             "provider": self.provider,
             "model": self.model,
             "config_hash": self.config_hash,
@@ -152,13 +149,18 @@ class ArtifactEnvelope:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ArtifactEnvelope:
+        schema_version = _string(value.get("schema_version"), "schema_version")
+        _validate_schema_version(schema_version)
         producer_value = _mapping(value.get("producer"), "producer")
+        if set(producer_value) != {
+            "component", "component_version", "provider", "model", "config_hash"
+        }:
+            raise ContractError("producer fields do not match the current schema")
         producer = Producer(
             component=_string(producer_value.get("component"), "producer.component"),
             component_version=_string(
                 producer_value.get("component_version"), "producer.component_version"
             ),
-            processing_profile=_optional_string(producer_value.get("processing_profile")),
             provider=_optional_string(producer_value.get("provider")),
             model=_optional_string(producer_value.get("model")),
             config_hash=_string(producer_value.get("config_hash"), "producer.config_hash"),
@@ -178,7 +180,7 @@ class ArtifactEnvelope:
             for item in [_mapping(raw, "inputs[]")]
         )
         envelope = cls(
-            schema_version=_string(value.get("schema_version"), "schema_version"),
+            schema_version=schema_version,
             artifact_id=_string(value.get("artifact_id"), "artifact_id"),
             artifact_kind=_string(value.get("artifact_kind"), "artifact_kind"),
             scope_key=_string(value.get("scope_key"), "scope_key"),
@@ -205,9 +207,7 @@ class ArtifactEnvelope:
         }
 
     def validate(self) -> None:
-        major = _schema_major(self.schema_version)
-        if major != 1:
-            raise ContractError(f"unsupported schema major version: {major}")
+        _validate_schema_version(self.schema_version)
         validate_scope(self.artifact_kind, self.scope_key, self.payload)
         validate_payload(self.artifact_kind, self.payload)
         expected_hash = artifact_content_hash(
@@ -758,11 +758,14 @@ def _validate_chunk_coverage(
         raise ContractError("chunks do not cover the entire timeline")
 
 
-def _schema_major(version: str) -> int:
+def _validate_schema_version(version: str) -> None:
     parts = version.split(".")
     if len(parts) != 3 or not all(part.isdigit() for part in parts):
         raise ContractError("invalid schema version")
-    return int(parts[0])
+    if version != SCHEMA_VERSION:
+        raise ContractError(
+            f"incompatible schema version: expected {SCHEMA_VERSION}, found {version}"
+        )
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:

@@ -31,7 +31,6 @@ from cueflow.providers import (
     CloudOmniSemanticTranscriber,
     ForcedAligner,
     LocalQwenForcedAligner,
-    LocalQwenSemanticTranscriber,
     SemanticResult,
     SemanticTranscriber,
 )
@@ -45,12 +44,12 @@ from cueflow.qa import (
 from cueflow.schema import ArtifactEnvelope, InputRef, Producer, find_unaligned_atoms
 from cueflow.segmentation import segment_subtitles
 
-SemanticFactory = Callable[[str, RuntimeConfig], SemanticTranscriber]
+SemanticFactory = Callable[[], SemanticTranscriber]
 AlignerFactory = Callable[[RuntimeConfig], ForcedAligner]
 
 
-def initialize_project(root: Path, display_name: str, profile: str) -> ProjectContext:
-    context = ProjectContext.create(root, display_name, profile)
+def initialize_project(root: Path, display_name: str) -> ProjectContext:
+    context = ProjectContext.create(root, display_name)
     try:
         _publish_glossaries(context, [], [])
         return context
@@ -104,7 +103,6 @@ def run_project(
 ) -> dict[str, Any]:
     context.registry.recover_running_runs()
     chosen_runtime = runtime or RuntimeConfig.detect()
-    profile = str(context.registry.project()["processing_profile"])
     source_asset = context.register_external_asset(media_path, asset_kind="media")
     run_id = context.registry.create_run(
         context.project_id,
@@ -112,7 +110,7 @@ def run_project(
             "source_asset_id": source_asset["source_asset_id"],
             "filename": source_asset["filename"],
         },
-        hash_json(result_config(profile, chosen_runtime)),
+        hash_json(result_config(chosen_runtime)),
     )
     try:
         context.registry.set_run_status(run_id, "running")
@@ -126,7 +124,6 @@ def run_project(
         return _execute_existing_media_run(
             context,
             run_id=run_id,
-            profile=profile,
             runtime=chosen_runtime,
             media=media,
             effective_glossary=effective,
@@ -180,11 +177,9 @@ def retry_invocation(
             )
         context.registry.reopen_run_for_retry(run_id)
         chosen_runtime = runtime or RuntimeConfig.detect()
-        profile = str(context.registry.project()["processing_profile"])
         return _execute_existing_media_run(
             context,
             run_id=run_id,
-            profile=profile,
             runtime=chosen_runtime,
             media=media,
             effective_glossary=effective,
@@ -250,7 +245,6 @@ def project_status(context: ProjectContext) -> dict[str, Any]:
     return {
         "project_id": context.project_id,
         "display_name": str(project["display_name"]),
-        "processing_profile": str(project["processing_profile"]),
         "latest_source_run": (
             {
                 "run_id": str(latest["run_id"]),
@@ -270,7 +264,6 @@ def _execute_existing_media_run(
     context: ProjectContext,
     *,
     run_id: str,
-    profile: str,
     runtime: RuntimeConfig,
     media: MediaBundle,
     effective_glossary: ArtifactEnvelope,
@@ -285,8 +278,6 @@ def _execute_existing_media_run(
     transcripts, semantic_issues = _run_transcription_stage(
         context,
         run_id=run_id,
-        profile=profile,
-        runtime=runtime,
         media_chunks=media.media_chunks,
         effective_glossary=effective_glossary,
         semantic_factory=semantic_factory,
@@ -305,7 +296,6 @@ def _execute_existing_media_run(
     alignments = _run_alignment_stage(
         context,
         run_id=run_id,
-        profile=profile,
         runtime=runtime,
         media_chunks=media.media_chunks,
         transcripts=transcripts,
@@ -317,7 +307,6 @@ def _execute_existing_media_run(
     return _complete_downstream(
         context,
         run_id=run_id,
-        profile=profile,
         runtime=runtime,
         media=media,
         effective_glossary=effective_glossary,
@@ -332,8 +321,6 @@ def _run_transcription_stage(
     context: ProjectContext,
     *,
     run_id: str,
-    profile: str,
-    runtime: RuntimeConfig,
     media_chunks: Sequence[ArtifactEnvelope],
     effective_glossary: ArtifactEnvelope,
     semantic_factory: SemanticFactory,
@@ -357,13 +344,12 @@ def _run_transcription_stage(
                 )
             )
     if work:
-        provider = semantic_factory(profile, runtime)
+        provider = semantic_factory()
         try:
             for chunk in work:
                 transcript, chunk_issues = _semantic_attempts_for_chunk(
                     context,
                     run_id=run_id,
-                    profile=profile,
                     media_chunk=chunk,
                     effective_glossary=effective_glossary,
                     provider=provider,
@@ -382,7 +368,6 @@ def _semantic_attempts_for_chunk(
     context: ProjectContext,
     *,
     run_id: str,
-    profile: str,
     media_chunk: ArtifactEnvelope,
     effective_glossary: ArtifactEnvelope,
     provider: SemanticTranscriber,
@@ -411,7 +396,6 @@ def _semantic_attempts_for_chunk(
         transcript = _semantic_attempt(
             context,
             run_id=run_id,
-            profile=profile,
             media_chunk=media_chunk,
             effective_glossary=effective_glossary,
             glossary_terms=terms,
@@ -436,7 +420,6 @@ def _semantic_attempt(
     context: ProjectContext,
     *,
     run_id: str,
-    profile: str,
     media_chunk: ArtifactEnvelope,
     effective_glossary: ArtifactEnvelope,
     glossary_terms: Sequence[str],
@@ -468,7 +451,6 @@ def _semantic_attempt(
             audio_path, glossary_terms, rework_context=rework_context
         )
         transcript = _transcript_envelope(
-            profile,
             provider,
             media_chunk,
             effective_glossary,
@@ -504,7 +486,6 @@ def _run_alignment_stage(
     context: ProjectContext,
     *,
     run_id: str,
-    profile: str,
     runtime: RuntimeConfig,
     media_chunks: Sequence[ArtifactEnvelope],
     transcripts: Sequence[ArtifactEnvelope],
@@ -541,7 +522,6 @@ def _run_alignment_stage(
                 accepted[chunk_id] = _alignment_with_structural_repair(
                     context,
                     run_id=run_id,
-                    profile=profile,
                     runtime=runtime,
                     media_chunk=chunk,
                     transcript=transcript,
@@ -566,7 +546,6 @@ def _alignment_with_structural_repair(
     context: ProjectContext,
     *,
     run_id: str,
-    profile: str,
     runtime: RuntimeConfig,
     media_chunk: ArtifactEnvelope,
     transcript: ArtifactEnvelope,
@@ -580,7 +559,6 @@ def _alignment_with_structural_repair(
             alignment, valid = _alignment_attempt(
                 context,
                 run_id=run_id,
-                profile=profile,
                 runtime=runtime,
                 media_chunk=media_chunk,
                 transcript=transcript,
@@ -600,7 +578,6 @@ def _alignment_attempt(
     context: ProjectContext,
     *,
     run_id: str,
-    profile: str,
     runtime: RuntimeConfig,
     media_chunk: ArtifactEnvelope,
     transcript: ArtifactEnvelope,
@@ -641,7 +618,6 @@ def _alignment_attempt(
         producer = Producer(
             component="alignment",
             component_version=COMPONENT_VERSION,
-            processing_profile=profile,
             provider=aligner.provider,
             model=aligner.model,
             config_hash=hash_json(
@@ -693,7 +669,6 @@ def _complete_downstream(
     context: ProjectContext,
     *,
     run_id: str,
-    profile: str,
     runtime: RuntimeConfig,
     media: MediaBundle,
     effective_glossary: ArtifactEnvelope,
@@ -704,7 +679,7 @@ def _complete_downstream(
 ) -> dict[str, Any]:
     terms = [str(item) for item in effective_glossary.payload.get("terms", [])]
     subtitle, segment_warnings = _publish_subtitle(
-        context, profile, media, effective_glossary, transcripts, alignments, terms
+        context, media, effective_glossary, transcripts, alignments, terms
     )
     structural = _structural_issues(context, media, transcripts, alignments, subtitle)
     issues = [
@@ -715,7 +690,6 @@ def _complete_downstream(
     ]
     qa = _publish_qa(
         context,
-        profile,
         media,
         effective_glossary,
         subtitle,
@@ -734,7 +708,6 @@ def _complete_downstream(
             alignments = _qa_alignment_repair_wave(
                 context,
                 run_id=run_id,
-                profile=profile,
                 runtime=runtime,
                 media_chunks=media.media_chunks,
                 transcripts=transcripts,
@@ -743,7 +716,7 @@ def _complete_downstream(
                 aligner_factory=aligner_factory,
             )
         subtitle, segment_warnings = _publish_subtitle(
-            context, profile, media, effective_glossary, transcripts, alignments, terms
+            context, media, effective_glossary, transcripts, alignments, terms
         )
         structural = _structural_issues(context, media, transcripts, alignments, subtitle)
         issues = [
@@ -754,7 +727,6 @@ def _complete_downstream(
         ]
         qa = _publish_qa(
             context,
-            profile,
             media,
             effective_glossary,
             subtitle,
@@ -793,7 +765,6 @@ def _qa_alignment_repair_wave(
     context: ProjectContext,
     *,
     run_id: str,
-    profile: str,
     runtime: RuntimeConfig,
     media_chunks: Sequence[ArtifactEnvelope],
     transcripts: Sequence[ArtifactEnvelope],
@@ -811,7 +782,6 @@ def _qa_alignment_repair_wave(
             alignment = _alignment_with_structural_repair(
                 context,
                 run_id=run_id,
-                profile=profile,
                 runtime=runtime,
                 media_chunk=chunk_by_id[chunk_id],
                 transcript=transcript_by_id[chunk_id],
@@ -851,7 +821,6 @@ def _structural_issues(
 
 def _publish_subtitle(
     context: ProjectContext,
-    profile: str,
     media: MediaBundle,
     effective_glossary: ArtifactEnvelope,
     transcripts: Sequence[ArtifactEnvelope],
@@ -870,7 +839,6 @@ def _publish_subtitle(
         producer=Producer(
             component="segmenter",
             component_version=COMPONENT_VERSION,
-            processing_profile=profile,
             provider=None,
             model=None,
             config_hash=hash_json(asdict(SegmenterConfig())),
@@ -890,7 +858,6 @@ def _publish_subtitle(
 
 def _publish_qa(
     context: ProjectContext,
-    profile: str,
     media: MediaBundle,
     effective_glossary: ArtifactEnvelope,
     subtitle: ArtifactEnvelope,
@@ -911,7 +878,6 @@ def _publish_qa(
         producer=Producer(
             component="qa",
             component_version=COMPONENT_VERSION,
-            processing_profile=profile,
             provider=None,
             model=None,
             config_hash=hash_json(asdict(QaRulesetConfig())),
@@ -930,7 +896,6 @@ def _publish_qa(
 
 
 def _transcript_envelope(
-    profile: str,
     provider: SemanticTranscriber,
     media_chunk: ArtifactEnvelope,
     effective_glossary: ArtifactEnvelope,
@@ -955,7 +920,6 @@ def _transcript_envelope(
         producer=Producer(
             component="semantic_transcriber",
             component_version=COMPONENT_VERSION,
-            processing_profile=profile,
             provider=provider.provider,
             model=provider.model,
             config_hash=hash_json(
@@ -1174,16 +1138,13 @@ def _deterministic_producer(component: str, config: Mapping[str, Any]) -> Produc
     return Producer(
         component=component,
         component_version=COMPONENT_VERSION,
-        processing_profile=None,
         provider=None,
         model=None,
         config_hash=hash_json(config),
     )
 
 
-def _default_semantic_factory(profile: str, runtime: RuntimeConfig) -> SemanticTranscriber:
-    if profile == "LOCAL_PROFILE":
-        return LocalQwenSemanticTranscriber(runtime)
+def _default_semantic_factory() -> SemanticTranscriber:
     return CloudOmniSemanticTranscriber()
 
 

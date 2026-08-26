@@ -1,12 +1,10 @@
-# CueFlow v0.2.1 Schema Contracts
-
-状态：Artifact 1.x 兼容；Registry v2 冻结
+# CueFlow v0.3.0 Schema Contracts
 
 ## 1. Envelope 与哈希
 
-Artifact Envelope 包含 `schema_version`、`artifact_id`、kind、scope、content hash、created time、Producer、ordered inputs 和 payload。内容哈希使用 RFC 8785 JCS UTF-8 bytes 后计算 SHA-256，覆盖 kind、scope、Schema major/minor、Producer、inputs 与 payload；不覆盖 Artifact ID、created_at 或路径。未知 major 的 payload 不得解释。
+Artifact Envelope 包含 `schema_version`、`artifact_id`、kind、scope、content hash、created time、Producer、ordered inputs 和 payload。内容哈希使用 RFC 8785 JCS UTF-8 bytes 后计算 SHA-256，覆盖 kind、scope、Schema major/minor、Producer、inputs 与 payload；不覆盖 Artifact ID、created_at 或路径。只接受当前 Schema 版本，其他版本的 payload 不得解释。Producer 恰好包含 `component`、`component_version`、`provider`、`model`、`config_hash`；缺字段或额外字段均拒绝。
 
-合法 Artifact kinds：`media_probe`、`timeline_audio`、`chunk_plan`、`media_chunk`、`system_glossary`、`project_glossary`、`effective_glossary`、`transcript`、`alignment`、`subtitle`、`qa`、`srt_render`、`reference_input`、`reference_evidence`、`reference_bundle`。v0.2.1 写出 Schema `1.1.0`；reader 接受所有 major=1 的旧 Artifact，拒绝未知 major。
+合法 Artifact kinds：`media_probe`、`timeline_audio`、`chunk_plan`、`media_chunk`、`system_glossary`、`project_glossary`、`effective_glossary`、`transcript`、`alignment`、`subtitle`、`qa`、`srt_render`、`reference_input`、`reference_evidence`、`reference_bundle`。当前 Artifact Schema 为 `2.0.0`。
 
 ## 2. SourceAsset
 
@@ -80,11 +78,11 @@ SrtRender payload 保存精确 Subtitle/QA IDs、UTF-8、byte length 和 text，
 
 SQLite 至少包含 Project、SourceAsset、Artifact、ArtifactDependency、CurrentPointer、Run、Invocation、InvocationInput 和 SemanticBudgetReset。
 
-Registry 使用 SQLite `user_version = 2`。打开 v1 时必须在一个 `BEGIN IMMEDIATE` 事务中验证完整 v0.1.1 表/column 结构，创建 `reference_assets`、`reference_runs`、`reference_work_items`、`reference_invocation_details`、`artifact_reference_dependencies`，再设置 v2 并复验；任何失败完整回滚。`user_version=0` 的非空库继续拒绝。迁移不更新任何 SourceAsset、旧 Run、Invocation 或 Artifact。
+Registry 使用 SQLite `user_version = 3`。空库直接初始化当前完整结构；非当前版本、缺表或 column 不匹配均明确拒绝，不修改已有库。Project 列恰好为 `project_id`、`display_name`、`created_at`。
 
 InvocationInput 主键为 `(invocation_id, ordinal)`，每行保存 role 与精确 `input_artifact_id`。Targeted retry 只能读取这些绑定。
 
-SemanticBudgetReset 主键包含 Run、Chunk 与 window index；window index 固定只允许 1 或 2，并绑定触发 reset 的失败 Invocation。两次上限是 v0.1.1 数据模型常量，不属于 versioned runtime config；唯一约束保证同一 Run/Chunk 最多两次。
+SemanticBudgetReset 主键包含 Run、Chunk 与 window index；window index 固定只允许 1 或 2，并绑定触发 reset 的失败 Invocation。两次上限是数据模型常量，不属于 versioned runtime config；唯一约束保证同一 Run/Chunk 最多两次。
 
 Artifact 文件必须按 temp → fsync → atomic replace → read-back validation 顺序完成落盘，再在同一 SQLite 写事务中登记 Artifact/dependency 与切换 pointer。Invocation、reset、crash recovery 和 Run reopen 必须可审计且持久化。
 
@@ -98,6 +96,6 @@ Reference Artifact input 可以使用 `reference_asset_id`，并与 `artifact_id
 
 ### usage 双时长不变量
 
-`local_measured_duration` 与 `provider_usage_duration` 是两个语义不同、分别持久化且均允许 null 的字段。前者只来自本地媒体测量，用于源时间轴、provenance、分段和媒体事实；后者只来自 Provider usage，用于成本观测和账单解释。禁止定义或赋值 `media_duration = usage.duration`，禁止用 Provider usage 重建时间轴。已验证探针中源时长 40.054 秒而 Provider `usage.duration` 为 35 秒，二者必须原样共存。Provider 未报告的 usage/cost 字段为 null，不得伪造成 0。
+`local_measured_duration` 与 `provider_usage_duration` 是两个语义不同、分别持久化且均允许 null 的字段。前者只来自本地媒体测量，用于源时间轴、provenance、分段和媒体事实；后者只来自 Provider usage，用于成本观测和账单解释。禁止定义或赋值 `media_duration = usage.duration`，禁止用 Provider usage 重建时间轴。Provider 未报告的 usage/cost 字段为 null，不得伪造成 0。
 
 `reference_invocation_details` 必须保存 work item/branch、provider/model、当次实际 config、ordered input Artifact、response id、上述双时长、raw usage、nullable provider cost、retry parent/reason、failure details，以及 Cloud document remote file id/cleanup status。`reference_runs` 只扩展 runs；`reference_work_items` 的成功 Evidence 和失败详情可审计。

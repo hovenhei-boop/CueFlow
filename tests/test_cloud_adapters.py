@@ -8,6 +8,7 @@ import pytest
 
 from cueflow.config import CLOUD_MODEL
 from cueflow.errors import ProviderUnavailableError
+from cueflow.orchestrator import _default_semantic_factory
 from cueflow.providers import CloudOmniSemanticTranscriber
 
 
@@ -25,6 +26,12 @@ class FakeCompletions:
             )
             for content in self.deltas
         ]
+
+
+def test_default_semantic_factory_builds_remote_provider() -> None:
+    provider = _default_semantic_factory()
+    assert isinstance(provider, CloudOmniSemanticTranscriber)
+    provider.close()
 
 
 class FakeClient:

@@ -1,10 +1,8 @@
-# CueFlow v0.2.1 Architecture
-
-状态：v0.1.1 Source 主链冻结；v0.2.1 Reference 旁路冻结
+# CueFlow v0.3.0 Architecture
 
 ## 1. 产品边界
 
-CueFlow v0.2.1 保持已经剪辑完成视频或音频的唯一 Source 主链：
+CueFlow 处理已剪辑完成的视频或音频，Source 主链为：
 
 ```text
 Source Media
@@ -19,12 +17,12 @@ Source Media
 → output/subtitles.srt
 ```
 
-目标是忠实转写、精确时间轴、纠错和导出。v0.2.1 不改变这条主链的任何行为，另加 `Reference Material → deterministic extraction / optional Reference ASR, Vision, Cloud Document Parse → Reference Evidence` 旁路。该旁路不创建 Transcript、Alignment、Subtitle、QA 或 SRT，不做 glossary/terminology/candidate/acceptance，也不增加 UI。
+目标是忠实转写、精确时间轴、纠错和导出。独立的 Reference 路径为 `Reference Material → deterministic extraction / optional Reference ASR, Vision, Cloud Document Parse → Reference Evidence` 旁路。该旁路不创建 Transcript、Alignment、Subtitle、QA 或 SRT，不做 glossary/terminology/candidate/acceptance，也不增加 UI。
 
 ## 2. 核心不变量
 
-1. SourceAsset 身份只由 `Path.name` 精确字符串确定；外部内容可在原 locator 覆盖，locator 不参与身份但 v0.1.1 不提供 relink，项目内 Artifact 仍然内容寻址且不可变。
-2. Media Prep 对 LOCAL/CLOUD 使用同一个本地确定性实现；Profile 差异只从 Semantic Provider 开始。
+1. SourceAsset 身份只由 `Path.name` 精确字符串确定；外部内容可在原 locator 覆盖，locator 不参与身份，不提供 Source relink，项目内 Artifact 仍然内容寻址且不可变。
+2. Media Prep、Timeline normalization 和 Chunking 在本地确定性执行；语义转写由远端 Provider 完成，Forced Alignment 使用本地模型。
 3. Timeline Audio 固定为 16kHz、mono、PCM s16le，且其 sample 0 对应源媒体 presentation timeline 0。
 4. Timeline Audio 是 Chunker、Semantic Transcriber 和 Forced Aligner 的唯一音频权威。
 5. Transcript 完整保留 Provider `source_text`、全部可发音 Atom 和 Decoration；不得摘要、改写或按字幕风格删词。
@@ -67,18 +65,9 @@ MediaProbe 必须记录一个 origin action：
 
 ChunkPlan 使用版本化 Chunker Config。默认目标为 180 秒、硬上限 225 秒，优先选择目标附近持续至少 500ms 且低于 -40dB 的静音中点，否则在实际 config 的硬上限切分。Chunk 连续覆盖完整 Timeline Audio，无重叠、无间隙。
 
-## 4. Processing Profiles
+## 4. Semantic Transcription
 
-| Profile | Semantic Transcriber | Forced Aligner |
-|---|---|---|
-| `LOCAL_PROFILE` | 本地 `Qwen3-ASR-1.7B` pinned revision | 本地 `Qwen3-ForcedAligner-0.6B` pinned revision |
-| `CLOUD_PROFILE` | `qwen3.5-omni-plus-2026-03-15`，OpenAI-compatible API | 同一个本地 `Qwen3-ForcedAligner-0.6B` pinned revision |
-
-凭据和地域 endpoint 只从环境变量读取。设备、dtype 和模型缓存位置由运行时检测与配置决定；资源不足时明确失败，不量化、不换模型、不切 Profile。
-
-## 5. Semantic Transcription
-
-Transcription Stage 创建一个 Semantic Provider，顺序处理所有需要工作的 Chunk 及其全部 Attempt，最后关闭一次。阶段无工作时不得创建 Provider。
+Semantic Provider 使用 `qwen3.5-omni-plus-2026-03-15` 的 OpenAI-compatible API，凭据和地域 endpoint 从环境变量读取。Transcription Stage 创建一个 Semantic Provider，顺序处理所有需要工作的 Chunk 及其全部 Attempt，最后关闭一次。阶段无工作时不得创建 Provider。
 
 一个新 Run 中，每 Chunk 初始最多 4 个 Semantic Attempt；该上限属于版本化 QA Ruleset 的运行规则。每个成功 Attempt 创建 Transcript Artifact、Invocation 和 exact input bindings。每产生一个返工 Attempt，都对该 Attempt 的完整 Chunk 文本重新执行 conflict scan，下一轮只以当前实际 conflict 驱动局部返工。Glossary 稳定闭环只使用冻结规则：
 
@@ -90,15 +79,15 @@ Transcription Stage 创建一个 Semantic Provider，顺序处理所有需要工
 
 连续两次候选序列相同且与 term 一致时 resolved；连续两次相同但当前仍冲突时接受实际转写并产生非阻塞 `stable_glossary_conflict`；当前 conflict 未稳定且尚有预算时继续返工该 Chunk，4 次内无法连续稳定时产生非阻塞 `unstable_glossary_conflict`。QA 只报告，不修改文字，也不额外扫描整篇 Transcript。
 
-只有显式 targeted retry 可以为目标 Chunk 重置 4-Attempt budget；同一原 Run、同一 Chunk 固定最多重置 2 次，因此绝对上限为 12 次。两次 reset 是 v0.1.1 SQLite window 数据模型约束，不是运行时可配置项。进入 `sending` 的 Attempt 计入预算；`definitely_not_sent` 不计。reset count 持久化并可审计。
+只有显式 targeted retry 可以为目标 Chunk 重置 4-Attempt budget；同一原 Run、同一 Chunk 固定最多重置 2 次，因此绝对上限为 12 次。两次 reset 是 SQLite window 数据模型约束，不是运行时可配置项。进入 `sending` 的 Attempt 计入预算；`definitely_not_sent` 不计。reset count 持久化并可审计。
 
-## 6. Forced Alignment
+## 5. Forced Alignment
 
 Transcription Stage 完成后关闭 Semantic Provider。Alignment Stage 只读取每个 Chunk 的 accepted Transcript；rejected Attempt 不创建 Alignment。
 
-Alignment Stage 创建一个本地 Aligner，批量处理全部需要工作的 Chunk，最后关闭一次。阶段无工作时不创建 Aligner。每个 accepted Transcript 首次 Alignment 产生结构非法结果时，最多执行 1 次 execution structural repair；仍失败则本阶段失败。
+Alignment 使用 pinned revision 的本地 `Qwen3-ForcedAligner-0.6B`，provider identity 为 `qwen-local`。设备、dtype 和模型缓存由运行时配置决定；资源不足时明确失败，不量化、不换模型。Alignment Stage 创建一个本地 Aligner，批量处理全部需要工作的 Chunk，最后关闭一次。阶段无工作时不创建 Aligner。每个 accepted Transcript 首次 Alignment 产生结构非法结果时，最多执行 1 次 execution structural repair；仍失败则本阶段失败。
 
-## 7. Subtitle 与 QA
+## 6. Subtitle 与 QA
 
 Segmenter 将全部 current Transcript/Alignment 按全局时间顺序组合。每个 Cue 默认最多 10 个显示单位；CJK 每字一个单位，完整 word、number 和 pronounceable-symbol Atom 不从内部拆开。优先语义完整边界；保护单元超过 10 时保留完整单元并产生 warning。标点样式只影响 Subtitle/SRT，不修改 Transcript。
 
@@ -106,7 +95,7 @@ QA 检查时间戳、Cue 重叠/越界、未对齐 Atom、Chunk/Transcript/Align
 
 若 QA 发现 alignment-related blocking issues，Orchestrator 最多执行一个独立 QA Alignment Repair Wave：一次加载 Aligner，批量处理本轮 workset，更新 Alignment，重建 Subtitle，重跑 QA，再进入 Export。该预算与 Alignment execution repair 独立。第二轮仍有 structural blocking error 时 Run 失败。
 
-## 8. Artifact 与依赖图
+## 7. Artifact 与依赖图
 
 ```text
 SourceAsset → MediaProbe → TimelineAudio → ChunkPlan → MediaChunk[n]
@@ -119,7 +108,7 @@ passing QA + Subtitle → SrtRender → output/subtitles.srt
 
 Artifact publish 顺序为：写临时文件、flush/fsync、原子替换到内容路径、read-back validation、SQLite 事务登记 Artifact/dependency、切换 current/stale pointer、commit。
 
-## 9. Run、Invocation 与 Retry
+## 8. Run、Invocation 与 Retry
 
 Invocation 保存 operation、provider/model、attempt number、状态、输出 Artifact，以及按顺序绑定的上游 Artifact IDs。失败或 delivery ambiguous 的 Invocation 不被自动重放。
 
@@ -136,23 +125,23 @@ created → running → succeeded
 failed/interrupted --explicit targeted retry→ running
 ```
 
-## 10. CLI 与输出
+## 9. CLI 与输出
 
-v0.1.1 的 `init`、`glossary set`、`asset add`、`run`、`status`、`retry` 保持不变。v0.2.1 只新增 `reference add/extract/relocate/status/retry`。不提供 `--document-visual` 或 `--audio-upload-format`。失败 JSON 在可用时包含 Run/Invocation/work-item identity、当前状态和合法下一步；它只描述显式操作，不自动 retry。
+CLI 提供 `init`、`glossary set`、`asset add`、`run`、`status`、`retry` 和 `reference add/extract/relocate/status/retry`。不提供 `--document-visual` 或 `--audio-upload-format`。失败 JSON 在可用时包含 Run/Invocation/work-item identity、当前状态和合法下一步；它只描述显式操作，不自动 retry。
 
 唯一正常用户输出是 `output/subtitles.srt`。内部 Artifact、SQLite、blob 和临时文件位于 `.cueflow/`；临时文件完成后清理。
 
-## 11. Reference 旁路架构
+## 10. Reference 旁路架构
 
 ReferenceAsset 与 SourceAsset 是两个独立领域对象；二者都使用 filename 精确 identity，但 Reference 不挂为 auxiliary Source。顶层仍是 Project → Run；Reference Run 与 Source Run 都是 Project 任务实例，`reference_runs` 只是 runs 扩展，不形成 ReferenceAsset → Run 层级。
 
 每次 `reference extract` 新建 Run，先确定性识别当前文件，再生成 ordered work items。确定性 TXT/MD、cue、OOXML 和完整 text-layer PDF 分支不创建 Invocation。真实 Reference ASR、Vision 或 Cloud document work item 才创建 Invocation；各 evidence role 独立，bundle 只收集引用，不融合。Retry 在原 Run 内只追加失败 work item 的 attempt，成功项及其 Evidence 保持不变。
 
-Artifact 图只新增：
+Reference Artifact 图：
 
 ```text
 ReferenceAsset → ReferenceInput → ReferenceEvidence[role]
 all succeeded ReferenceEvidence in one Run → ReferenceBundle
 ```
 
-Cloud Profile 的显式 Reference extract 可能上传 legacy Office/scanned 或 mixed PDF、唯一位图 cue、临时 full-frame window、独立图片和 PCM/WAV 音频段。full-frame 只保留 manifest/hash/timestamp/profile，图像请求正文不持久化；Cloud document file_id 在 finally 删除。完整格式与路由见 `reference-extraction.md`。
+显式 `run` 上传 Source 音频 Chunk 到语义 Provider。显式 `reference extract` 按路由上传文档、位图 cue、full-frame window、独立图片或 PCM/WAV 音频段。full-frame 只保留 manifest/hash/timestamp/执行参数，图像请求正文不持久化；Cloud document file_id 在 finally 删除。完整 Reference 格式与路由见 [Reference Extraction](reference-extraction.md)。

@@ -22,7 +22,6 @@ def producer() -> Producer:
     return Producer(
         component="cueflow.glossary",
         component_version="0.1.0",
-        processing_profile="LOCAL_PROFILE",
         provider=None,
         model=None,
         config_hash=hash_json({"version": "0.1.0"}),
@@ -40,6 +39,33 @@ def publish_glossary(project: ProjectContext, terms: list[str]) -> ArtifactEnvel
     return project.publisher.publish(envelope)
 
 
+@pytest.mark.parametrize("version", [0, 1, 2, 99])
+def test_incompatible_registry_is_rejected_without_writes(tmp_path: Path, version: int) -> None:
+    database = tmp_path / "incompatible.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE sentinel (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO sentinel VALUES ('preserve')")
+        connection.execute(f"PRAGMA user_version = {version}")
+    before = database.read_bytes()
+    with pytest.raises(IntegrityError, match="incompatible CueFlow registry schema version"):
+        Registry(database)
+    assert database.read_bytes() == before
+
+
+@pytest.mark.parametrize("table", ["projects", "source_assets", "reference_assets"])
+def test_current_registry_rejects_unexpected_columns(tmp_path: Path, table: str) -> None:
+    context = ProjectContext.create(tmp_path / "project", "Schema")
+    database = context.registry.path
+    assert set(context.registry.project().keys()) == {"project_id", "display_name", "created_at"}
+    context.close()
+    with sqlite3.connect(database) as connection:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN unexpected TEXT")
+    before = database.read_bytes()
+    with pytest.raises(IntegrityError, match=f"registry {table} schema"):
+        ProjectContext.open(tmp_path / "project")
+    assert database.read_bytes() == before
+
+
 def test_artifact_file_precedes_pointer_and_pointer_rolls_back(tmp_path: Path) -> None:
     empty_database = tmp_path / "empty.sqlite3"
     sqlite3.connect(empty_database).close()
@@ -53,7 +79,7 @@ def test_artifact_file_precedes_pointer_and_pointer_rolls_back(tmp_path: Path) -
     old_database = tmp_path / "old.sqlite3"
     with sqlite3.connect(old_database) as connection:
         connection.execute("CREATE TABLE projects (project_id TEXT PRIMARY KEY)")
-    with pytest.raises(IntegrityError, match="migration is unavailable"):
+    with pytest.raises(IntegrityError, match="incompatible CueFlow registry schema version"):
         Registry(old_database)
     with sqlite3.connect(old_database) as connection:
         assert connection.execute("PRAGMA user_version").fetchone() == (0,)
@@ -71,7 +97,7 @@ def test_artifact_file_precedes_pointer_and_pointer_rolls_back(tmp_path: Path) -
     with pytest.raises(IntegrityError, match="schema is incomplete"):
         Registry(incomplete_database)
 
-    project = ProjectContext.create(tmp_path / "project", "Test", "LOCAL_PROFILE")
+    project = ProjectContext.create(tmp_path / "project", "Test")
     try:
         first = publish_glossary(project, ["顾华玺"])
         pointer = project.registry.current_pointer(project.project_id, "project_glossary", "global")
@@ -91,7 +117,7 @@ def test_artifact_file_precedes_pointer_and_pointer_rolls_back(tmp_path: Path) -
 
 
 def test_unregistered_envelope_is_reported_as_orphan(tmp_path: Path) -> None:
-    project = ProjectContext.create(tmp_path / "project", "Test", "LOCAL_PROFILE")
+    project = ProjectContext.create(tmp_path / "project", "Test")
     try:
         envelope = ArtifactEnvelope.create(
             artifact_kind="system_glossary",
@@ -117,7 +143,7 @@ def test_blob_is_content_addressed_and_verified(tmp_path: Path) -> None:
 
 
 def test_chunk_scope_switch_and_stale_routes_are_independent(tmp_path: Path) -> None:
-    project = initialize_project(tmp_path / "project", "Test", "LOCAL_PROFILE")
+    project = initialize_project(tmp_path / "project", "Test")
     try:
         timeline = ArtifactEnvelope.create(
             artifact_kind="timeline_audio",
@@ -226,7 +252,7 @@ def test_chunk_scope_switch_and_stale_routes_are_independent(tmp_path: Path) -> 
 def test_auxiliary_asset_does_not_bypass_effective_glossary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    project = initialize_project(tmp_path / "project", "Test", "LOCAL_PROFILE")
+    project = initialize_project(tmp_path / "project", "Test")
     auxiliary = tmp_path / "notes.txt"
     auxiliary.write_text("顾华玺", encoding="utf-8")
     try:
@@ -274,7 +300,7 @@ def test_auxiliary_asset_does_not_bypass_effective_glossary(
 
 
 def test_interrupted_run_can_only_reopen_for_targeted_retry(tmp_path: Path) -> None:
-    project = initialize_project(tmp_path / "project", "Test", "LOCAL_PROFILE")
+    project = initialize_project(tmp_path / "project", "Test")
     try:
         run_id = project.registry.create_run(
             project.project_id,

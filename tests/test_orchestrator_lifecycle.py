@@ -112,7 +112,7 @@ def test_four_semantic_attempts_precede_one_accepted_transcript_alignment(
 ) -> None:
     source = tmp_path / "source.wav"
     _silent_wave(source, 2)
-    context = initialize_project(tmp_path / "project", "Attempts", "LOCAL_PROFILE")
+    context = initialize_project(tmp_path / "project", "Attempts")
     set_project_glossary(context, ["顾华玺"])
     provider_instances: list[_Semantic] = []
     aligner_instances: list[_Aligner] = []
@@ -130,7 +130,7 @@ def test_four_semantic_attempts_precede_one_accepted_transcript_alignment(
             self.calls += 1
             return result
 
-    def semantic_factory(profile: str, runtime: RuntimeConfig) -> _Semantic:
+    def semantic_factory() -> _Semantic:
         provider = VaryingSemantic()
         provider_instances.append(provider)
         return provider
@@ -174,11 +174,11 @@ def test_four_semantic_attempts_precede_one_accepted_transcript_alignment(
 def test_factories_are_held_once_per_stage_across_multiple_chunks(tmp_path: Path) -> None:
     source = tmp_path / "long.wav"
     _silent_wave(source, 230)
-    context = initialize_project(tmp_path / "project", "Stages", "LOCAL_PROFILE")
+    context = initialize_project(tmp_path / "project", "Stages")
     providers: list[_Semantic] = []
     aligners: list[_Aligner] = []
 
-    def semantic_factory(profile: str, runtime: RuntimeConfig) -> _Semantic:
+    def semantic_factory() -> _Semantic:
         provider = _Semantic()
         providers.append(provider)
         return provider
@@ -209,7 +209,7 @@ def test_execution_repair_and_one_batched_qa_repair_wave_are_independent(
 ) -> None:
     source = tmp_path / "long.wav"
     _silent_wave(source, 230)
-    context = initialize_project(tmp_path / "project", "Repair waves", "LOCAL_PROFILE")
+    context = initialize_project(tmp_path / "project", "Repair waves")
     aligners: list[_Aligner] = []
     structural_calls = 0
     subtitle_ids: list[str] = []
@@ -262,7 +262,7 @@ def test_execution_repair_and_one_batched_qa_repair_wave_are_independent(
             context,
             source,
             runtime=_runtime(),
-            semantic_factory=lambda profile, runtime: _Semantic(),
+            semantic_factory=lambda: _Semantic(),
             aligner_factory=aligner_factory,
         )
         run_id = str(result["run_id"])
@@ -285,7 +285,7 @@ def test_qa_does_not_start_a_second_alignment_repair_wave(
 ) -> None:
     source = tmp_path / "source.wav"
     _silent_wave(source, 2)
-    context = initialize_project(tmp_path / "project", "One QA wave", "LOCAL_PROFILE")
+    context = initialize_project(tmp_path / "project", "One QA wave")
     aligners: list[_Aligner] = []
 
     def aligner_factory(runtime: RuntimeConfig) -> _Aligner:
@@ -317,7 +317,7 @@ def test_qa_does_not_start_a_second_alignment_repair_wave(
                 context,
                 source,
                 runtime=_runtime(),
-                semantic_factory=lambda profile, runtime: _Semantic(),
+                semantic_factory=lambda: _Semantic(),
                 aligner_factory=aligner_factory,
             )
         run = context.registry.latest_run(context.project_id)
@@ -354,11 +354,11 @@ def test_targeted_retry_has_two_audited_resets_and_twelve_attempt_hard_cap(
 ) -> None:
     source = tmp_path / "source.wav"
     _silent_wave(source, 2)
-    context = initialize_project(tmp_path / "project", "Retry budgets", "LOCAL_PROFILE")
+    context = initialize_project(tmp_path / "project", "Retry budgets")
     set_project_glossary(context, ["顾华玺"])
     _WindowFailureSemantic.total_calls = 0
 
-    def semantic_factory(profile: str, runtime: RuntimeConfig) -> _WindowFailureSemantic:
+    def semantic_factory() -> _WindowFailureSemantic:
         return _WindowFailureSemantic()
 
     try:
@@ -421,7 +421,7 @@ class _TwoChunkFactory:
         self.created = 0
         self.calls_by_instance: list[int] = []
 
-    def __call__(self, profile: str, runtime: RuntimeConfig) -> _Semantic:
+    def __call__(self) -> _Semantic:
         factory = self
         instance_number = self.created
         self.created += 1
@@ -453,7 +453,7 @@ def test_targeted_retry_uses_bound_artifacts_and_skips_other_successful_chunk(
 ) -> None:
     source = tmp_path / "long.wav"
     _silent_wave(source, 230)
-    context = initialize_project(tmp_path / "project", "Targeted", "LOCAL_PROFILE")
+    context = initialize_project(tmp_path / "project", "Targeted")
     semantic_factory = _TwoChunkFactory()
     try:
         with pytest.raises(DeliveryAmbiguousError):
@@ -502,11 +502,11 @@ def test_targeted_retry_uses_bound_artifacts_and_skips_other_successful_chunk(
 def test_new_run_reexecutes_semantic_and_alignment(tmp_path: Path) -> None:
     source = tmp_path / "source.wav"
     _silent_wave(source, 2)
-    context = initialize_project(tmp_path / "project", "Fresh execution", "LOCAL_PROFILE")
+    context = initialize_project(tmp_path / "project", "Fresh execution")
     providers: list[_Semantic] = []
     aligners: list[_Aligner] = []
 
-    def semantic_factory(profile: str, runtime: RuntimeConfig) -> _Semantic:
+    def semantic_factory() -> _Semantic:
         instance = _Semantic()
         providers.append(instance)
         return instance
@@ -556,32 +556,3 @@ def test_new_run_reexecutes_semantic_and_alignment(tmp_path: Path) -> None:
         assert len(_operation_rows(context, str(second["run_id"]), "semantic_transcription")) == 1
     finally:
         context.close()
-
-
-def test_local_and_cloud_profiles_share_identical_media_prep(tmp_path: Path) -> None:
-    source = tmp_path / "source.wav"
-    _silent_wave(source, 2)
-    observations: list[tuple[dict[str, Any], str, dict[str, Any]]] = []
-    for profile in ("LOCAL_PROFILE", "CLOUD_PROFILE"):
-        context = initialize_project(tmp_path / profile, profile, profile)
-        try:
-            run_project(
-                context,
-                source,
-                runtime=_runtime(),
-                semantic_factory=lambda chosen, runtime: _Semantic(),
-                aligner_factory=lambda runtime: _Aligner(),
-            )
-            probe = context.current_artifact("media_probe")
-            timeline = context.current_artifact("timeline_audio")
-            chunk_plan = context.current_artifact("chunk_plan")
-            observations.append(
-                (
-                    dict(probe.payload),
-                    str(timeline.payload["audio_blob"]["content_hash"]),
-                    dict(chunk_plan.payload["config"]),
-                )
-            )
-        finally:
-            context.close()
-    assert observations[0] == observations[1]

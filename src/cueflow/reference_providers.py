@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import gc
 import json
 import os
 import time
@@ -16,8 +15,6 @@ from urllib.request import Request, urlopen
 from cueflow.config import (
     CLOUD_DOCUMENT_MODEL,
     CLOUD_REFERENCE_ASR_MODEL,
-    LOCAL_ASR_REPO,
-    LOCAL_ASR_REVISION,
     REFERENCE_ASR_SEGMENT_MAX_MS,
     REFERENCE_AUDIO_CHANNELS,
     REFERENCE_AUDIO_SAMPLE_RATE_HZ,
@@ -28,7 +25,6 @@ from cueflow.config import (
     REFERENCE_VISION_JPEG_QV,
     REFERENCE_VISION_MODEL,
     REFERENCE_VISION_WINDOW_MS,
-    RuntimeConfig,
 )
 from cueflow.errors import (
     ContractError,
@@ -104,93 +100,6 @@ class CloudDocumentProvider(Protocol):
     def close(self) -> None: ...
 
 
-class LocalReferenceAsr:
-    provider = "qwen-local"
-    model = LOCAL_ASR_REPO
-
-    def __init__(self, runtime: RuntimeConfig) -> None:
-        self.runtime = runtime
-        self._model: Any | None = None
-
-    def transcribe(self, request: ReferenceAsrRequest) -> ReferenceModelResult:
-        model = self._load()
-        try:
-            results = model.transcribe(
-                audio=str(request.audio_path),
-                context="",
-                language=None,
-            )
-        except (MemoryError, OSError, RuntimeError) as exc:
-            raise ProviderUnavailableError("Local Reference ASR inference failed") from exc
-        if not isinstance(results, list) or len(results) != 1:
-            raise ContractError("Local Reference ASR returned an invalid result count")
-        text = getattr(results[0], "text", None)
-        if not isinstance(text, str) or not text.strip():
-            raise ContractError("Local Reference ASR returned no text")
-        return ReferenceModelResult(
-            text=text,
-            segments=(
-                {
-                    "start_ms": request.source_start_ms,
-                    "end_ms": request.source_end_ms,
-                    "text": text,
-                },
-            ),
-            response_id=None,
-            provider_usage=None,
-            provider_usage_duration=None,
-            provider_cost=None,
-        )
-
-    def preflight(self) -> None:
-        self._load()
-
-    def _load(self) -> Any:
-        if self._model is not None:
-            return self._model
-        try:
-            torch = import_module("torch")
-            qwen_asr = import_module("qwen_asr")
-            hub = import_module("huggingface_hub")
-        except ImportError as exc:
-            raise ProviderUnavailableError(
-                "LOCAL_PROFILE Reference ASR requires cueflow[local]"
-            ) from exc
-        try:
-            snapshot = hub.snapshot_download(
-                repo_id=LOCAL_ASR_REPO,
-                revision=LOCAL_ASR_REVISION,
-                cache_dir=self.runtime.model_cache,
-                local_files_only=True,
-            )
-        except Exception as exc:
-            raise ProviderUnavailableError(
-                "pinned Local Reference ASR snapshot is unavailable"
-            ) from exc
-        dtype = getattr(torch, self.runtime.device.dtype)
-        try:
-            self._model = qwen_asr.Qwen3ASRModel.from_pretrained(
-                snapshot,
-                dtype=dtype,
-                device_map=self.runtime.device.device,
-                max_inference_batch_size=1,
-                max_new_tokens=4096,
-            )
-        except (MemoryError, OSError, RuntimeError) as exc:
-            raise ProviderUnavailableError("unable to load Local Reference ASR") from exc
-        return self._model
-
-    def close(self) -> None:
-        self._model = None
-        gc.collect()
-        try:
-            torch = import_module("torch")
-        except ImportError:
-            return
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-
 class CloudReferenceAsr:
     provider = "dashscope-multimodal-generation"
     model = CLOUD_REFERENCE_ASR_MODEL
@@ -206,7 +115,7 @@ class CloudReferenceAsr:
     def transcribe(self, request: ReferenceAsrRequest) -> ReferenceModelResult:
         api_key = os.getenv("DASHSCOPE_API_KEY")
         if not api_key:
-            raise ProviderIdentityError("CLOUD_PROFILE requires DASHSCOPE_API_KEY")
+            raise ProviderIdentityError("Remote provider requires DASHSCOPE_API_KEY")
         encoded = base64.b64encode(request.audio_path.read_bytes()).decode("ascii")
         payload = {
             "model": self.model,
@@ -275,7 +184,7 @@ class CloudReferenceAsr:
 
     def preflight(self) -> None:
         if not os.getenv("DASHSCOPE_API_KEY"):
-            raise ProviderIdentityError("CLOUD_PROFILE requires DASHSCOPE_API_KEY")
+            raise ProviderIdentityError("Remote provider requires DASHSCOPE_API_KEY")
 
     def close(self) -> None:
         return None
@@ -495,20 +404,6 @@ def cloud_asr_actual_config() -> dict[str, Any]:
     }
 
 
-def local_asr_actual_config(runtime: RuntimeConfig) -> dict[str, Any]:
-    return {
-        "model": LOCAL_ASR_REPO,
-        "revision": LOCAL_ASR_REVISION,
-        "device": runtime.device.device,
-        "dtype": runtime.device.dtype,
-        "format": "wav",
-        "codec": "pcm_s16le",
-        "channels": REFERENCE_AUDIO_CHANNELS,
-        "sample_rate": REFERENCE_AUDIO_SAMPLE_RATE_HZ,
-        "segment_max_ms": REFERENCE_ASR_SEGMENT_MAX_MS,
-    }
-
-
 def cloud_document_actual_config() -> dict[str, Any]:
     return {
         "model": CLOUD_DOCUMENT_MODEL,
@@ -523,9 +418,9 @@ def _cloud_client(client_factory: Callable[..., Any] | None) -> Any:
     api_key = os.getenv("DASHSCOPE_API_KEY")
     base_url = os.getenv("DASHSCOPE_BASE_URL")
     if not api_key:
-        raise ProviderIdentityError("CLOUD_PROFILE requires DASHSCOPE_API_KEY")
+        raise ProviderIdentityError("Remote provider requires DASHSCOPE_API_KEY")
     if not base_url:
-        raise ProviderUnavailableError("CLOUD_PROFILE requires DASHSCOPE_BASE_URL")
+        raise ProviderUnavailableError("Remote provider requires DASHSCOPE_BASE_URL")
     factory = client_factory or _openai_factory()
     try:
         return factory(api_key=api_key, base_url=base_url)
@@ -537,7 +432,7 @@ def _openai_factory() -> Callable[..., Any]:
     try:
         module = import_module("openai")
     except ImportError as exc:
-        raise ProviderUnavailableError("CLOUD_PROFILE requires cueflow[cloud]") from exc
+        raise ProviderUnavailableError("Remote provider requires cueflow[cloud]") from exc
     return cast(Callable[..., Any], module.OpenAI)
 
 

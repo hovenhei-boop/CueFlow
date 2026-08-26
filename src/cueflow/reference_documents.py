@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -157,36 +156,6 @@ def extract_text_layer_pdf(path: Path) -> DocumentExtraction:
             "page_count": classification.page_count,
             "text_page_count": classification.text_page_count,
         },
-    )
-
-
-def extract_legacy_office_local(path: Path, detected_format: str) -> DocumentExtraction:
-    if detected_format not in {"doc", "ppt", "xls"}:
-        raise ContractError("Local legacy Office route accepts only DOC, PPT, or XLS")
-    try:
-        module = importlib.import_module("extractous")
-    except ImportError as exc:
-        raise UnsupportedReferenceError(
-            "Local legacy Office parsing requires 'cueflow[office]'; "
-            "install the extra or use CLOUD_PROFILE"
-        ) from exc
-    extractor_type = getattr(module, "Extractor", None)
-    if extractor_type is None:
-        raise UnsupportedReferenceError("installed extractous package has no Extractor")
-    extractor = extractor_type()
-    try:
-        text, metadata = extractor.extract_file_to_string(str(path))
-    except Exception as exc:
-        raise UnsupportedReferenceError(
-            f"Local legacy Office parser rejected {detected_format.upper()} Reference"
-        ) from exc
-    if not isinstance(text, str) or not text.strip():
-        raise UnsupportedReferenceError("Local legacy Office document contains no text")
-    safe_metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
-    return DocumentExtraction(
-        detected_format,
-        ({"ordinal": 0, "kind": "document", "text": text},),
-        {"parser": "extractous", "provider_metadata": safe_metadata},
     )
 
 

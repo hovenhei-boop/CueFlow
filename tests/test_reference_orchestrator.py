@@ -17,7 +17,13 @@ from cueflow.reference_orchestrator import (
     reference_status,
     retry_reference_work_item,
 )
-from cueflow.reference_providers import ReferenceModelResult, ReferenceVisionRequest
+from cueflow.reference_providers import (
+    CloudReferenceAsr,
+    CloudReferenceVision,
+    QwenCloudDocumentParser,
+    ReferenceModelResult,
+    ReferenceVisionRequest,
+)
 
 
 def _result(text: str) -> ReferenceModelResult:
@@ -29,6 +35,17 @@ def _result(text: str) -> ReferenceModelResult:
         provider_usage_duration=None,
         provider_cost=None,
     )
+
+
+def test_default_reference_provider_pool_is_lazy_and_remote() -> None:
+    pool = reference_orchestrator._ProviderPool(None)
+    assert pool._owned == []
+    assert isinstance(pool.asr(), CloudReferenceAsr)
+    assert isinstance(pool.vision(), CloudReferenceVision)
+    assert isinstance(pool.document(), QwenCloudDocumentParser)
+    assert pool.asr() is pool.providers.asr
+    assert len(pool._owned) == 3
+    pool.close()
 
 
 class FakeVision:
@@ -73,7 +90,7 @@ def _png(path: Path) -> None:
 def test_each_extract_creates_new_run_and_overwrite_reads_current_file(
     tmp_path: Path,
 ) -> None:
-    context = ProjectContext.create(tmp_path / "project", "Runs", "LOCAL_PROFILE")
+    context = ProjectContext.create(tmp_path / "project", "Runs")
     path = tmp_path / "notes.txt"
     path.write_text("first version", encoding="utf-8")
     reference = register_reference_asset(context, path)
@@ -120,7 +137,7 @@ def test_each_extract_creates_new_run_and_overwrite_reads_current_file(
 
 
 def test_reference_run_never_overwrites_latest_source_run_status(tmp_path: Path) -> None:
-    context = ProjectContext.create(tmp_path / "project", "Status", "LOCAL_PROFILE")
+    context = ProjectContext.create(tmp_path / "project", "Status")
     source_run = context.registry.create_run(
         context.project_id, {"source_asset_id": "source"}, "sha256:" + "0" * 64
     )
@@ -142,7 +159,7 @@ def test_reference_run_never_overwrites_latest_source_run_status(tmp_path: Path)
 def test_partial_retry_stays_in_original_run_and_reuses_successful_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    context = ProjectContext.create(tmp_path / "project", "Retry", "CLOUD_PROFILE")
+    context = ProjectContext.create(tmp_path / "project", "Retry")
     path = tmp_path / "reference.png"
     _png(path)
     reference = register_reference_asset(context, path)
@@ -223,7 +240,7 @@ def test_partial_retry_stays_in_original_run_and_reuses_successful_evidence(
 def test_model_work_item_never_exceeds_two_sent_attempts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    context = ProjectContext.create(tmp_path / "project", "Budget", "CLOUD_PROFILE")
+    context = ProjectContext.create(tmp_path / "project", "Budget")
     path = tmp_path / "reference.png"
     _png(path)
     reference = register_reference_asset(context, path)
@@ -258,7 +275,7 @@ def test_model_work_item_never_exceeds_two_sent_attempts(
 def test_preflight_failure_creates_no_invocation_and_retry_reuses_input_artifact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    context = ProjectContext.create(tmp_path / "project", "Preflight", "CLOUD_PROFILE")
+    context = ProjectContext.create(tmp_path / "project", "Preflight")
     path = tmp_path / "reference.png"
     _png(path)
     reference = register_reference_asset(context, path)

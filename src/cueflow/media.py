@@ -694,7 +694,6 @@ def _producer(component: str, config: Mapping[str, Any]) -> Producer:
     return Producer(
         component=component,
         component_version=COMPONENT_VERSION,
-        processing_profile=None,
         provider=None,
         model=None,
         config_hash=hash_json(config),

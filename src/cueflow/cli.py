@@ -24,13 +24,12 @@ from cueflow.reference_orchestrator import (
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cueflow", description="CueFlow v0.2.1 CLI")
+    parser = argparse.ArgumentParser(prog="cueflow", description="CueFlow subtitle generation CLI")
     commands = parser.add_subparsers(dest="command", required=True)
 
     init = commands.add_parser("init", help="create a CueFlow project")
     init.add_argument("project_dir", type=Path)
     init.add_argument("--name", required=True)
-    init.add_argument("--profile", required=True, choices=("LOCAL_PROFILE", "CLOUD_PROFILE"))
 
     glossary = commands.add_parser("glossary", help="manage the project glossary")
     glossary_commands = glossary.add_subparsers(dest="glossary_command", required=True)
@@ -112,13 +111,12 @@ def main(argv: list[str] | None = None) -> int:
 
 def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "init":
-        context = initialize_project(args.project_dir, args.name, args.profile)
+        context = initialize_project(args.project_dir, args.name)
         try:
             return {
                 "status": "created",
                 "project_id": context.project_id,
                 "project_dir": str(context.root.resolve()),
-                "processing_profile": args.profile,
             }
         finally:
             context.close()

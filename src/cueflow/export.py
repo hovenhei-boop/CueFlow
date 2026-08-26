@@ -49,7 +49,6 @@ def publish_srt(
     producer = Producer(
         component="srt_render",
         component_version=COMPONENT_VERSION,
-        processing_profile=None,
         provider=None,
         model=None,
         config_hash=hash_json(asdict(config)),

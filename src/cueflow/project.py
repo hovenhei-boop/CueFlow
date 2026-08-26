@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 from cueflow.artifact_store import ArtifactPublisher, ArtifactStore
-from cueflow.config import PROFILES
 from cueflow.errors import ContractError, IntegrityError, SourceMissingError
 from cueflow.registry import Registry
 from cueflow.schema import ArtifactEnvelope, utc_now
@@ -23,15 +22,13 @@ class ProjectContext:
         return ArtifactPublisher(self.registry, self.store, self.project_id)
 
     @classmethod
-    def create(cls, root: Path, display_name: str, profile: str) -> ProjectContext:
-        if profile not in PROFILES:
-            raise ContractError("profile must be LOCAL_PROFILE or CLOUD_PROFILE")
+    def create(cls, root: Path, display_name: str) -> ProjectContext:
         root.mkdir(parents=True, exist_ok=True)
         database = root / ".cueflow" / "registry.sqlite3"
         if database.exists():
             raise ContractError(f"project already exists: {root}")
         registry = Registry(database)
-        project_id = registry.create_project(display_name, profile)
+        project_id = registry.create_project(display_name)
         store = ArtifactStore(root)
         (root / "output").mkdir(parents=True, exist_ok=True)
         return cls(root=root, registry=registry, store=store, project_id=project_id)

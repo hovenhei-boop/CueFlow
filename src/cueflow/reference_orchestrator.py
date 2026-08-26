@@ -12,7 +12,6 @@ from cueflow.config import (
     CLOUD_DOCUMENT_MODEL,
     CLOUD_REFERENCE_ASR_MODEL,
     COMPONENT_VERSION,
-    LOCAL_ASR_REPO,
     REFERENCE_MODEL_SENT_ATTEMPT_LIMIT,
     REFERENCE_VISION_MODEL,
     RuntimeConfig,
@@ -27,7 +26,6 @@ from cueflow.project import ProjectContext
 from cueflow.reference_assets import inspect_reference, resolve_reference_locator
 from cueflow.reference_documents import (
     classify_pdf,
-    extract_legacy_office_local,
     extract_ooxml,
     extract_text_cues,
     extract_text_document,
@@ -51,7 +49,6 @@ from cueflow.reference_providers import (
     CloudDocumentRequest,
     CloudReferenceAsr,
     CloudReferenceVision,
-    LocalReferenceAsr,
     QwenCloudDocumentParser,
     ReferenceAsrProvider,
     ReferenceAsrRequest,
@@ -60,7 +57,6 @@ from cueflow.reference_providers import (
     ReferenceVisionRequest,
     cloud_asr_actual_config,
     cloud_document_actual_config,
-    local_asr_actual_config,
     reference_vision_actual_config,
 )
 from cueflow.schema import ArtifactEnvelope, InputRef, Producer
@@ -90,22 +86,14 @@ class _InvocationResult:
 class _ProviderPool:
     def __init__(
         self,
-        profile: str,
-        runtime: RuntimeConfig,
         supplied: ReferenceProviders | None,
     ) -> None:
-        self.profile = profile
-        self.runtime = runtime
         self.providers = supplied or ReferenceProviders()
         self._owned: list[Any] = []
 
     def asr(self) -> ReferenceAsrProvider:
         if self.providers.asr is None:
-            provider: ReferenceAsrProvider
-            if self.profile == "CLOUD_PROFILE":
-                provider = CloudReferenceAsr()
-            else:
-                provider = LocalReferenceAsr(self.runtime)
+            provider = CloudReferenceAsr()
             self.providers.asr = provider
             self._owned.append(provider)
         return self.providers.asr
@@ -149,16 +137,14 @@ def extract_reference(
         raise UnsupportedReferenceError(
             "Reference current file format/category differs from its filename-bound registration"
         )
-    profile = str(context.registry.project()["processing_profile"])
     specs = _plan_work(
         path,
         detected_format=inspection.detected_format,
         media_category=inspection.media_category,
-        profile=profile,
         pixel_subtitle_mode=pixel_subtitle_mode,
         runtime=chosen_runtime,
     )
-    run_config = _reference_run_config(profile, pixel_subtitle_mode)
+    run_config = _reference_run_config(pixel_subtitle_mode)
     run_id = context.registry.create_reference_run(
         context.project_id,
         reference_asset_id,
@@ -180,7 +166,7 @@ def extract_reference(
             work_spec=spec.as_dict(),
         )
     context.registry.set_run_status(run_id, "running")
-    pool = _ProviderPool(profile, chosen_runtime, providers)
+    pool = _ProviderPool(providers)
     try:
         for row in context.registry.reference_work_items_for_run(run_id):
             _execute_work_item(
@@ -189,7 +175,6 @@ def extract_reference(
                 dict(row),
                 path=path,
                 detected_format=inspection.detected_format,
-                profile=profile,
                 runtime=chosen_runtime,
                 pool=pool,
                 retry_reason=None,
@@ -236,9 +221,8 @@ def retry_reference_work_item(
         raise UnsupportedReferenceError(
             "Reference current file format/category differs from its filename-bound registration"
         )
-    profile = str(context.registry.project()["processing_profile"])
     context.registry.reopen_run_for_retry(run_id)
-    pool = _ProviderPool(profile, chosen_runtime, providers)
+    pool = _ProviderPool(providers)
     succeeded = False
     try:
         succeeded = _execute_work_item(
@@ -247,7 +231,6 @@ def retry_reference_work_item(
             dict(context.registry.reference_work_item(work_item_id)),
             path=path,
             detected_format=inspection.detected_format,
-            profile=profile,
             runtime=chosen_runtime,
             pool=pool,
             retry_reason="explicit_work_item_retry",
@@ -318,7 +301,6 @@ def _plan_work(
     *,
     detected_format: str,
     media_category: str,
-    profile: str,
     pixel_subtitle_mode: Literal["burned", "none"] | None,
     runtime: RuntimeConfig,
 ) -> tuple[ReferenceWorkSpec, ...]:
@@ -326,18 +308,9 @@ def _plan_work(
         raise ContractError("pixel_subtitle_mode is only valid for video References")
     if media_category in {"audio", "video"}:
         probe = probe_reference_media(path, runtime)
-        specs = plan_reference_media_work(probe, profile, pixel_subtitle_mode)
+        specs = plan_reference_media_work(probe, pixel_subtitle_mode)
         return tuple(_with_media_facts(spec, probe) for spec in specs)
     if media_category == "image":
-        if profile == "LOCAL_PROFILE":
-            return (
-                ReferenceWorkSpec(
-                    "image_visual",
-                    "image_visual",
-                    "unsupported",
-                    {"reason": "Local image Vision is unsupported"},
-                ),
-            )
         return (
             ReferenceWorkSpec(
                 "image_visual",
@@ -356,32 +329,16 @@ def _plan_work(
         kind = "ooxml"
         role = "document_text"
     elif detected_format in {"doc", "ppt", "xls"}:
-        kind = "cloud_document" if profile == "CLOUD_PROFILE" else "legacy_office"
-        role = "cloud_document_parse" if profile == "CLOUD_PROFILE" else "document_text"
+        kind = "cloud_document"
+        role = "cloud_document_parse"
     elif detected_format == "pdf":
         classification = classify_pdf(path)
         if classification.route == "document_text":
             kind = "pdf_text"
             role = "document_text"
-        elif profile == "CLOUD_PROFILE":
+        else:
             kind = "cloud_document"
             role = "cloud_document_parse"
-        else:
-            kind = "unsupported"
-            role = "document_text"
-            return (
-                ReferenceWorkSpec(
-                    "document_text",
-                    role,
-                    kind,
-                    {
-                        "reason": "Local PDF without a complete text layer is unsupported",
-                        "content_without_text_pages": list(
-                            classification.content_without_text_pages
-                        ),
-                    },
-                ),
-            )
     else:
         raise UnsupportedReferenceError(f"unsupported Reference document format: {detected_format}")
     return (
@@ -416,7 +373,6 @@ def _execute_work_item(
     *,
     path: Path,
     detected_format: str,
-    profile: str,
     runtime: RuntimeConfig,
     pool: _ProviderPool,
     retry_reason: str | None,
@@ -437,7 +393,6 @@ def _execute_work_item(
                 "cue_document",
                 "ooxml",
                 "pdf_text",
-                "legacy_office",
                 "text_subtitle",
             }:
                 evidence = _execute_deterministic(
@@ -448,13 +403,10 @@ def _execute_work_item(
                     config=config,
                     path=path,
                     detected_format=detected_format,
-                    profile=profile,
                     runtime=runtime,
                     temp_root=temp_root,
                 )
             elif kind == "asr_unavailable":
-                raise UnsupportedReferenceError(str(config["reason"]))
-            elif kind == "unsupported":
                 raise UnsupportedReferenceError(str(config["reason"]))
             elif kind == "asr":
                 evidence = _execute_asr(
@@ -464,7 +416,6 @@ def _execute_work_item(
                     config=config,
                     path=path,
                     detected_format=detected_format,
-                    profile=profile,
                     runtime=runtime,
                     temp_root=temp_root,
                     pool=pool,
@@ -478,7 +429,6 @@ def _execute_work_item(
                     config=config,
                     path=path,
                     detected_format=detected_format,
-                    profile=profile,
                     runtime=runtime,
                     temp_root=temp_root,
                     pool=pool,
@@ -492,7 +442,6 @@ def _execute_work_item(
                     config=config,
                     path=path,
                     detected_format=detected_format,
-                    profile=profile,
                     runtime=runtime,
                     temp_root=temp_root,
                     pool=pool,
@@ -505,7 +454,6 @@ def _execute_work_item(
                     item,
                     path=path,
                     detected_format=detected_format,
-                    profile=profile,
                     runtime=runtime,
                     temp_root=temp_root,
                     pool=pool,
@@ -518,7 +466,6 @@ def _execute_work_item(
                     item,
                     path=path,
                     detected_format=detected_format,
-                    profile=profile,
                     pool=pool,
                     retry_reason=retry_reason,
                 )
@@ -557,7 +504,6 @@ def _execute_deterministic(
     config: Mapping[str, Any],
     path: Path,
     detected_format: str,
-    profile: str,
     runtime: RuntimeConfig,
     temp_root: Path,
 ) -> ArtifactEnvelope:
@@ -569,8 +515,6 @@ def _execute_deterministic(
         extraction = extract_ooxml(path, detected_format)
     elif kind == "pdf_text":
         extraction = extract_text_layer_pdf(path)
-    elif kind == "legacy_office":
-        extraction = extract_legacy_office_local(path, detected_format)
     elif kind == "text_subtitle":
         extraction = extract_text_subtitle_track(
             path,
@@ -585,7 +529,6 @@ def _execute_deterministic(
         context,
         reference,
         item,
-        profile=profile,
         detected_format=detected_format,
         input_kind=kind,
         local_duration=duration,
@@ -600,7 +543,6 @@ def _execute_deterministic(
         context,
         reference,
         item,
-        profile=profile,
         input_artifact=input_artifact,
         content=extraction.content(),
         provenance={
@@ -623,7 +565,6 @@ def _execute_asr(
     config: Mapping[str, Any],
     path: Path,
     detected_format: str,
-    profile: str,
     runtime: RuntimeConfig,
     temp_root: Path,
     pool: _ProviderPool,
@@ -646,7 +587,6 @@ def _execute_asr(
             context,
             reference,
             item,
-            profile=profile,
             detected_format=detected_format,
             input_kind="pcm_wav_segment",
             local_duration=local_duration,
@@ -666,11 +606,7 @@ def _execute_asr(
     blob_map = cast(Mapping[str, Any], blob)
     audio_path = context.store.blob_path(str(blob_map["content_hash"]))
     provider = pool.asr()
-    actual_config = (
-        cloud_asr_actual_config()
-        if profile == "CLOUD_PROFILE"
-        else local_asr_actual_config(runtime)
-    )
+    actual_config = cloud_asr_actual_config()
     result = _invoke_model(
         context,
         item,
@@ -688,7 +624,6 @@ def _execute_asr(
         context,
         reference,
         item,
-        profile=profile,
         input_artifact=input_artifact,
         result=result,
         provider=provider.provider,
@@ -707,7 +642,6 @@ def _execute_frame_vision(
     config: Mapping[str, Any],
     path: Path,
     detected_format: str,
-    profile: str,
     runtime: RuntimeConfig,
     temp_root: Path,
     pool: _ProviderPool,
@@ -723,7 +657,6 @@ def _execute_frame_vision(
             context,
             reference,
             item,
-            profile=profile,
             detected_format=detected_format,
             input_kind="frame_manifest",
             local_duration=(end_ms - start_ms) / 1000,
@@ -758,7 +691,6 @@ def _execute_frame_vision(
         context,
         reference,
         item,
-        profile=profile,
         input_artifact=input_artifact,
         result=result,
         provider=provider.provider,
@@ -781,7 +713,6 @@ def _execute_bitmap_vision(
     config: Mapping[str, Any],
     path: Path,
     detected_format: str,
-    profile: str,
     runtime: RuntimeConfig,
     temp_root: Path,
     pool: _ProviderPool,
@@ -803,7 +734,6 @@ def _execute_bitmap_vision(
             context,
             reference,
             item,
-            profile=profile,
             detected_format=detected_format,
             input_kind="unique_bitmap_cues",
             local_duration=_local_duration_seconds(config),
@@ -835,7 +765,6 @@ def _execute_bitmap_vision(
         context,
         reference,
         item,
-        profile=profile,
         input_artifact=input_artifact,
         result=result,
         provider=provider.provider,
@@ -853,7 +782,6 @@ def _execute_image_vision(
     *,
     path: Path,
     detected_format: str,
-    profile: str,
     runtime: RuntimeConfig,
     temp_root: Path,
     pool: _ProviderPool,
@@ -873,7 +801,6 @@ def _execute_image_vision(
             context,
             reference,
             item,
-            profile=profile,
             detected_format=detected_format,
             input_kind="image_manifest",
             local_duration=None,
@@ -902,7 +829,6 @@ def _execute_image_vision(
         context,
         reference,
         item,
-        profile=profile,
         input_artifact=input_artifact,
         result=result,
         provider=provider.provider,
@@ -920,7 +846,6 @@ def _execute_cloud_document(
     *,
     path: Path,
     detected_format: str,
-    profile: str,
     pool: _ProviderPool,
     retry_reason: str | None,
 ) -> ArtifactEnvelope:
@@ -930,7 +855,6 @@ def _execute_cloud_document(
             context,
             reference,
             item,
-            profile=profile,
             detected_format=detected_format,
             input_kind="cloud_document_upload",
             local_duration=None,
@@ -959,7 +883,6 @@ def _execute_cloud_document(
         context,
         reference,
         item,
-        profile=profile,
         input_artifact=input_artifact,
         result=result,
         provider=provider.provider,
@@ -1066,7 +989,6 @@ def _publish_model_evidence(
     reference: Mapping[str, Any],
     item: Mapping[str, Any],
     *,
-    profile: str,
     input_artifact: ArtifactEnvelope,
     result: _InvocationResult,
     provider: str,
@@ -1080,7 +1002,6 @@ def _publish_model_evidence(
             context,
             reference,
             item,
-            profile=profile,
             input_artifact=input_artifact,
             content=content,
             provenance=provenance,
@@ -1120,7 +1041,6 @@ def _publish_reference_input(
     reference: Mapping[str, Any],
     item: Mapping[str, Any],
     *,
-    profile: str,
     detected_format: str,
     input_kind: str,
     local_duration: float | None,
@@ -1133,7 +1053,6 @@ def _publish_reference_input(
         producer=Producer(
             component="reference-input",
             component_version=COMPONENT_VERSION,
-            processing_profile=profile,
             provider=None,
             model=None,
             config_hash=hash_json(producer_config),
@@ -1163,7 +1082,6 @@ def _publish_reference_evidence(
     reference: Mapping[str, Any],
     item: Mapping[str, Any],
     *,
-    profile: str,
     input_artifact: ArtifactEnvelope,
     content: Any,
     provenance: Mapping[str, Any],
@@ -1179,7 +1097,6 @@ def _publish_reference_evidence(
         producer=Producer(
             component="reference-extraction",
             component_version=COMPONENT_VERSION,
-            processing_profile=profile,
             provider=provider,
             model=model,
             config_hash=hash_json(config),
@@ -1299,7 +1216,6 @@ def _publish_reference_bundle(
         producer=Producer(
             component="reference-bundle",
             component_version=COMPONENT_VERSION,
-            processing_profile=str(context.registry.project()["processing_profile"]),
             provider=None,
             model=None,
             config_hash=hash_json(
@@ -1407,14 +1323,12 @@ def _work_item_status(context: ProjectContext, row: Mapping[str, Any]) -> dict[s
 
 
 def _reference_run_config(
-    profile: str, pixel_subtitle_mode: Literal["burned", "none"] | None
+    pixel_subtitle_mode: Literal["burned", "none"] | None
 ) -> dict[str, Any]:
     return {
-        "processing_profile": profile,
         "pixel_subtitle_mode": pixel_subtitle_mode,
         "reference_vision_model": REFERENCE_VISION_MODEL,
         "cloud_reference_asr_model": CLOUD_REFERENCE_ASR_MODEL,
-        "local_reference_asr_model": LOCAL_ASR_REPO,
         "cloud_document_model": CLOUD_DOCUMENT_MODEL,
         "sent_attempt_limit": REFERENCE_MODEL_SENT_ATTEMPT_LIMIT,
     }

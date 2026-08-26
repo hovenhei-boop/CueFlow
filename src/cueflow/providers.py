@@ -15,8 +15,6 @@ from cueflow.config import (
     CLOUD_MODEL,
     LOCAL_ALIGNER_REPO,
     LOCAL_ALIGNER_REVISION,
-    LOCAL_ASR_REPO,
-    LOCAL_ASR_REVISION,
     RuntimeConfig,
 )
 from cueflow.errors import (
@@ -70,74 +68,6 @@ class ForcedAligner(Protocol):
     def close(self) -> None: ...
 
 
-class LocalQwenSemanticTranscriber:
-    provider = "qwen-local"
-    model = LOCAL_ASR_REPO
-    revision = LOCAL_ASR_REVISION
-
-    def __init__(self, runtime: RuntimeConfig) -> None:
-        self.runtime = runtime
-        self._model: Any | None = None
-
-    def transcribe(
-        self,
-        audio_path: Path,
-        glossary_terms: Sequence[str],
-        *,
-        rework_context: str | None = None,
-    ) -> SemanticResult:
-        model = self._load()
-        context = _semantic_context(glossary_terms, rework_context)
-        try:
-            results = model.transcribe(audio=str(audio_path), context=context, language=None)
-        except (MemoryError, RuntimeError) as exc:
-            raise ProviderUnavailableError(
-                "local Qwen3-ASR inference failed; no quantization or profile fallback was applied"
-            ) from exc
-        if not isinstance(results, list) or len(results) != 1:
-            raise ContractError("local semantic provider returned an invalid result count")
-        text = getattr(results[0], "text", None)
-        language = getattr(results[0], "language", None)
-        if not isinstance(text, str):
-            raise ContractError("local semantic provider returned no transcript text")
-        return SemanticResult(
-            source_text=text,
-            language=str(language) if language else None,
-            semantic_confidence=None,
-        )
-
-    def _load(self) -> Any:
-        if self._model is not None:
-            return self._model
-        try:
-            torch = import_module("torch")
-            qwen_asr = import_module("qwen_asr")
-        except ImportError as exc:
-            raise ProviderUnavailableError(
-                "LOCAL_PROFILE requires the cueflow[local] dependencies"
-            ) from exc
-        dtype = getattr(torch, self.runtime.device.dtype)
-        snapshot = _snapshot_path(self.model, self.revision, self.runtime.model_cache)
-        kwargs: dict[str, Any] = {
-            "dtype": dtype,
-            "device_map": self.runtime.device.device,
-            "max_inference_batch_size": 1,
-            "max_new_tokens": 4096,
-        }
-        try:
-            self._model = qwen_asr.Qwen3ASRModel.from_pretrained(snapshot, **kwargs)
-        except (MemoryError, OSError, RuntimeError) as exc:
-            raise ProviderUnavailableError(
-                "unable to load pinned Qwen3-ASR-1.7B with detected runtime capability"
-            ) from exc
-        return self._model
-
-    def close(self) -> None:
-        self._model = None
-        gc.collect()
-        _empty_cuda_cache()
-
-
 class LocalQwenForcedAligner:
     provider = "qwen-local"
     model = LOCAL_ALIGNER_REPO
@@ -186,7 +116,7 @@ class LocalQwenForcedAligner:
             qwen_asr = import_module("qwen_asr")
         except ImportError as exc:
             raise ProviderUnavailableError(
-                "Forced Alignment requires the cueflow[local] dependencies"
+                "Forced Alignment requires the cueflow[alignment] dependencies"
             ) from exc
         snapshot = _snapshot_path(self.model, self.revision, self.runtime.model_cache)
         kwargs: dict[str, Any] = {
@@ -226,7 +156,7 @@ class CloudOmniSemanticTranscriber:
         base_url = os.getenv("DASHSCOPE_BASE_URL")
         if not api_key or not base_url:
             raise ProviderUnavailableError(
-                "CLOUD_PROFILE requires DASHSCOPE_API_KEY and DASHSCOPE_BASE_URL"
+                "Remote provider requires DASHSCOPE_API_KEY and DASHSCOPE_BASE_URL"
             )
         factory = self._client_factory or _openai_factory()
         audio_data = "data:audio/wav;base64," + base64.b64encode(
@@ -338,7 +268,7 @@ def _openai_factory() -> Callable[..., Any]:
         module = import_module("openai")
     except ImportError as exc:
         raise ProviderUnavailableError(
-            "CLOUD_PROFILE requires the cueflow[cloud] dependencies"
+            "Remote provider requires the cueflow[cloud] dependencies"
         ) from exc
     return cast(Callable[..., Any], module.OpenAI)
 
@@ -357,7 +287,7 @@ def _snapshot_path(repo_id: str, revision: str, cache_dir: str | None) -> str:
         hub = import_module("huggingface_hub")
     except ImportError as exc:
         raise ProviderUnavailableError(
-            "LOCAL_PROFILE requires huggingface_hub for pinned snapshot resolution"
+            "Forced Alignment requires huggingface_hub for pinned snapshot resolution"
         ) from exc
     try:
         return str(

@@ -20,11 +20,15 @@ def test_reference_cli_add_extract_status_and_relocate(
             str(project),
             "--name",
             "CLI",
-            "--profile",
-            "LOCAL_PROFILE",
         ]
     ) == 0
-    capfd.readouterr()
+    initialized = json.loads(capfd.readouterr().out)
+    assert set(initialized) == {"status", "project_id", "project_dir"}
+    assert main(["status", str(project)]) == 0
+    assert set(json.loads(capfd.readouterr().out)) == {
+        "project_id", "display_name", "latest_source_run", "reference_runs",
+        "current_artifacts", "warnings",
+    }
 
     assert main(["reference", "add", str(project), str(reference)]) == 0
     added = json.loads(capfd.readouterr().out)

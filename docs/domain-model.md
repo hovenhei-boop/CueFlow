@@ -1,16 +1,14 @@
-# CueFlow v0.2.1 Domain Model
-
-状态：v0.1.1 Source 领域冻结；v0.2.1 Reference 领域冻结
+# CueFlow v0.3.0 Domain Model
 
 ## 1. Project 与 SourceAsset
 
-Project 保存 `project_id`、显示名、创建时间和固定 `processing_profile`。v0.1.1 假设同一项目同一时间只有一个活动 Orchestrator。
+Project 保存 `project_id`、显示名和创建时间。同一项目同一时间只允许一个活动 Orchestrator。
 
-SourceAsset 是可变的外部文件引用，identity 只取 `Path.name` 精确字符串；保存 filename、format、`storage_mode = external_reference`、绝对 locator 和登记时间，不保存内容 SHA-256 或 byte length。CueFlow 不复制、移动、删除或搜索外部媒体；Media Prep 时 locator 缺失、不是普通文件或不可读取产生 `SourceMissingError`。用户可在原 locator 覆盖同名文件后创建新 Run。v0.1.1 不提供 relink。已提交的下游 Artifact 仍不可变，同一 Run 的 targeted retry 只读取原 Invocation 绑定的项目内 Artifact，无需重新访问外部 Source。
+SourceAsset 是可变的外部文件引用，identity 只取 `Path.name` 精确字符串；保存 filename、format、`storage_mode = external_reference`、绝对 locator 和登记时间，不保存内容 SHA-256 或 byte length。CueFlow 不复制、移动、删除或搜索外部媒体；Media Prep 时 locator 缺失、不是普通文件或不可读取产生 `SourceMissingError`。用户可在原 locator 覆盖同名文件后创建新 Run。不提供 Source relink。已提交的下游 Artifact 仍不可变，同一 Run 的 targeted retry 只读取原 Invocation 绑定的项目内 Artifact，无需重新访问外部 Source。
 
 ## 2. Artifact 基础模型
 
-Artifact kinds 在 v0.1.1 集合上新增 `reference_input`、`reference_evidence`、`reference_bundle`。
+Artifact 种类见 [Schema Contracts](schema-contracts.md)。Producer 保存 component/version、provider、model 和 config hash；确定性阶段的 provider/model 为 null。
 
 Artifact 是不可变、内容寻址的 Envelope。身份覆盖 kind、scope、Schema semantic version、Producer identity、按顺序排列的 exact inputs 和 payload；不覆盖创建时间与存储路径。`scope_key` 对 `media_chunk`、`transcript`、`alignment` 使用 `chunk_id`，Reference kinds 使用 `reference_asset_id`，其余 Artifact 使用 `global`。
 
@@ -75,7 +73,7 @@ QA 不能修改 Transcript。一个 Run 最多执行一个 QA Alignment Repair W
 
 ## 7. Run、Invocation 与状态
 
-Run 保存 input identity、完整 config hash、状态和错误。`run` 始终创建新 Run。显式 retry 可以把原 `failed`/`interrupted` Run reopen 为 `running`。
+Run 保存 input identity、运行配置 hash、状态和错误。模型身份与执行配置由各阶段的 Producer、payload 和 Invocation 记录。`run` 始终创建新 Run。显式 retry 可以把原 `failed`/`interrupted` Run reopen 为 `running`。
 
 Invocation 保存 run/chunk、operation、logical key、attempt number、Semantic budget window、provider/model、status、response/output/error，以及 ordered exact input Artifact bindings。状态至少包含 `created`、`sending`、`succeeded`、`definitely_not_sent`、`delivery_ambiguous`、`explicit_failure`。
 
@@ -95,9 +93,9 @@ ReferenceAsset 与 SourceAsset 完全分离，不能使用 `asset_kind=auxiliary
 
 ## 10. Reference Artifact 与 Evidence role
 
-Reference Artifact 使用 ReferenceAsset id 作为 scope。`reference_input` 保存当次 work item 的稳定 manifest、内部 blob 引用、权威时间和 local facts；外部 Reference 本体不因此获得内容 identity。`reference_evidence` 保存独立 content/provenance/usage；`reference_bundle` 引用同一 Run 已成功 Evidence，并列出失败项。
+Reference Artifact 使用 ReferenceAsset id 作为 scope。`reference_input` 保存当次 work item 的稳定 manifest、内部 blob 引用、权威时间和本地测量事实；外部 Reference 本体不因此获得内容 identity。`reference_evidence` 保存独立 content/provenance/usage；`reference_bundle` 引用同一 Run 已成功 Evidence，并列出失败项。
 
-Evidence role 只允许：`text_subtitle`、`bitmap_subtitle`、`burned_subtitle`、`cloud_reference_asr`、`local_reference_asr`、`document_text`、`cloud_document_parse`、`image_visual`。不同 role 不自动融合。`image_visual` 只用于独立 PNG/JPEG/WebP，不用于 PDF 页面。
+Evidence role 只允许：`text_subtitle`、`bitmap_subtitle`、`burned_subtitle`、`cloud_reference_asr`、`document_text`、`cloud_document_parse`、`image_visual`。不同 role 不自动融合。`image_visual` 只用于独立 PNG/JPEG/WebP，不用于 PDF 页面。
 
 ## 11. Reference Run、work item 与 Invocation detail
 

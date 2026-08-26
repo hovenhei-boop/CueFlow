@@ -152,14 +152,14 @@ def test_full_orchestrator_preserves_source_and_exports_only_srt(tmp_path: Path)
     source = tmp_path / "external-source.mp4"
     _video(source, runtime)
     source_bytes = source.read_bytes()
-    context = initialize_project(tmp_path / "project", "E2E", "LOCAL_PROFILE")
+    context = initialize_project(tmp_path / "project", "E2E")
     try:
         (context.root / "output" / "subtitles.srt").write_text("old", encoding="utf-8")
         result = run_project(
             context,
             source,
             runtime=runtime,
-            semantic_factory=lambda profile, value: FakeSemantic(),
+            semantic_factory=lambda: FakeSemantic(),
             aligner_factory=lambda value: FakeAligner(),
         )
         assert result["status"] == "succeeded"
@@ -208,7 +208,7 @@ def test_unaligned_atoms_get_one_repair_then_block_export(tmp_path: Path) -> Non
     runtime = _runtime()
     source = tmp_path / "external-source.mp4"
     _video(source, runtime)
-    context = initialize_project(tmp_path / "project", "Blocked", "LOCAL_PROFILE")
+    context = initialize_project(tmp_path / "project", "Blocked")
     UnalignableAligner.calls = 0
     try:
         with pytest.raises(ExportBlockedError, match="allowed structural repair"):
@@ -216,7 +216,7 @@ def test_unaligned_atoms_get_one_repair_then_block_export(tmp_path: Path) -> Non
                 context,
                 source,
                 runtime=runtime,
-                semantic_factory=lambda profile, value: FakeSemantic(),
+                semantic_factory=lambda: FakeSemantic(),
                 aligner_factory=lambda value: UnalignableAligner(),
             )
         assert UnalignableAligner.calls == 2
@@ -230,7 +230,7 @@ def test_glossary_rework_publishes_new_versions_and_stable_warning(tmp_path: Pat
     runtime = _runtime()
     source = tmp_path / "external-source.mp4"
     _video(source, runtime)
-    context = initialize_project(tmp_path / "project", "Rework", "LOCAL_PROFILE")
+    context = initialize_project(tmp_path / "project", "Rework")
     set_glossary = orchestrator_module.set_project_glossary
     set_glossary(context, ["顾华玺", "秦明"])
     StableConflictSemantic.calls = 0
@@ -239,7 +239,7 @@ def test_glossary_rework_publishes_new_versions_and_stable_warning(tmp_path: Pat
             context,
             source,
             runtime=runtime,
-            semantic_factory=lambda profile, value: StableConflictSemantic(),
+            semantic_factory=lambda: StableConflictSemantic(),
             aligner_factory=lambda value: FakeAligner(),
         )
         assert result["status"] == "succeeded"
@@ -297,13 +297,13 @@ def test_timestamp_discontinuity_is_unverified_warning_and_does_not_block_srt(
         )
 
     monkeypatch.setattr(orchestrator_module, "probe_source", discontinuous_probe)
-    context = initialize_project(tmp_path / "project", "Unverified", "LOCAL_PROFILE")
+    context = initialize_project(tmp_path / "project", "Unverified")
     try:
         result = run_project(
             context,
             source,
             runtime=runtime,
-            semantic_factory=lambda profile, value: FakeSemantic(),
+            semantic_factory=lambda: FakeSemantic(),
             aligner_factory=lambda value: FakeAligner(),
         )
         assert result["status"] == "succeeded"
@@ -319,7 +319,7 @@ def test_timestamp_discontinuity_is_unverified_warning_and_does_not_block_srt(
 
 
 def test_source_missing_fails_without_relink_or_guessing(tmp_path: Path) -> None:
-    context = initialize_project(tmp_path / "project", "Missing", "LOCAL_PROFILE")
+    context = initialize_project(tmp_path / "project", "Missing")
     try:
         with pytest.raises(SourceMissingError, match="source_missing"):
             run_project(context, tmp_path / "moved.mp4", runtime=_runtime())
@@ -333,7 +333,7 @@ def test_delivery_ambiguous_semantic_invocation_is_not_automatically_retried(
     runtime = _runtime()
     source = tmp_path / "external-source.mp4"
     _video(source, runtime)
-    context = initialize_project(tmp_path / "project", "Ambiguous", "LOCAL_PROFILE")
+    context = initialize_project(tmp_path / "project", "Ambiguous")
     AmbiguousSemantic.calls = 0
     try:
         with pytest.raises(DeliveryAmbiguousError):
@@ -341,7 +341,7 @@ def test_delivery_ambiguous_semantic_invocation_is_not_automatically_retried(
                 context,
                 source,
                 runtime=runtime,
-                semantic_factory=lambda profile, value: AmbiguousSemantic(),
+                semantic_factory=lambda: AmbiguousSemantic(),
                 aligner_factory=lambda value: FakeAligner(),
             )
         assert AmbiguousSemantic.calls == 1
@@ -409,7 +409,7 @@ def test_delivery_ambiguous_semantic_invocation_is_not_automatically_retried(
         ("crash", CrashedSemantic, RuntimeError, "failed"),
     ):
         interrupted_context = initialize_project(
-            tmp_path / name, name, "LOCAL_PROFILE"
+            tmp_path / name, name
         )
         try:
             with pytest.raises(error_type):
@@ -417,7 +417,7 @@ def test_delivery_ambiguous_semantic_invocation_is_not_automatically_retried(
                     interrupted_context,
                     source,
                     runtime=runtime,
-                    semantic_factory=lambda profile, value, cls=provider_type: cls(),
+                    semantic_factory=lambda cls=provider_type: cls(),
                     aligner_factory=lambda value: FakeAligner(),
                 )
             interrupted_run = interrupted_context.registry.latest_run(
@@ -435,7 +435,7 @@ def test_delivery_ambiguous_semantic_invocation_is_not_automatically_retried(
             interrupted_context.close()
 
     created_context = initialize_project(
-        tmp_path / "created-ctrl-c", "created-ctrl-c", "LOCAL_PROFILE"
+        tmp_path / "created-ctrl-c", "created-ctrl-c"
     )
     real_set_invocation_status = created_context.registry.set_invocation_status
 
@@ -455,7 +455,7 @@ def test_delivery_ambiguous_semantic_invocation_is_not_automatically_retried(
                 created_context,
                 source,
                 runtime=runtime,
-                semantic_factory=lambda profile, value: FakeSemantic(),
+                semantic_factory=lambda: FakeSemantic(),
                 aligner_factory=lambda value: FakeAligner(),
             )
         created_run = created_context.registry.latest_run(created_context.project_id)

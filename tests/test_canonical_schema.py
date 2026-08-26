@@ -10,9 +10,7 @@ import pytest
 from cueflow.atomizer import build_transcript_payload
 from cueflow.canonical import artifact_content_hash, canonical_bytes
 from cueflow.config import (
-    CLOUD_MODEL,
-    LOCAL_ALIGNER_REPO,
-    PROFILES,
+    SCHEMA_VERSION,
     SEMANTIC_RETRY_RESET_LIMIT,
     QaRulesetConfig,
 )
@@ -25,7 +23,6 @@ def producer() -> Producer:
     return Producer(
         component="cueflow.test",
         component_version="0.1.0",
-        processing_profile="LOCAL_PROFILE",
         provider="fake",
         model="fake",
         config_hash="sha256:" + "0" * 64,
@@ -52,7 +49,7 @@ def test_hash_changes_when_atomizer_version_changes() -> None:
     original = artifact_content_hash(
         artifact_kind="transcript",
         scope_key="chunk_0001",
-        schema_version="1.0.0",
+        schema_version=SCHEMA_VERSION,
         producer=producer().as_dict(),
         inputs=inputs,
         payload=payload,
@@ -62,7 +59,7 @@ def test_hash_changes_when_atomizer_version_changes() -> None:
     assert original != artifact_content_hash(
         artifact_kind="transcript",
         scope_key="chunk_0001",
-        schema_version="1.0.0",
+        schema_version=SCHEMA_VERSION,
         producer=producer().as_dict(),
         inputs=inputs,
         payload=changed,
@@ -87,7 +84,8 @@ def test_atomizer_keeps_internal_apostrophe_and_hyphen_inside_word() -> None:
     assert [atom["text"] for atom in payload["atoms"]] == ["wasn't", "Heriot-Watt"]
 
 
-def test_envelope_roundtrip_and_unknown_major_rejected() -> None:
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "2.1.0", "3.0.0"])
+def test_envelope_roundtrip_and_incompatible_schema_rejected(version: str) -> None:
     payload = build_transcript_payload(
         chunk_id="chunk_0001", source_text="测试", language="Chinese"
     )
@@ -100,16 +98,19 @@ def test_envelope_roundtrip_and_unknown_major_rejected() -> None:
     )
     assert ArtifactEnvelope.from_dict(json.loads(json.dumps(envelope.as_dict()))) == envelope
     invalid = envelope.as_dict()
-    invalid["schema_version"] = "2.0.0"
-    with pytest.raises(ContractError, match="unsupported schema major"):
+    invalid["schema_version"] = version
+    with pytest.raises(ContractError, match="incompatible schema version"):
         ArtifactEnvelope.from_dict(invalid)
 
+    invalid = envelope.as_dict()
+    invalid["producer"]["unknown_field"] = None
+    with pytest.raises(ContractError, match="producer fields"):
+        ArtifactEnvelope.from_dict(invalid)
 
-def test_profiles_fix_models_and_keep_alignment_local() -> None:
-    assert set(PROFILES) == {"LOCAL_PROFILE", "CLOUD_PROFILE"}
-    assert PROFILES["CLOUD_PROFILE"].semantic_model == CLOUD_MODEL
-    assert all(profile.aligner_model == LOCAL_ALIGNER_REPO for profile in PROFILES.values())
-    assert all(profile.aligner_provider == "qwen-local" for profile in PROFILES.values())
+    invalid = envelope.as_dict()
+    del invalid["producer"]["model"]
+    with pytest.raises(ContractError, match="producer fields"):
+        ArtifactEnvelope.from_dict(invalid)
 
 
 def test_artifact_kind_allowlist_is_the_complete_current_pipeline() -> None:
