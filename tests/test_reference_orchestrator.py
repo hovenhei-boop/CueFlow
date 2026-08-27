@@ -123,6 +123,7 @@ def test_each_extract_creates_new_run_and_overwrite_reads_current_file(
             "reference_input",
             "reference_evidence",
             "reference_bundle",
+            "lexicon_input",
         }
         assert context.registry._connection.execute(
             "SELECT COUNT(*) FROM source_assets"

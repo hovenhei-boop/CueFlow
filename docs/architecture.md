@@ -1,4 +1,4 @@
-# CueFlow v0.3.0 Architecture
+# CueFlow v0.4.0 Architecture
 
 ## 1. 产品边界
 
@@ -17,7 +17,7 @@ Source Media
 → output/subtitles.srt
 ```
 
-目标是忠实转写、精确时间轴、纠错和导出。独立的 Reference 路径为 `Reference Material → deterministic extraction / optional Reference ASR, Vision, Cloud Document Parse → Reference Evidence` 旁路。该旁路不创建 Transcript、Alignment、Subtitle、QA 或 SRT，不做 glossary/terminology/candidate/acceptance，也不增加 UI。
+目标是忠实转写、精确时间轴、纠错和导出。独立的 Reference 路径为 `Reference Material → deterministic extraction / optional Reference ASR, Vision, Cloud Document Parse → Reference Evidence → automatic terminology discovery → Suggested Terms → human review → Project Lexicon`。该旁路不创建或修改 Source Transcript、Effective Glossary、Alignment、Subtitle、QA 或 SRT；v0.4.0 不增加 UI。
 
 ## 2. 核心不变量
 
@@ -112,7 +112,7 @@ Artifact publish 顺序为：写临时文件、flush/fsync、原子替换到内�
 
 Invocation 保存 operation、provider/model、attempt number、状态、输出 Artifact，以及按顺序绑定的上游 Artifact IDs。失败或 delivery ambiguous 的 Invocation 不被自动重放。
 
-只有真正开始 Source `run/retry` 或 Reference `extract/retry` 时才执行对应类别的单 Orchestrator crash recovery：遗留 `created` Invocation 收口为 `definitely_not_sent`，遗留 `sending` 收口为 `delivery_ambiguous`，对应 `running` Run 收口为 `interrupted`。Source 入口不恢复 Reference，Reference 入口不恢复 Source。本次 Ctrl+C 同样使 Run 进入 `interrupted`；其他未预期异常使 Run 进入 `failed`。Run 与 in-flight Invocation 在一个 SQLite 事务中收口。打开项目、`status`、glossary、asset、Reference add/relocate/status 不触发恢复。
+只有真正开始 Source `run/retry`、Reference `extract/retry` 或内部 Lexicon 执行/retry 时才执行对应类别的单 Orchestrator crash recovery：遗留 `created` Invocation 收口为 `definitely_not_sent`，遗留 `sending` 收口为 `delivery_ambiguous`，对应 `running` Run 收口为 `interrupted`。三类入口互不恢复其他 Run kind。本次 Ctrl+C 同样使 Run 进入 `interrupted`；其他未预期异常使 Run 进入 `failed`。Run 与 in-flight Invocation 在一个 SQLite 事务中收口。打开项目、`status`、glossary、asset、Reference add/relocate/status 和词库人工管理不触发恢复。
 
 显式 retry 可以把同一个 `failed` 或 `interrupted` Run 重新置为 `running`。Retry 从绑定输入读取项目内 Artifact，不重新访问源媒体，不依据当前 pointer 猜测输入，不重跑其他已成功 Chunk；目标完成后只重建真正必要的下游。
 
@@ -127,7 +127,7 @@ failed/interrupted --explicit targeted retry→ running
 
 ## 9. CLI 与输出
 
-CLI 提供 `init`、`glossary set`、`asset add`、`run`、`status`、`retry` 和 `reference add/extract/relocate/status/retry`。不提供 `--document-visual` 或 `--audio-upload-format`。失败 JSON 在可用时包含 Run/Invocation/work-item identity、当前状态和合法下一步；它只描述显式操作，不自动 retry。
+CLI 提供 `init`、`glossary set`、`asset add`、`run`、`status`、`retry`、Reference 管理以及 Suggested Terms、Project Lexicon、Trash、Blacklist 和 Official Pack 管理。不提供用户主动创建或 rebuild Lexicon Run 的命令，也不提供 Project→Pack select。失败 JSON 在可用时包含 Run/Invocation/work-item identity、当前状态和合法下一步；它只描述显式操作，不自动 retry。
 
 唯一正常用户输出是 `output/subtitles.srt`。内部 Artifact、SQLite、blob 和临时文件位于 `.cueflow/`；临时文件完成后清理。
 
@@ -145,3 +145,11 @@ all succeeded ReferenceEvidence in one Run → ReferenceBundle
 ```
 
 显式 `run` 上传 Source 音频 Chunk 到语义 Provider。显式 `reference extract` 按路由上传文档、位图 cue、full-frame window、独立图片或 PCM/WAV 音频段。full-frame 只保留 manifest/hash/timestamp/执行参数，图像请求正文不持久化；Cloud document file_id 在 finally 删除。完整 Reference 格式与路由见 [Reference Extraction](reference-extraction.md)。
+
+## 11. Lexicon 构建旁路
+
+Reference bundle 发布后自动触发内部 `kind=lexicon` Run。系统只处理尚无 coverage 记录的 exact Evidence Artifact ID；Reference retry 的旧 Evidence 不重跑，新 Evidence 独立进入有界 batch。一个 Run 只发布一个 `lexicon_input` manifest，每个 batch 可发布一个 `term_candidate_set`。Candidate 必须逐字引用所发送 Evidence unit 的 field path 和半开 offset；客户端重新绑定完整 Evidence 并校验，非法位置使该 work item 失败。
+
+Suggested Term 经过 Accept、Edit & Accept、Reject 或 Blacklist 后更新项目状态。Project Lexicon 的 Add、Edit、Disable、Delete 与 Restore 每次发布不可变 `project_lexicon` revision。Reject/Delete 进入有时限 Trash，Blacklist 只阻止同一精确词面再次作为 Reference suggestion 出现。两者都不禁止 Source/SRT 输出该词。
+
+Official Packs 位于应用级数据目录，由全部项目共享。用户在显式 setup/install 时按领域选择，setup 未指定领域时默认全选；不存在项目分类或项目绑定。Pack version 不可变，安装校验 catalog manifest hash、Pack schema、terms hash/count 与 license，并使用目录锁、临时目录、原子 rename 和 current pointer。详见 [Lexicon](lexicon.md)。

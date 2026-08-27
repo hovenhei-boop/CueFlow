@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,12 +27,30 @@ ARTIFACT_KINDS = frozenset(
         "reference_input",
         "reference_evidence",
         "reference_bundle",
+        "lexicon_input",
+        "term_candidate_set",
+        "project_lexicon",
     }
 )
 CHUNK_KINDS = frozenset({"media_chunk", "transcript", "alignment"})
 GLOSSARY_KINDS = frozenset({"system_glossary", "project_glossary", "effective_glossary"})
 REFERENCE_KINDS = frozenset(
     {"reference_input", "reference_evidence", "reference_bundle"}
+)
+LEXICON_RUN_KINDS = frozenset({"lexicon_input", "term_candidate_set"})
+TERM_CATEGORIES = frozenset({"proper_noun", "noun_or_term", "verb", "other"})
+PROPER_NOUN_SUBTYPES = frozenset(
+    {
+        "person",
+        "organization",
+        "location",
+        "event",
+        "project_or_program",
+        "product_brand_model_software",
+        "standard_protocol_code",
+        "work_or_title",
+        "other",
+    }
 )
 REFERENCE_EVIDENCE_ROLES = frozenset(
     {
@@ -235,6 +254,14 @@ def validate_scope(kind: str, scope_key: str, payload: Mapping[str, Any]) -> Non
         reference_asset_id = payload.get("reference_asset_id")
         if not isinstance(reference_asset_id, str) or reference_asset_id != scope_key:
             raise ContractError(f"{kind} scope_key must equal payload.reference_asset_id")
+    elif kind == "lexicon_input":
+        if payload.get("run_id") != scope_key:
+            raise ContractError("lexicon_input scope_key must equal payload.run_id")
+    elif kind == "term_candidate_set":
+        if payload.get("work_item_id") != scope_key:
+            raise ContractError(
+                "term_candidate_set scope_key must equal payload.work_item_id"
+            )
     elif scope_key != "global":
         raise ContractError(f"{kind} must use global scope_key")
 
@@ -302,6 +329,12 @@ def validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
         validate_reference_evidence_payload(payload)
     elif kind == "reference_bundle":
         validate_reference_bundle_payload(payload)
+    elif kind == "lexicon_input":
+        validate_lexicon_input_payload(payload)
+    elif kind == "term_candidate_set":
+        validate_term_candidate_set_payload(payload)
+    elif kind == "project_lexicon":
+        validate_project_lexicon_payload(payload)
 
 
 def validate_reference_input_payload(payload: Mapping[str, Any]) -> None:
@@ -363,6 +396,199 @@ def validate_reference_bundle_payload(payload: Mapping[str, Any]) -> None:
     failures = payload.get("failures")
     if not isinstance(failures, list) or any(not isinstance(value, Mapping) for value in failures):
         raise ContractError("reference_bundle.failures must be an array of objects")
+
+
+def validate_lexicon_input_payload(payload: Mapping[str, Any]) -> None:
+    _string(payload.get("run_id"), "lexicon_input.run_id")
+    _string(
+        payload.get("trigger_reference_run_id"),
+        "lexicon_input.trigger_reference_run_id",
+    )
+    _string(
+        payload.get("reference_bundle_artifact_id"),
+        "lexicon_input.reference_bundle_artifact_id",
+    )
+    if payload.get("normalization_version") != "0.1.0":
+        raise ContractError("unsupported Lexicon normalization version")
+    batches = payload.get("batches")
+    if not isinstance(batches, list) or not batches:
+        raise ContractError("lexicon_input.batches must be a non-empty array")
+    seen_items: set[str] = set()
+    for raw in batches:
+        batch = _mapping(raw, "lexicon_input.batches[]")
+        work_item_id = _string(batch.get("work_item_id"), "work_item_id")
+        if work_item_id in seen_items:
+            raise ContractError("lexicon_input contains duplicate work item IDs")
+        seen_items.add(work_item_id)
+        _string(batch.get("evidence_artifact_id"), "evidence_artifact_id")
+        _non_negative_integer(batch.get("batch_ordinal"), "batch_ordinal")
+        units = batch.get("units")
+        if not isinstance(units, list) or not units:
+            raise ContractError("lexicon_input batch requires Evidence units")
+        for raw_unit in units:
+            unit = _mapping(raw_unit, "lexicon_input.units[]")
+            path = unit.get("field_path")
+            if not isinstance(path, list) or not path:
+                raise ContractError("lexicon_input unit.field_path must be a non-empty array")
+            start = _non_negative_integer(
+                unit.get("source_start_offset"), "source_start_offset"
+            )
+            end = _positive_integer(unit.get("source_end_offset"), "source_end_offset")
+            if end <= start:
+                raise ContractError("lexicon_input unit source interval is invalid")
+            _string(unit.get("text_hash"), "lexicon_input unit.text_hash")
+            _mapping(unit.get("coordinates"), "lexicon_input unit.coordinates")
+
+
+def validate_term_candidate_set_payload(payload: Mapping[str, Any]) -> None:
+    _string(payload.get("run_id"), "term_candidate_set.run_id")
+    _string(payload.get("work_item_id"), "term_candidate_set.work_item_id")
+    _string(
+        payload.get("evidence_artifact_id"),
+        "term_candidate_set.evidence_artifact_id",
+    )
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        raise ContractError("term_candidate_set.candidates must be an array")
+    for raw in candidates:
+        candidate = _mapping(raw, "term_candidate_set.candidates[]")
+        if set(candidate) != {
+            "candidate_id",
+            "normalized_surface_form",
+            "display_term",
+            "display_category",
+            "display_proper_noun_subtype",
+            "disposition",
+            "occurrences",
+        }:
+            raise ContractError("term_candidate_set candidate fields are invalid")
+        disposition = _string(candidate.get("disposition"), "disposition")
+        if disposition not in {
+            "suggested",
+            "already_in_project_lexicon",
+            "suppressed_blacklist",
+            "suppressed_trash",
+            "suppressed_blacklist_and_trash",
+        }:
+            raise ContractError("term_candidate_set has invalid disposition")
+        candidate_id = candidate.get("candidate_id")
+        if disposition == "suggested":
+            _string(candidate_id, "candidate_id")
+        elif candidate_id is not None:
+            raise ContractError("suppressed term_candidate_set item cannot have candidate_id")
+        _string(candidate.get("normalized_surface_form"), "normalized_surface_form")
+        _string(candidate.get("display_term"), "display_term")
+        _validate_term_category(
+            candidate.get("display_category"),
+            candidate.get("display_proper_noun_subtype"),
+            "term_candidate_set display category",
+        )
+        occurrences = candidate.get("occurrences")
+        if not isinstance(occurrences, list) or not occurrences:
+            raise ContractError("term_candidate_set candidate requires occurrences")
+        for raw_occurrence in occurrences:
+            occurrence = _mapping(raw_occurrence, "term_candidate_set.occurrences[]")
+            if set(occurrence) != {
+                "raw_surface_form",
+                "suggested_surface_form",
+                "field_path",
+                "start_offset",
+                "end_offset",
+                "category",
+                "proper_noun_subtype",
+                "risk_tags",
+                "context_before",
+                "context_after",
+                "coordinates",
+            }:
+                raise ContractError("term_candidate_set occurrence fields are invalid")
+            _string(occurrence.get("raw_surface_form"), "raw_surface_form")
+            suggested = occurrence.get("suggested_surface_form")
+            if suggested is not None:
+                _string(suggested, "suggested_surface_form")
+            path = occurrence.get("field_path")
+            if (
+                not isinstance(path, list)
+                or not path
+                or any(
+                    isinstance(part, bool) or not isinstance(part, (str, int))
+                    for part in path
+                )
+            ):
+                raise ContractError("term_candidate_set occurrence field_path is invalid")
+            start = _non_negative_integer(occurrence.get("start_offset"), "start_offset")
+            end = _positive_integer(occurrence.get("end_offset"), "end_offset")
+            if end <= start:
+                raise ContractError("term_candidate_set occurrence interval is invalid")
+            _validate_term_category(
+                occurrence.get("category"),
+                occurrence.get("proper_noun_subtype"),
+                "term_candidate_set occurrence category",
+            )
+            risk_tags = occurrence.get("risk_tags")
+            if not isinstance(risk_tags, list) or any(
+                not isinstance(tag, str) or not tag for tag in risk_tags
+            ):
+                raise ContractError("term_candidate_set risk_tags are invalid")
+            _string(occurrence.get("context_before"), "context_before", allow_empty=True)
+            _string(occurrence.get("context_after"), "context_after", allow_empty=True)
+            _mapping(occurrence.get("coordinates"), "coordinates")
+
+
+def validate_project_lexicon_payload(payload: Mapping[str, Any]) -> None:
+    if set(payload) != {
+        "revision_id",
+        "ordinal",
+        "parent_revision_id",
+        "decision_id",
+        "entries",
+    }:
+        raise ContractError("project_lexicon fields are invalid")
+    _string(payload.get("revision_id"), "project_lexicon.revision_id")
+    _positive_integer(payload.get("ordinal"), "project_lexicon.ordinal")
+    parent = payload.get("parent_revision_id")
+    if parent is not None:
+        _string(parent, "project_lexicon.parent_revision_id")
+    _string(payload.get("decision_id"), "project_lexicon.decision_id")
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        raise ContractError("project_lexicon.entries must be an array")
+    seen: set[str] = set()
+    for raw in entries:
+        entry = _mapping(raw, "project_lexicon.entries[]")
+        if set(entry) != {
+            "entry_id",
+            "term",
+            "category",
+            "proper_noun_subtype",
+            "enabled",
+            "entry_revision",
+        }:
+            raise ContractError("project_lexicon entry fields are invalid")
+        _string(entry.get("entry_id"), "entry_id")
+        term = _string(entry.get("term"), "term")
+        normalized = unicodedata.normalize("NFC", term).strip()
+        if normalized in seen:
+            raise ContractError("project_lexicon terms must be unique")
+        seen.add(normalized)
+        _validate_term_category(
+            entry.get("category"),
+            entry.get("proper_noun_subtype"),
+            "project_lexicon category",
+        )
+        if not isinstance(entry.get("enabled"), bool):
+            raise ContractError("project_lexicon entry.enabled must be boolean")
+        _positive_integer(entry.get("entry_revision"), "entry_revision")
+
+
+def _validate_term_category(category: Any, subtype: Any, name: str) -> None:
+    if category not in TERM_CATEGORIES:
+        raise ContractError(f"{name} is invalid")
+    if category == "proper_noun":
+        if subtype not in PROPER_NOUN_SUBTYPES:
+            raise ContractError(f"{name} requires a supported proper noun subtype")
+    elif subtype is not None:
+        raise ContractError(f"{name} cannot have a proper noun subtype")
 
 
 def validate_glossary_payload(payload: Mapping[str, Any]) -> None:

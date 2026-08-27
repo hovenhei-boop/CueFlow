@@ -128,6 +128,8 @@ def test_status_add_and_relocate_do_not_recover_source_or_reference_runs(
     context.registry.set_run_status(source_run, "running")
     context.registry.set_run_status(reference_run, "running")
     try:
+        assert context.registry.run(source_run)["kind"] == "source"
+        assert context.registry.run(reference_run)["kind"] == "reference"
         assert project_status(context)["latest_source_run"]["status"] == "running"
         assert reference_status(context)["reference_assets"][0]["runs"][0]["status"] == "running"
         register_reference_asset(context, reference_path)

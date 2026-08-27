@@ -1,10 +1,10 @@
-# CueFlow v0.3.0 Schema Contracts
+# CueFlow v0.4.0 Schema Contracts
 
 ## 1. Envelope 与哈希
 
 Artifact Envelope 包含 `schema_version`、`artifact_id`、kind、scope、content hash、created time、Producer、ordered inputs 和 payload。内容哈希使用 RFC 8785 JCS UTF-8 bytes 后计算 SHA-256，覆盖 kind、scope、Schema major/minor、Producer、inputs 与 payload；不覆盖 Artifact ID、created_at 或路径。只接受当前 Schema 版本，其他版本的 payload 不得解释。Producer 恰好包含 `component`、`component_version`、`provider`、`model`、`config_hash`；缺字段或额外字段均拒绝。
 
-合法 Artifact kinds：`media_probe`、`timeline_audio`、`chunk_plan`、`media_chunk`、`system_glossary`、`project_glossary`、`effective_glossary`、`transcript`、`alignment`、`subtitle`、`qa`、`srt_render`、`reference_input`、`reference_evidence`、`reference_bundle`。当前 Artifact Schema 为 `2.0.0`。
+合法 Artifact kinds：`media_probe`、`timeline_audio`、`chunk_plan`、`media_chunk`、`system_glossary`、`project_glossary`、`effective_glossary`、`transcript`、`alignment`、`subtitle`、`qa`、`srt_render`、`reference_input`、`reference_evidence`、`reference_bundle`、`lexicon_input`、`term_candidate_set`、`project_lexicon`。当前 Artifact Schema 为 `3.0.0`。
 
 ## 2. SourceAsset
 
@@ -76,9 +76,9 @@ SrtRender payload 保存精确 Subtitle/QA IDs、UTF-8、byte length 和 text，
 
 ## 9. Registry
 
-SQLite 至少包含 Project、SourceAsset、Artifact、ArtifactDependency、CurrentPointer、Run、Invocation、InvocationInput 和 SemanticBudgetReset。
+SQLite 包含 Source、Reference 与 Lexicon 三组完整表。公共 Run 表的 `kind` 非空且只允许 `source`、`reference`、`lexicon`；各查询和 crash recovery 必须正向按 kind 选择，不能再以“不是 Reference”推断 Source。
 
-Registry 使用 SQLite `user_version = 3`。空库直接初始化当前完整结构；非当前版本、缺表或 column 不匹配均明确拒绝，不修改已有库。Project 列恰好为 `project_id`、`display_name`、`created_at`。
+Registry 使用 SQLite `user_version = 4`。空库直接初始化当前完整结构；非当前版本、缺表或 column 不匹配均明确拒绝，不修改已有库。Project 列恰好为 `project_id`、`display_name`、`created_at`。
 
 InvocationInput 主键为 `(invocation_id, ordinal)`，每行保存 role 与精确 `input_artifact_id`。Targeted retry 只能读取这些绑定。
 
@@ -99,3 +99,15 @@ Reference Artifact input 可以使用 `reference_asset_id`，并与 `artifact_id
 `local_measured_duration` 与 `provider_usage_duration` 是两个语义不同、分别持久化且均允许 null 的字段。前者只来自本地媒体测量，用于源时间轴、provenance、分段和媒体事实；后者只来自 Provider usage，用于成本观测和账单解释。禁止定义或赋值 `media_duration = usage.duration`，禁止用 Provider usage 重建时间轴。Provider 未报告的 usage/cost 字段为 null，不得伪造成 0。
 
 `reference_invocation_details` 必须保存 work item/branch、provider/model、当次实际 config、ordered input Artifact、response id、上述双时长、raw usage、nullable provider cost、retry parent/reason、failure details，以及 Cloud document remote file id/cleanup status。`reference_runs` 只扩展 runs；`reference_work_items` 的成功 Evidence 和失败详情可审计。
+
+## 11. Lexicon schema
+
+`lexicon_runs` 绑定触发它的 Reference Run、Reference Bundle、唯一 `lexicon_input` manifest 和聚合 outcome。`lexicon_work_items` 绑定 exact Evidence Artifact ID、batch ordinal、冻结 batch manifest、状态、candidate-set Artifact 或失败详情；`lexicon_evidence_coverage` 以 Evidence Artifact ID 为主键实现增量处理。`lexicon_invocation_details` 保存 provider/model、实际配置、usage/cost、retry parent/reason 和失败详情。
+
+`lexicon_input.scope_key == payload.run_id`，payload 保存触发 Reference Run/Bundle、normalization version 与非空 batches。每个 unit 必须保存非空 field path、完整 Evidence 中的半开 source offset、切片 text hash 与来源坐标；manifest 不持久化发送正文。
+
+`term_candidate_set.scope_key == payload.work_item_id`，绑定 run/work-item/Evidence，并保存候选 observation。每个 observation 保留 normalized/display term、显示分类、disposition 与至少一个 exact occurrence；空模型结果用空 candidate array 表示成功。
+
+`term_candidates` 对 `(normalization_version, normalized_surface_form COLLATE BINARY)` 唯一；`term_occurrences` 保存 Evidence/role、raw 与 suggested surface、分类、risk tags、field path、offset、context 和 coordinates。`project_lexicon_entries` 只对活动 exact normalized term 唯一，带 enabled/status/revision；`project_lexicon_revisions` 形成 ordinal/parent 不可变链。Trash、Blacklist 和 retention setting 分表保存。
+
+`project_lexicon` 使用 global scope，保存 revision/parent/decision 与当次全部活动 entries。发布它不得 stale 或改写 `effective_glossary`、Transcript、Alignment、Subtitle、QA 或 SRT pointer。

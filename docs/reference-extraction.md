@@ -1,10 +1,10 @@
-# CueFlow v0.3.0 Reference Extraction
+# CueFlow v0.4.0 Reference Extraction
 
 ## 1. 边界
 
 Reference Material 经确定性识别与提取，或远端 ASR、Vision、Document Parse，生成带 provenance 的 Reference Evidence。
 
-ReferenceAsset 与 SourceAsset 独立。Evidence 不创建或修改 Source Transcript、Alignment、Subtitle、QA 或 SRT，也不自动融合。词库、术语挖掘、candidate、acceptance、UI、PPT/板书/屏幕画面补充抽取及跨 Run cache 不在当前实现内。
+ReferenceAsset 与 SourceAsset 独立。Evidence 不创建或修改 Source Transcript、Effective Glossary、Alignment、Subtitle、QA 或 SRT，也不自动融合。每个 complete/partial bundle 会自动触发增量术语发现并生成 Suggested Terms；人工审核、Project Lexicon 与 Official Pack 的契约见 [Lexicon](lexicon.md)。UI、PPT/板书/屏幕画面补充抽取及跨 Run Reference cache 不在当前实现内。
 
 ## 2. 身份与 relocate
 
@@ -45,7 +45,7 @@ Invocation 保存实际 model/config。权威图像时间来自 pipeline 的 `fr
 
 ## 5. 云端上传范围
 
-显式执行 `reference extract` 时，按路由可能上传指定 Reference 的 OLE Office 或扫描/混合 PDF 文档、去重位图 cue、临时 full-frame 图片、独立图片和 PCM/WAV 音频段。确定性提取不上传文件，不创建模型 Invocation；不扫描或上传其他未指定文件。
+显式执行 `reference extract` 时，按路由可能上传指定 Reference 的 OLE Office 或扫描/混合 PDF 文档、去重位图 cue、临时 full-frame 图片、独立图片和 PCM/WAV 音频段。确定性 Reference 提取本身不上传文件，也不创建 Reference 模型 Invocation；但成功 Evidence 随后会自动触发术语发现，其文本 unit 可能发送到 Lexicon 云端 Provider。系统不扫描或上传其他未指定文件。`reference add` 仍然只登记，不联网。
 
 full-frame JPEG 为临时数据，仅持久化 manifest、encoded hash、时间戳和执行参数；base64 请求正文不写入 Artifact、日志或 Registry。唯一位图可作为内容寻址 blob 持久化。
 
@@ -60,3 +60,5 @@ Reference Run 使用现有 `runs`，`reference_runs` 是关联 ReferenceAsset、
 Retry 只接受失败或 interrupted work item，成功项不重跑。成功 retry 发布原 Run 的新 bundle，引用既有成功 Evidence。每模型 work item 每 Run 最多两个 sent attempt；`definitely_not_sent` 不占，`delivery_ambiguous` 占且不自动 retry。不提供质量重试参数。
 
 Crash recovery 只在 Source `run/retry` 或 Reference `extract/retry` 入口执行，分别只恢复对应 Run 类别。add、relocate、status 和打开项目不恢复。`project_status()` 分别报告 `latest_source_run` 与 `reference_runs`。
+
+Reference Run 先完成 Evidence/bundle 状态提交，再触发术语发现。partial bundle 中成功的 Evidence 同样触发；之后仍按原 Reference 契约抛出 partial failure。Lexicon 失败记录在独立 Run/work item 中，不回滚 Reference Evidence，也不能把 complete Reference 改成失败。Reference retry 复用的旧 Evidence ID 因 coverage 被跳过，只处理本次新增的成功 Evidence。

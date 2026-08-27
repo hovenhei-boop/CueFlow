@@ -59,5 +59,25 @@ class ReferenceRunFailedError(CueFlowError):
         self.outcome = outcome
 
 
+class LexiconRunFailedError(CueFlowError):
+    """An internal terminology-discovery Run did not complete."""
+
+    def __init__(self, run_id: str, outcome: str) -> None:
+        super().__init__(f"Suggested Terms extraction {run_id} finished with outcome={outcome}")
+        self.run_id = run_id
+        self.outcome = outcome
+
+
+class SuppressionConflictError(ContractError):
+    """An explicit lexicon write needs a user choice about Trash/Blacklist state."""
+
+    def __init__(self, normalized_surface_form: str, conflicts: tuple[str, ...]) -> None:
+        super().__init__(
+            "term is currently suppressed; choose remove_and_add, keep_and_add, or cancel"
+        )
+        self.normalized_surface_form = normalized_surface_form
+        self.conflicts = conflicts
+
+
 class ExportBlockedError(CueFlowError):
     """The export gate rejected the current project state."""

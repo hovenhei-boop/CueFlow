@@ -1,4 +1,4 @@
-# CueFlow v0.3.0 Failure Model
+# CueFlow v0.4.0 Failure Model
 
 ## 1. 原则
 
@@ -84,3 +84,13 @@ Reference work item 相互隔离。全成功使 Run `succeeded/complete`；至�
 Cloud document 在上传得到 file_id 后，无论 poll、Provider、响应解析或本地流程如何结束都在 finally 请求删除。身份 401、权限 403、格式/provider 400/415/422 分别报告；删除未确认是独立 cleanup failure。Provider 未返回 usage/cost 时存 null。
 
 Source recovery 只由 Source run/retry 触发；Reference recovery 只由 Reference extract/retry 触发。add、relocate、status 和打开项目不会改变 running Run。
+
+## 14. Lexicon failure、retry 与抑制冲突
+
+Lexicon model work item 每个最多两个 sent attempt；`definitely_not_sent` 不占次数，`delivery_ambiguous` 占一次且不自动 retry。成功 work item 永不重跑；空 candidate array 是成功。无法重新绑定到本次 batch 和完整 Evidence 的 field path/offset、raw substring 不匹配、非法分类或响应结构均为 explicit failure，不接受模型臆造的 provenance。
+
+Reference complete/partial bundle 已发布后才触发 Lexicon，因此 Lexicon 失败不能回滚或掩盖 Reference 成功 Evidence。Lexicon Run complete/partial/failed 独立聚合；显式 suggestion retry 留在原 Run，只重放目标失败 batch。Lexicon recovery 只处理 `kind=lexicon`，不改变 Source/Reference Run。
+
+Trash/Blacklist 冲突不是自动失败恢复。人工写入命中抑制时默认抛 `SuppressionConflictError`，结构化返回 normalized term、冲突种类与 remove_and_add、keep_and_add、cancel 三个选择。只有调用方再次显式给出选择才变更状态。
+
+Official Pack 安装在应用数据目录加独占锁，下载/读取到临时位置，完成 schema、identity、license、manifest hash、terms hash/count 校验后原子 rename 并更新 current pointer。失败保留旧 current；`repair` 只在用户显式调用时清理自身临时项并按已持久化 catalog 修复当前版本。运行 Source 或初始化 Project 不隐式下载 Pack。

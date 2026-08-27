@@ -307,6 +307,7 @@ def test_interrupted_run_can_only_reopen_for_targeted_retry(tmp_path: Path) -> N
             {"source_asset_id": "fixture"},
             "sha256:" + "0" * 64,
         )
+        assert project.registry.run(run_id)["kind"] == "source"
         project.registry.set_run_status(run_id, "running")
         created_id = project.registry.create_invocation(
             run_id=run_id,

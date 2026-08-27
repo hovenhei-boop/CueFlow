@@ -22,6 +22,7 @@ from cueflow.errors import (
     ReferenceRunFailedError,
     UnsupportedReferenceError,
 )
+from cueflow.lexicon_orchestrator import LexiconFactory, discover_terms_for_bundle
 from cueflow.project import ProjectContext
 from cueflow.reference_assets import inspect_reference, resolve_reference_locator
 from cueflow.reference_documents import (
@@ -124,6 +125,7 @@ def extract_reference(
     pixel_subtitle_mode: Literal["burned", "none"] | None = None,
     runtime: RuntimeConfig | None = None,
     providers: ReferenceProviders | None = None,
+    lexicon_factory: LexiconFactory | None = None,
 ) -> dict[str, Any]:
     context.registry.recover_running_reference_runs()
     chosen_runtime = runtime or RuntimeConfig.detect()
@@ -192,6 +194,9 @@ def extract_reference(
         raise
     finally:
         pool.close()
+    result["suggestions"] = _discover_reference_terms(
+        context, result, extractor_factory=lexicon_factory
+    )
     if result["outcome"] != "complete":
         raise ReferenceRunFailedError(run_id, str(result["outcome"]))
     return result
@@ -203,6 +208,7 @@ def retry_reference_work_item(
     *,
     runtime: RuntimeConfig | None = None,
     providers: ReferenceProviders | None = None,
+    lexicon_factory: LexiconFactory | None = None,
 ) -> dict[str, Any]:
     context.registry.recover_running_reference_runs()
     item = context.registry.reference_work_item(work_item_id)
@@ -248,9 +254,41 @@ def retry_reference_work_item(
         raise
     finally:
         pool.close()
+    result["suggestions"] = _discover_reference_terms(
+        context, result, extractor_factory=lexicon_factory
+    )
     if result["outcome"] != "complete":
         raise ReferenceRunFailedError(run_id, str(result["outcome"]))
     return result
+
+
+def _discover_reference_terms(
+    context: ProjectContext,
+    reference_result: Mapping[str, Any],
+    *,
+    extractor_factory: LexiconFactory | None,
+) -> dict[str, Any]:
+    bundle_id = reference_result.get("bundle_artifact_id")
+    if not isinstance(bundle_id, str):
+        return {
+            "status": "not_started",
+            "run_id": None,
+            "outcome": "failed",
+            "error": "Reference extraction published no Evidence Bundle",
+        }
+    try:
+        return discover_terms_for_bundle(
+            context,
+            context.artifact(bundle_id),
+            extractor_factory=extractor_factory,
+        )
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "run_id": None,
+            "outcome": "failed",
+            "error": str(exc) or type(exc).__name__,
+        }
 
 
 def reference_status(

@@ -16,7 +16,14 @@ from cueflow.config import (
 )
 from cueflow.errors import ContractError
 from cueflow.registry import DDL
-from cueflow.schema import ARTIFACT_KINDS, ArtifactEnvelope, InputRef, Producer
+from cueflow.schema import (
+    ARTIFACT_KINDS,
+    ArtifactEnvelope,
+    InputRef,
+    Producer,
+    validate_project_lexicon_payload,
+    validate_term_candidate_set_payload,
+)
 
 
 def producer() -> Producer:
@@ -84,7 +91,7 @@ def test_atomizer_keeps_internal_apostrophe_and_hyphen_inside_word() -> None:
     assert [atom["text"] for atom in payload["atoms"]] == ["wasn't", "Heriot-Watt"]
 
 
-@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "2.1.0", "3.0.0"])
+@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "2.0.0", "4.0.0"])
 def test_envelope_roundtrip_and_incompatible_schema_rejected(version: str) -> None:
     payload = build_transcript_payload(
         chunk_id="chunk_0001", source_text="测试", language="Chinese"
@@ -131,6 +138,9 @@ def test_artifact_kind_allowlist_is_the_complete_current_pipeline() -> None:
             "reference_input",
             "reference_evidence",
             "reference_bundle",
+            "lexicon_input",
+            "term_candidate_set",
+            "project_lexicon",
         }
     )
 
@@ -142,3 +152,67 @@ def test_semantic_retry_reset_limit_is_a_fixed_data_model_constant() -> None:
         f"semantic_budget_window BETWEEN 0 AND {SEMANTIC_RETRY_RESET_LIMIT}" in DDL
     )
     assert f"window_index BETWEEN 1 AND {SEMANTIC_RETRY_RESET_LIMIT}" in DDL
+
+
+def test_lexicon_artifact_payloads_validate_provenance_and_exact_identity() -> None:
+    candidate_payload = {
+        "run_id": "run_1",
+        "work_item_id": "lwi_1",
+        "evidence_artifact_id": "art_evidence",
+        "candidates": [
+            {
+                "candidate_id": "cand_1",
+                "normalized_surface_form": "CueFlow",
+                "display_term": "CueFlow",
+                "display_category": "proper_noun",
+                "display_proper_noun_subtype": "product_brand_model_software",
+                "disposition": "suggested",
+                "occurrences": [
+                    {
+                        "raw_surface_form": "CueFlow",
+                        "suggested_surface_form": None,
+                        "field_path": ["content", "blocks", 0, "text"],
+                        "start_offset": 4,
+                        "end_offset": 11,
+                        "category": "proper_noun",
+                        "proper_noun_subtype": "product_brand_model_software",
+                        "risk_tags": [],
+                        "context_before": "Use ",
+                        "context_after": ".",
+                        "coordinates": {"page_number": 1},
+                    }
+                ],
+            }
+        ],
+    }
+    validate_term_candidate_set_payload(candidate_payload)
+    candidate_payload["candidates"][0]["occurrences"][0]["end_offset"] = 4
+    with pytest.raises(ContractError, match="interval"):
+        validate_term_candidate_set_payload(candidate_payload)
+
+    project_payload = {
+        "revision_id": "lexrev_1",
+        "ordinal": 1,
+        "parent_revision_id": None,
+        "decision_id": "dec_1",
+        "entries": [
+            {
+                "entry_id": "lex_1",
+                "term": "é",
+                "category": "noun_or_term",
+                "proper_noun_subtype": None,
+                "enabled": True,
+                "entry_revision": 1,
+            },
+            {
+                "entry_id": "lex_2",
+                "term": "e\u0301",
+                "category": "noun_or_term",
+                "proper_noun_subtype": None,
+                "enabled": True,
+                "entry_revision": 1,
+            },
+        ],
+    }
+    with pytest.raises(ContractError, match="unique"):
+        validate_project_lexicon_payload(project_payload)

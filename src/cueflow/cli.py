@@ -6,7 +6,29 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from cueflow.errors import CueFlowError, ReferenceRunFailedError
+from cueflow.errors import (
+    CueFlowError,
+    LexiconRunFailedError,
+    ReferenceRunFailedError,
+    SuppressionConflictError,
+)
+from cueflow.lexicon import (
+    add_blacklist,
+    add_entry,
+    delete_entry,
+    edit_entry,
+    list_blacklist,
+    list_entries,
+    list_suggestions,
+    list_trash,
+    remove_blacklist,
+    restore_trash,
+    review_candidate,
+    set_entry_enabled,
+    set_trash_retention,
+)
+from cueflow.lexicon_orchestrator import retry_suggestion_work_item, suggestion_status
+from cueflow.lexicon_packs import OfficialPackStore
 from cueflow.orchestrator import (
     initialize_project,
     project_status,
@@ -88,7 +110,121 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reference_retry.add_argument("project_dir", type=Path)
     reference_retry.add_argument("work_item_id")
+
+    lexicon = commands.add_parser("lexicon", help="manage Suggested Terms and Lexicons")
+    lexicon_commands = lexicon.add_subparsers(dest="lexicon_command", required=True)
+
+    suggestions = lexicon_commands.add_parser("suggestions", help="review Suggested Terms")
+    suggestion_commands = suggestions.add_subparsers(
+        dest="suggestions_command", required=True
+    )
+    suggestions_list = suggestion_commands.add_parser("list", help="list pending terms")
+    suggestions_list.add_argument("project_dir", type=Path)
+    suggestions_status = suggestion_commands.add_parser(
+        "status", help="show automatic term-discovery jobs"
+    )
+    suggestions_status.add_argument("project_dir", type=Path)
+    suggestions_retry = suggestion_commands.add_parser(
+        "retry", help="retry one failed automatic term-discovery batch"
+    )
+    suggestions_retry.add_argument("project_dir", type=Path)
+    suggestions_retry.add_argument("work_item_id")
+    suggestions_review = suggestion_commands.add_parser(
+        "review", help="accept, edit, reject, or blacklist a Suggested Term"
+    )
+    suggestions_review.add_argument("project_dir", type=Path)
+    suggestions_review.add_argument("candidate_id")
+    suggestions_review.add_argument(
+        "--action", required=True, choices=("accept", "edit_accept", "reject", "blacklist")
+    )
+    suggestions_review.add_argument("--expected-revision", required=True, type=int)
+    suggestions_review.add_argument("--term", dest="edited_term")
+    suggestions_review.add_argument(
+        "--category", choices=("proper_noun", "noun_or_term", "verb", "other")
+    )
+    suggestions_review.add_argument("--proper-noun-subtype")
+    _add_suppression_policy(suggestions_review)
+
+    entry = lexicon_commands.add_parser("entry", help="manage the Project Lexicon")
+    entry_commands = entry.add_subparsers(dest="entry_command", required=True)
+    entry_list = entry_commands.add_parser("list", help="list Project Lexicon entries")
+    entry_list.add_argument("project_dir", type=Path)
+    entry_list.add_argument("--include-deleted", action="store_true")
+    entry_add = entry_commands.add_parser("add", help="add a Project Lexicon entry")
+    entry_add.add_argument("project_dir", type=Path)
+    entry_add.add_argument("term")
+    entry_add.add_argument(
+        "--category", required=True, choices=("proper_noun", "noun_or_term", "verb", "other")
+    )
+    entry_add.add_argument("--proper-noun-subtype")
+    _add_suppression_policy(entry_add)
+    entry_edit = entry_commands.add_parser("edit", help="edit a Project Lexicon entry")
+    entry_edit.add_argument("project_dir", type=Path)
+    entry_edit.add_argument("entry_id")
+    entry_edit.add_argument("term")
+    entry_edit.add_argument(
+        "--category", required=True, choices=("proper_noun", "noun_or_term", "verb", "other")
+    )
+    entry_edit.add_argument("--proper-noun-subtype")
+    entry_edit.add_argument("--expected-revision", required=True, type=int)
+    _add_suppression_policy(entry_edit)
+    for command_name in ("enable", "disable", "delete"):
+        command = entry_commands.add_parser(command_name)
+        command.add_argument("project_dir", type=Path)
+        command.add_argument("entry_id")
+        command.add_argument("--expected-revision", required=True, type=int)
+
+    trash = lexicon_commands.add_parser("trash", help="manage Project Lexicon Trash")
+    trash_commands = trash.add_subparsers(dest="trash_command", required=True)
+    trash_list = trash_commands.add_parser("list")
+    trash_list.add_argument("project_dir", type=Path)
+    trash_restore = trash_commands.add_parser("restore")
+    trash_restore.add_argument("project_dir", type=Path)
+    trash_restore.add_argument("trash_id")
+    trash_retention = trash_commands.add_parser("retention")
+    trash_retention.add_argument("project_dir", type=Path)
+    trash_retention.add_argument("days", choices=("15", "30", "60", "120", "never"))
+
+    blacklist = lexicon_commands.add_parser(
+        "blacklist", help="suppress exact Reference suggestions"
+    )
+    blacklist_commands = blacklist.add_subparsers(dest="blacklist_command", required=True)
+    blacklist_list = blacklist_commands.add_parser("list")
+    blacklist_list.add_argument("project_dir", type=Path)
+    blacklist_add = blacklist_commands.add_parser("add")
+    blacklist_add.add_argument("project_dir", type=Path)
+    blacklist_add.add_argument("term")
+    blacklist_remove = blacklist_commands.add_parser("remove")
+    blacklist_remove.add_argument("project_dir", type=Path)
+    blacklist_remove.add_argument("blacklist_id")
+
+    pack = lexicon_commands.add_parser("pack", help="manage shared Official Lexicon Packs")
+    pack_commands = pack.add_subparsers(dest="pack_command", required=True)
+    pack_list = pack_commands.add_parser("list")
+    pack_list.add_argument("--catalog", type=Path)
+    pack_setup = pack_commands.add_parser("setup")
+    pack_setup.add_argument("catalog", type=Path)
+    pack_setup.add_argument("--domain", action="append", dest="domains")
+    pack_install = pack_commands.add_parser("install")
+    pack_install.add_argument("--catalog", type=Path)
+    pack_install.add_argument("--pack-id", action="append", dest="pack_ids")
+    pack_install.add_argument("--domain", action="append", dest="domains")
+    pack_uninstall = pack_commands.add_parser("uninstall")
+    pack_uninstall.add_argument("pack_ids", nargs="+")
+    pack_update = pack_commands.add_parser("update")
+    pack_update.add_argument("--catalog", type=Path)
+    pack_commands.add_parser("status")
+    pack_repair = pack_commands.add_parser("repair")
+    pack_repair.add_argument("--catalog", type=Path)
     return parser
+
+
+def _add_suppression_policy(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--suppression-policy",
+        default="prompt",
+        choices=("prompt", "remove_and_add", "keep_and_add", "cancel"),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -120,6 +256,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             }
         finally:
             context.close()
+    if args.command == "lexicon" and args.lexicon_command == "pack":
+        return _dispatch_pack(args, OfficialPackStore())
     context = ProjectContext.open(args.project_dir)
     previous = context.registry.latest_source_run(context.project_id)
     previous_run_id = str(previous["run_id"]) if previous is not None else None
@@ -172,6 +310,78 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 return reference_status(context, args.reference_asset_id)
             if args.reference_command == "retry":
                 return retry_reference_work_item(context, args.work_item_id)
+        if args.command == "lexicon":
+            if args.lexicon_command == "suggestions":
+                if args.suggestions_command == "list":
+                    return {"suggestions": list_suggestions(context)}
+                if args.suggestions_command == "status":
+                    return suggestion_status(context)
+                if args.suggestions_command == "retry":
+                    return retry_suggestion_work_item(context, args.work_item_id)
+                if args.suggestions_command == "review":
+                    return review_candidate(
+                        context,
+                        args.candidate_id,
+                        args.action,
+                        edited_term=args.edited_term,
+                        edited_category=args.category,
+                        edited_subtype=args.proper_noun_subtype,
+                        expected_revision=args.expected_revision,
+                        suppression_policy=args.suppression_policy,
+                    )
+            if args.lexicon_command == "entry":
+                if args.entry_command == "list":
+                    return {
+                        "entries": list_entries(
+                            context, include_deleted=args.include_deleted
+                        )
+                    }
+                if args.entry_command == "add":
+                    return add_entry(
+                        context,
+                        args.term,
+                        category=args.category,
+                        proper_noun_subtype=args.proper_noun_subtype,
+                        suppression_policy=args.suppression_policy,
+                    )
+                if args.entry_command == "edit":
+                    return edit_entry(
+                        context,
+                        args.entry_id,
+                        term=args.term,
+                        category=args.category,
+                        proper_noun_subtype=args.proper_noun_subtype,
+                        expected_revision=args.expected_revision,
+                        suppression_policy=args.suppression_policy,
+                    )
+                if args.entry_command in {"enable", "disable"}:
+                    return set_entry_enabled(
+                        context,
+                        args.entry_id,
+                        enabled=args.entry_command == "enable",
+                        expected_revision=args.expected_revision,
+                    )
+                if args.entry_command == "delete":
+                    return delete_entry(
+                        context,
+                        args.entry_id,
+                        expected_revision=args.expected_revision,
+                    )
+            if args.lexicon_command == "trash":
+                if args.trash_command == "list":
+                    return {"trash": list_trash(context)}
+                if args.trash_command == "restore":
+                    return restore_trash(context, args.trash_id)
+                if args.trash_command == "retention":
+                    days = None if args.days == "never" else int(args.days)
+                    return set_trash_retention(context, days)
+            if args.lexicon_command == "blacklist":
+                if args.blacklist_command == "list":
+                    return {"blacklist": list_blacklist(context)}
+                if args.blacklist_command == "add":
+                    return add_blacklist(context, args.term)
+                if args.blacklist_command == "remove":
+                    return remove_blacklist(context, args.blacklist_id)
         raise CueFlowError("unsupported CLI command")
     except KeyboardInterrupt as exc:
         raise _CliFailure(
@@ -189,6 +399,26 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
         ) from exc
     finally:
         context.close()
+
+
+def _dispatch_pack(args: argparse.Namespace, store: OfficialPackStore) -> dict[str, Any]:
+    if args.pack_command == "list":
+        return store.list_packs(args.catalog)
+    if args.pack_command == "setup":
+        return store.setup(args.catalog, domains=args.domains)
+    if args.pack_command == "install":
+        return store.install(
+            catalog=args.catalog, pack_ids=args.pack_ids, domains=args.domains
+        )
+    if args.pack_command == "uninstall":
+        return store.uninstall(args.pack_ids)
+    if args.pack_command == "update":
+        return store.update(catalog=args.catalog)
+    if args.pack_command == "status":
+        return store.status()
+    if args.pack_command == "repair":
+        return store.repair(catalog=args.catalog)
+    raise CueFlowError("unsupported Official Pack command")
 
 
 def _write_json(value: MappingLike, *, stream: Any | None = None) -> None:
@@ -235,6 +465,17 @@ def _command_failure_payload(
             runs = context.registry.reference_runs(args.reference_asset_id)
             if runs and str(runs[-1]["run_id"]) != previous_reference_run_id:
                 run_id = str(runs[-1]["run_id"])
+    elif args.command == "lexicon":
+        if isinstance(exc, LexiconRunFailedError):
+            run_id = exc.run_id
+        elif (
+            args.lexicon_command == "suggestions"
+            and args.suggestions_command == "retry"
+        ):
+            try:
+                run_id = str(context.registry.lexicon_work_item(args.work_item_id)["run_id"])
+            except CueFlowError:
+                pass
 
     invocation = None
     if run_id is not None:
@@ -248,7 +489,7 @@ def _command_failure_payload(
 
     payload = _generic_failure_payload(exc)
     payload["run_id"] = run_id
-    if invocation is not None and args.command != "reference":
+    if invocation is not None and args.command not in {"reference", "lexicon"}:
         invocation_id = str(invocation["invocation_id"])
         invocation_status = str(invocation["status"])
         payload["invocation_id"] = invocation_id
@@ -289,6 +530,28 @@ def _command_failure_payload(
                 payload["delivery_warning"] = (
                     "delivery may have occurred; CueFlow will not retry automatically"
                 )
+    elif args.command == "lexicon" and run_id is not None:
+        failed_items = [
+            row
+            for row in context.registry.lexicon_work_items_for_run(run_id)
+            if row["status"] in {"failed", "interrupted"}
+        ]
+        payload["next_actions"] = [
+            {
+                "action": "lexicon suggestions retry",
+                "work_item_id": str(row["work_item_id"]),
+                "run_id": run_id,
+                "requires_explicit_user_action": True,
+            }
+            for row in failed_items
+        ] + [{"action": "lexicon suggestions status"}]
+        if invocation is not None:
+            payload["invocation_id"] = str(invocation["invocation_id"])
+            payload["invocation_status"] = str(invocation["status"])
+            if invocation["status"] == "delivery_ambiguous":
+                payload["delivery_warning"] = (
+                    "delivery may have occurred; CueFlow will not retry automatically"
+                )
     elif args.command == "run":
         payload["next_actions"] = [
             {
@@ -305,12 +568,17 @@ def _command_failure_payload(
 
 
 def _generic_failure_payload(exc: BaseException) -> MappingLike:
-    return {
+    payload: MappingLike = {
         "status": "failed",
         "error": str(exc) or type(exc).__name__,
         "run_id": None,
         "next_actions": [],
     }
+    if isinstance(exc, SuppressionConflictError):
+        payload["normalized_surface_form"] = exc.normalized_surface_form
+        payload["conflicts"] = list(exc.conflicts)
+        payload["choices"] = ["remove_and_add", "keep_and_add", "cancel"]
+    return payload
 
 
 if __name__ == "__main__":

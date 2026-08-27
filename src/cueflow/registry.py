@@ -12,7 +12,8 @@ from cueflow.config import SEMANTIC_RETRY_RESET_LIMIT
 from cueflow.errors import ContractError, IntegrityError
 from cueflow.schema import ArtifactEnvelope, utc_now
 
-REGISTRY_SCHEMA_VERSION = 3
+REGISTRY_SCHEMA_VERSION = 4
+RUN_KINDS = frozenset({"source", "reference", "lexicon"})
 SOURCE_TABLES = frozenset(
     {
         "projects",
@@ -35,7 +36,23 @@ REFERENCE_TABLES = frozenset(
         "artifact_reference_dependencies",
     }
 )
-REQUIRED_TABLES = SOURCE_TABLES | REFERENCE_TABLES
+LEXICON_TABLES = frozenset(
+    {
+        "lexicon_runs",
+        "lexicon_work_items",
+        "lexicon_invocation_details",
+        "lexicon_evidence_coverage",
+        "term_candidates",
+        "term_occurrences",
+        "candidate_decisions",
+        "project_lexicon_entries",
+        "project_lexicon_revisions",
+        "lexicon_trash",
+        "lexicon_blacklist",
+        "lexicon_settings",
+    }
+)
+REQUIRED_TABLES = SOURCE_TABLES | REFERENCE_TABLES | LEXICON_TABLES
 SOURCE_ASSET_COLUMNS = (
     "project_id",
     "source_asset_id",
@@ -81,6 +98,7 @@ SOURCE_TABLE_COLUMNS = {
     "runs": (
         "run_id",
         "project_id",
+        "kind",
         "status",
         "input_identity_json",
         "config_hash",
@@ -184,6 +202,130 @@ REFERENCE_TABLE_COLUMNS = {
     ),
 }
 
+LEXICON_TABLE_COLUMNS = {
+    "lexicon_runs": (
+        "run_id",
+        "trigger_reference_run_id",
+        "reference_bundle_artifact_id",
+        "input_manifest_artifact_id",
+        "outcome",
+    ),
+    "lexicon_work_items": (
+        "work_item_id",
+        "run_id",
+        "ordinal",
+        "evidence_artifact_id",
+        "batch_ordinal",
+        "batch_manifest_json",
+        "status",
+        "candidate_set_artifact_id",
+        "failure_code",
+        "failure_details_json",
+        "created_at",
+        "updated_at",
+    ),
+    "lexicon_invocation_details": (
+        "invocation_id",
+        "work_item_id",
+        "provider",
+        "model",
+        "actual_config_json",
+        "response_id",
+        "provider_usage_json",
+        "provider_cost",
+        "retry_parent_invocation_id",
+        "retry_reason",
+        "failure_code",
+        "failure_details_json",
+    ),
+    "lexicon_evidence_coverage": (
+        "evidence_artifact_id",
+        "run_id",
+        "status",
+        "created_at",
+        "updated_at",
+    ),
+    "term_candidates": (
+        "candidate_id",
+        "normalization_version",
+        "normalized_surface_form",
+        "display_term",
+        "display_category",
+        "proper_noun_subtype",
+        "status",
+        "revision",
+        "created_at",
+        "updated_at",
+    ),
+    "term_occurrences": (
+        "occurrence_id",
+        "candidate_id",
+        "evidence_artifact_id",
+        "reference_role",
+        "raw_surface_form",
+        "suggested_surface_form",
+        "proposed_category",
+        "proper_noun_subtype",
+        "risk_tags_json",
+        "field_path_json",
+        "start_offset",
+        "end_offset",
+        "context_before",
+        "context_after",
+        "coordinates_json",
+        "created_at",
+    ),
+    "candidate_decisions": (
+        "decision_id",
+        "candidate_id",
+        "action",
+        "payload_json",
+        "created_at",
+    ),
+    "project_lexicon_entries": (
+        "entry_id",
+        "term",
+        "normalization_version",
+        "normalized_surface_form",
+        "category",
+        "proper_noun_subtype",
+        "source_candidate_id",
+        "enabled",
+        "status",
+        "revision",
+        "created_at",
+        "updated_at",
+    ),
+    "project_lexicon_revisions": (
+        "revision_id",
+        "ordinal",
+        "parent_revision_id",
+        "artifact_id",
+        "decision_id",
+        "created_at",
+    ),
+    "lexicon_trash": (
+        "trash_id",
+        "object_kind",
+        "object_id",
+        "normalization_version",
+        "normalized_surface_form",
+        "restore_payload_json",
+        "deleted_at",
+        "expires_at",
+        "status",
+        "restored_at",
+    ),
+    "lexicon_blacklist": (
+        "blacklist_id",
+        "normalization_version",
+        "normalized_surface_form",
+        "surface_form",
+        "created_at",
+    ),
+    "lexicon_settings": ("singleton", "trash_retention_days", "updated_at"),
+}
+
 REFERENCE_DDL_STATEMENTS = (
     """
     CREATE TABLE reference_assets (
@@ -270,6 +412,177 @@ REFERENCE_DDL_STATEMENTS = (
 
 REFERENCE_DDL = ";\n\n".join(statement.strip() for statement in REFERENCE_DDL_STATEMENTS) + ";"
 
+LEXICON_DDL = """
+CREATE TABLE IF NOT EXISTS lexicon_runs (
+    run_id TEXT PRIMARY KEY,
+    trigger_reference_run_id TEXT NOT NULL,
+    reference_bundle_artifact_id TEXT NOT NULL,
+    input_manifest_artifact_id TEXT,
+    outcome TEXT CHECK (outcome IS NULL OR outcome IN ('complete','partial','failed')),
+    FOREIGN KEY (run_id) REFERENCES runs(run_id),
+    FOREIGN KEY (trigger_reference_run_id) REFERENCES reference_runs(run_id)
+);
+
+CREATE TABLE IF NOT EXISTS lexicon_work_items (
+    work_item_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    evidence_artifact_id TEXT NOT NULL,
+    batch_ordinal INTEGER NOT NULL CHECK (batch_ordinal >= 0),
+    batch_manifest_json TEXT NOT NULL,
+    status TEXT NOT NULL
+        CHECK (status IN ('pending','running','succeeded','failed','interrupted')),
+    candidate_set_artifact_id TEXT,
+    failure_code TEXT,
+    failure_details_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (run_id, ordinal),
+    UNIQUE (evidence_artifact_id, batch_ordinal),
+    FOREIGN KEY (run_id) REFERENCES lexicon_runs(run_id)
+);
+
+CREATE TABLE IF NOT EXISTS lexicon_invocation_details (
+    invocation_id TEXT PRIMARY KEY,
+    work_item_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    actual_config_json TEXT NOT NULL,
+    response_id TEXT,
+    provider_usage_json TEXT,
+    provider_cost REAL,
+    retry_parent_invocation_id TEXT,
+    retry_reason TEXT,
+    failure_code TEXT,
+    failure_details_json TEXT,
+    FOREIGN KEY (invocation_id) REFERENCES invocations(invocation_id),
+    FOREIGN KEY (work_item_id) REFERENCES lexicon_work_items(work_item_id),
+    FOREIGN KEY (retry_parent_invocation_id) REFERENCES invocations(invocation_id)
+);
+
+CREATE TABLE IF NOT EXISTS lexicon_evidence_coverage (
+    evidence_artifact_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    status TEXT NOT NULL
+        CHECK (status IN ('pending','running','succeeded','failed','interrupted')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES lexicon_runs(run_id)
+);
+
+CREATE TABLE IF NOT EXISTS term_candidates (
+    candidate_id TEXT PRIMARY KEY,
+    normalization_version TEXT NOT NULL,
+    normalized_surface_form TEXT NOT NULL COLLATE BINARY,
+    display_term TEXT NOT NULL,
+    display_category TEXT NOT NULL
+        CHECK (display_category IN ('proper_noun','noun_or_term','verb','other')),
+    proper_noun_subtype TEXT,
+    status TEXT NOT NULL
+        CHECK (status IN ('pending','accepted','edited_accepted','rejected','blacklisted')),
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (normalization_version, normalized_surface_form)
+);
+
+CREATE TABLE IF NOT EXISTS term_occurrences (
+    occurrence_id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL,
+    evidence_artifact_id TEXT NOT NULL,
+    reference_role TEXT NOT NULL,
+    raw_surface_form TEXT NOT NULL,
+    suggested_surface_form TEXT,
+    proposed_category TEXT NOT NULL
+        CHECK (proposed_category IN ('proper_noun','noun_or_term','verb','other')),
+    proper_noun_subtype TEXT,
+    risk_tags_json TEXT NOT NULL,
+    field_path_json TEXT NOT NULL,
+    start_offset INTEGER NOT NULL CHECK (start_offset >= 0),
+    end_offset INTEGER NOT NULL CHECK (end_offset > start_offset),
+    context_before TEXT NOT NULL,
+    context_after TEXT NOT NULL,
+    coordinates_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (candidate_id) REFERENCES term_candidates(candidate_id),
+    UNIQUE (candidate_id, evidence_artifact_id, field_path_json,
+            start_offset, end_offset, raw_surface_form)
+);
+
+CREATE TABLE IF NOT EXISTS candidate_decisions (
+    decision_id TEXT PRIMARY KEY,
+    candidate_id TEXT,
+    action TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (candidate_id) REFERENCES term_candidates(candidate_id)
+);
+
+CREATE TABLE IF NOT EXISTS project_lexicon_entries (
+    entry_id TEXT PRIMARY KEY,
+    term TEXT NOT NULL,
+    normalization_version TEXT NOT NULL,
+    normalized_surface_form TEXT NOT NULL COLLATE BINARY,
+    category TEXT NOT NULL
+        CHECK (category IN ('proper_noun','noun_or_term','verb','other')),
+    proper_noun_subtype TEXT,
+    source_candidate_id TEXT,
+    enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),
+    status TEXT NOT NULL CHECK (status IN ('active','deleted')),
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (source_candidate_id) REFERENCES term_candidates(candidate_id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS project_lexicon_active_term
+ON project_lexicon_entries(normalization_version, normalized_surface_form)
+WHERE status='active';
+
+CREATE TABLE IF NOT EXISTS project_lexicon_revisions (
+    revision_id TEXT PRIMARY KEY,
+    ordinal INTEGER NOT NULL UNIQUE CHECK (ordinal >= 1),
+    parent_revision_id TEXT,
+    artifact_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (parent_revision_id) REFERENCES project_lexicon_revisions(revision_id),
+    FOREIGN KEY (decision_id) REFERENCES candidate_decisions(decision_id)
+);
+
+CREATE TABLE IF NOT EXISTS lexicon_trash (
+    trash_id TEXT PRIMARY KEY,
+    object_kind TEXT NOT NULL CHECK (object_kind IN ('candidate','entry')),
+    object_id TEXT NOT NULL,
+    normalization_version TEXT NOT NULL,
+    normalized_surface_form TEXT NOT NULL COLLATE BINARY,
+    restore_payload_json TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    expires_at TEXT,
+    status TEXT NOT NULL CHECK (status IN ('active','restored','expired')),
+    restored_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS lexicon_trash_active_term
+ON lexicon_trash(normalization_version, normalized_surface_form, status);
+
+CREATE TABLE IF NOT EXISTS lexicon_blacklist (
+    blacklist_id TEXT PRIMARY KEY,
+    normalization_version TEXT NOT NULL,
+    normalized_surface_form TEXT NOT NULL COLLATE BINARY,
+    surface_form TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (normalization_version, normalized_surface_form)
+);
+
+CREATE TABLE IF NOT EXISTS lexicon_settings (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    trash_retention_days INTEGER
+        CHECK (trash_retention_days IS NULL OR trash_retention_days IN (15,30,60,120)),
+    updated_at TEXT NOT NULL
+);
+"""
+
 DDL = f"""
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
@@ -339,6 +652,7 @@ CREATE TABLE IF NOT EXISTS current_pointers (
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('source','reference','lexicon')),
     status TEXT NOT NULL,
     input_identity_json TEXT NOT NULL,
     config_hash TEXT NOT NULL,
@@ -397,6 +711,8 @@ CREATE TABLE IF NOT EXISTS semantic_budget_resets (
 
 {REFERENCE_DDL}
 
+{LEXICON_DDL}
+
 PRAGMA user_version = {REGISTRY_SCHEMA_VERSION};
 """
 
@@ -445,7 +761,9 @@ class Registry:
             raise IntegrityError(
                 f"CueFlow registry schema is incomplete: missing tables {sorted(missing_tables)}"
             )
-        for table, expected_columns in (SOURCE_TABLE_COLUMNS | REFERENCE_TABLE_COLUMNS).items():
+        for table, expected_columns in (
+            SOURCE_TABLE_COLUMNS | REFERENCE_TABLE_COLUMNS | LEXICON_TABLE_COLUMNS
+        ).items():
             if self._table_columns(table) != expected_columns:
                 raise IntegrityError(
                     f"CueFlow registry {table} schema does not match the current contract"
@@ -879,10 +1197,16 @@ class Registry:
     def create_run(
         self, project_id: str, input_identity: Mapping[str, Any], config_hash: str
     ) -> str:
+        """Create a Source Run.
+
+        The legacy method name remains the Source-facing public API. Other run
+        kinds have dedicated creation methods so callers cannot accidentally
+        create an unclassified execution.
+        """
         run_id = "run_" + uuid.uuid4().hex
         now = utc_now()
         self._connection.execute(
-            "INSERT INTO runs VALUES (?, ?, 'created', ?, ?, ?, ?, NULL)",
+            "INSERT INTO runs VALUES (?, ?, 'source', 'created', ?, ?, ?, ?, NULL)",
             (
                 run_id,
                 project_id,
@@ -907,7 +1231,7 @@ class Registry:
         now = utc_now()
         with self.transaction() as connection:
             connection.execute(
-                "INSERT INTO runs VALUES (?, ?, 'created', ?, ?, ?, ?, NULL)",
+                "INSERT INTO runs VALUES (?, ?, 'reference', 'created', ?, ?, ?, ?, NULL)",
                 (
                     run_id,
                     project_id,
@@ -922,6 +1246,231 @@ class Registry:
                 (run_id, reference_asset_id),
             )
         return run_id
+
+    def create_lexicon_run(
+        self,
+        project_id: str,
+        trigger_reference_run_id: str,
+        reference_bundle_artifact_id: str,
+        input_identity: Mapping[str, Any],
+        config_hash: str,
+    ) -> str:
+        trigger = self.reference_run(trigger_reference_run_id)
+        if trigger["project_id"] != project_id:
+            raise ContractError("trigger Reference Run belongs to a different project")
+        self.artifact(project_id, reference_bundle_artifact_id)
+        run_id = "run_" + uuid.uuid4().hex
+        now = utc_now()
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO runs
+                (run_id, project_id, kind, status, input_identity_json, config_hash,
+                 created_at, updated_at, error_message)
+                VALUES (?, ?, 'lexicon', 'created', ?, ?, ?, ?, NULL)
+                """,
+                (
+                    run_id,
+                    project_id,
+                    json.dumps(input_identity, ensure_ascii=False, sort_keys=True),
+                    config_hash,
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO lexicon_runs
+                (run_id, trigger_reference_run_id, reference_bundle_artifact_id,
+                 input_manifest_artifact_id, outcome)
+                VALUES (?, ?, ?, NULL, NULL)
+                """,
+                (run_id, trigger_reference_run_id, reference_bundle_artifact_id),
+            )
+        return run_id
+
+    def create_lexicon_coverage(self, *, run_id: str, evidence_artifact_id: str) -> None:
+        now = utc_now()
+        self._connection.execute(
+            """
+            INSERT INTO lexicon_evidence_coverage
+            (evidence_artifact_id, run_id, status, created_at, updated_at)
+            VALUES (?, ?, 'pending', ?, ?)
+            """,
+            (evidence_artifact_id, run_id, now, now),
+        )
+        self._connection.commit()
+
+    def create_lexicon_work_item(
+        self,
+        *,
+        run_id: str,
+        ordinal: int,
+        evidence_artifact_id: str,
+        batch_ordinal: int,
+        batch_manifest: Mapping[str, Any],
+    ) -> str:
+        if ordinal < 0:
+            raise ContractError("Lexicon work item ordinal must be non-negative")
+        if batch_ordinal < 0:
+            raise ContractError("Lexicon batch ordinal must be non-negative")
+        work_item_id = "lwi_" + uuid.uuid4().hex
+        now = utc_now()
+        self._connection.execute(
+            """
+            INSERT INTO lexicon_work_items
+            (work_item_id, run_id, ordinal, evidence_artifact_id, batch_ordinal,
+             batch_manifest_json, status, candidate_set_artifact_id, failure_code,
+             failure_details_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, ?, ?)
+            """,
+            (
+                work_item_id,
+                run_id,
+                ordinal,
+                evidence_artifact_id,
+                batch_ordinal,
+                json.dumps(batch_manifest, ensure_ascii=False, sort_keys=True),
+                now,
+                now,
+            ),
+        )
+        self._connection.commit()
+        return work_item_id
+
+    def set_lexicon_input_manifest(self, run_id: str, artifact_id: str) -> None:
+        self._connection.execute(
+            "UPDATE lexicon_runs SET input_manifest_artifact_id=? WHERE run_id=?",
+            (artifact_id, run_id),
+        )
+        self._connection.commit()
+
+    def lexicon_run(self, run_id: str) -> sqlite3.Row:
+        row = self._connection.execute(
+            """
+            SELECT r.*, lr.trigger_reference_run_id, lr.reference_bundle_artifact_id,
+                   lr.input_manifest_artifact_id, lr.outcome
+            FROM runs r JOIN lexicon_runs lr ON lr.run_id=r.run_id
+            WHERE r.run_id=? AND r.kind='lexicon'
+            """,
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise IntegrityError(f"unknown Lexicon Run: {run_id}")
+        return cast(sqlite3.Row, row)
+
+    def lexicon_runs(self) -> list[sqlite3.Row]:
+        return self._connection.execute(
+            """
+            SELECT r.*, lr.trigger_reference_run_id, lr.reference_bundle_artifact_id,
+                   lr.input_manifest_artifact_id, lr.outcome
+            FROM runs r JOIN lexicon_runs lr ON lr.run_id=r.run_id
+            WHERE r.kind='lexicon'
+            ORDER BY r.created_at, r.run_id
+            """
+        ).fetchall()
+
+    def lexicon_work_item(self, work_item_id: str) -> sqlite3.Row:
+        row = self._connection.execute(
+            "SELECT * FROM lexicon_work_items WHERE work_item_id=?",
+            (work_item_id,),
+        ).fetchone()
+        if row is None:
+            raise IntegrityError(f"unknown Lexicon work item: {work_item_id}")
+        return cast(sqlite3.Row, row)
+
+    def lexicon_work_items_for_run(self, run_id: str) -> list[sqlite3.Row]:
+        return self._connection.execute(
+            "SELECT * FROM lexicon_work_items WHERE run_id=? ORDER BY ordinal",
+            (run_id,),
+        ).fetchall()
+
+    def lexicon_coverage(self, evidence_artifact_id: str) -> sqlite3.Row | None:
+        return cast(
+            sqlite3.Row | None,
+            self._connection.execute(
+                "SELECT * FROM lexicon_evidence_coverage WHERE evidence_artifact_id=?",
+                (evidence_artifact_id,),
+            ).fetchone(),
+        )
+
+    def set_lexicon_work_item_status(
+        self,
+        work_item_id: str,
+        status: str,
+        *,
+        candidate_set_artifact_id: str | None = None,
+        failure_code: str | None = None,
+        failure_details: Mapping[str, Any] | None = None,
+    ) -> None:
+        if status not in {"pending", "running", "succeeded", "failed", "interrupted"}:
+            raise ContractError("invalid Lexicon work item status")
+        now = utc_now()
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE lexicon_work_items
+                SET status=?, candidate_set_artifact_id=?, failure_code=?,
+                    failure_details_json=?, updated_at=?
+                WHERE work_item_id=?
+                """,
+                (
+                    status,
+                    candidate_set_artifact_id,
+                    failure_code,
+                    json.dumps(failure_details, ensure_ascii=False, sort_keys=True)
+                    if failure_details is not None
+                    else None,
+                    now,
+                    work_item_id,
+                ),
+            )
+
+    def refresh_lexicon_coverage(self, evidence_artifact_id: str) -> str:
+        rows = self._connection.execute(
+            "SELECT status FROM lexicon_work_items WHERE evidence_artifact_id=?",
+            (evidence_artifact_id,),
+        ).fetchall()
+        statuses = {str(row[0]) for row in rows}
+        if rows and statuses == {"succeeded"}:
+            status = "succeeded"
+        elif "running" in statuses:
+            status = "running"
+        elif "interrupted" in statuses:
+            status = "interrupted"
+        elif "failed" in statuses:
+            status = "failed"
+        else:
+            status = "pending"
+        self._connection.execute(
+            "UPDATE lexicon_evidence_coverage SET status=?, updated_at=? "
+            "WHERE evidence_artifact_id=?",
+            (status, utc_now(), evidence_artifact_id),
+        )
+        self._connection.commit()
+        return status
+
+    def set_lexicon_run_result(
+        self, run_id: str, *, status: str, outcome: str, error_message: str | None
+    ) -> None:
+        if status not in {"succeeded", "failed"}:
+            raise ContractError("Lexicon result status must be succeeded or failed")
+        if outcome not in {"complete", "partial", "failed"}:
+            raise ContractError("invalid Lexicon Run outcome")
+        if (status, outcome) not in {
+            ("succeeded", "complete"),
+            ("failed", "partial"),
+            ("failed", "failed"),
+        }:
+            raise ContractError("Lexicon Run status/outcome combination is invalid")
+        with self.transaction() as connection:
+            connection.execute(
+                "UPDATE lexicon_runs SET outcome=? WHERE run_id=?", (outcome, run_id)
+            )
+            connection.execute(
+                "UPDATE runs SET status=?, error_message=?, updated_at=? WHERE run_id=?",
+                (status, error_message, utc_now(), run_id),
+            )
 
     def create_reference_work_item(
         self,
@@ -1009,7 +1558,7 @@ class Registry:
             """
             SELECT r.*, rr.reference_asset_id, rr.outcome, rr.current_bundle_artifact_id
             FROM runs r JOIN reference_runs rr ON rr.run_id=r.run_id
-            WHERE r.run_id=?
+            WHERE r.run_id=? AND r.kind='reference'
             """,
             (run_id,),
         ).fetchone()
@@ -1020,10 +1569,10 @@ class Registry:
     def reference_runs(
         self, reference_asset_id: str | None = None
     ) -> list[sqlite3.Row]:
-        clause = ""
+        clause = " WHERE r.kind='reference'"
         parameters: tuple[str, ...] = ()
         if reference_asset_id is not None:
-            clause = " WHERE rr.reference_asset_id=?"
+            clause += " AND rr.reference_asset_id=?"
             parameters = (reference_asset_id,)
         return self._connection.execute(
             """
@@ -1041,8 +1590,7 @@ class Registry:
             self._connection.execute(
                 """
                 SELECT r.* FROM runs r
-                WHERE r.project_id=?
-                  AND NOT EXISTS (SELECT 1 FROM reference_runs rr WHERE rr.run_id=r.run_id)
+                WHERE r.project_id=? AND r.kind='source'
                 ORDER BY r.created_at DESC, r.run_id DESC LIMIT 1
                 """,
                 (project_id,),
@@ -1115,22 +1663,23 @@ class Registry:
         return self.recover_running_source_runs()
 
     def recover_running_source_runs(self) -> list[str]:
-        return self._recover_running_runs(reference=False)
+        return self._recover_running_runs(kind="source")
 
     def recover_running_reference_runs(self) -> list[str]:
-        return self._recover_running_runs(reference=True)
+        return self._recover_running_runs(kind="reference")
 
-    def _recover_running_runs(self, *, reference: bool) -> list[str]:
-        membership = (
-            "EXISTS (SELECT 1 FROM reference_runs rr WHERE rr.run_id=runs.run_id)"
-            if reference
-            else "NOT EXISTS (SELECT 1 FROM reference_runs rr WHERE rr.run_id=runs.run_id)"
-        )
+    def recover_running_lexicon_runs(self) -> list[str]:
+        return self._recover_running_runs(kind="lexicon")
+
+    def _recover_running_runs(self, *, kind: str) -> list[str]:
+        if kind not in RUN_KINDS:
+            raise ContractError("invalid Run kind")
         run_ids = [
             str(row[0])
             for row in self._connection.execute(
-                f"SELECT run_id FROM runs WHERE status='running' AND {membership} "
-                "ORDER BY created_at"
+                "SELECT run_id FROM runs WHERE status='running' AND kind=? "
+                "ORDER BY created_at",
+                (kind,),
             ).fetchall()
         ]
         if not run_ids:
@@ -1138,11 +1687,11 @@ class Registry:
         with self.transaction() as connection:
             self._recover_inflight_invocations(
                 connection,
-                f"run_id IN (SELECT run_id FROM runs WHERE status='running' AND {membership})",
-                (),
+                "run_id IN (SELECT run_id FROM runs WHERE status='running' AND kind=?)",
+                (kind,),
                 "previous Orchestrator stopped before Invocation completion",
             )
-            if reference:
+            if kind == "reference":
                 connection.execute(
                     """
                     UPDATE reference_work_items
@@ -1151,7 +1700,8 @@ class Registry:
                         failure_details_json=?,
                         updated_at=?
                     WHERE status='running' AND run_id IN
-                          (SELECT run_id FROM runs WHERE status='running')
+                          (SELECT run_id FROM runs
+                           WHERE status='running' AND kind='reference')
                     """,
                     (
                         json.dumps(
@@ -1162,15 +1712,47 @@ class Registry:
                         utc_now(),
                     ),
                 )
+            elif kind == "lexicon":
+                now = utc_now()
+                connection.execute(
+                    """
+                    UPDATE lexicon_work_items
+                    SET status='interrupted',
+                        failure_code='orchestrator_interrupted',
+                        failure_details_json=?,
+                        updated_at=?
+                    WHERE status='running' AND run_id IN
+                          (SELECT run_id FROM runs
+                           WHERE status='running' AND kind='lexicon')
+                    """,
+                    (
+                        json.dumps(
+                            {"message": "previous Lexicon Orchestrator was interrupted"},
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        now,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE lexicon_evidence_coverage
+                    SET status='interrupted', updated_at=?
+                    WHERE run_id IN
+                          (SELECT run_id FROM runs
+                           WHERE status='running' AND kind='lexicon')
+                    """,
+                    (now,),
+                )
             connection.execute(
-                f"""
+                """
                 UPDATE runs
                 SET status='interrupted',
                     error_message='previous Orchestrator execution was interrupted',
                     updated_at=?
-                WHERE status='running' AND {membership}
+                WHERE status='running' AND kind=?
                 """,
-                (utc_now(),),
+                (utc_now(), kind),
             )
         return run_ids
 
@@ -1406,6 +1988,112 @@ class Registry:
             """
             SELECT COUNT(*)
             FROM reference_invocation_details d
+            JOIN invocations i ON i.invocation_id=d.invocation_id
+            WHERE d.work_item_id=? AND i.status NOT IN ('created','definitely_not_sent')
+            """,
+            (work_item_id,),
+        ).fetchone()
+        assert row is not None
+        return int(row[0])
+
+    def create_lexicon_invocation(
+        self,
+        *,
+        work_item_id: str,
+        run_id: str,
+        project_id: str,
+        provider: str,
+        model: str,
+        actual_config: Mapping[str, Any],
+        inputs: Sequence[tuple[str, str]],
+        retry_parent_invocation_id: str | None = None,
+        retry_reason: str | None = None,
+    ) -> str:
+        self.lexicon_work_item(work_item_id)
+        logical_key = f"lexicon_extract:{work_item_id}"
+        with self.transaction() as connection:
+            invocation_id = self.create_invocation(
+                run_id=run_id,
+                project_id=project_id,
+                operation="lexicon_extraction",
+                logical_operation_key=logical_key,
+                attempt_number=self.next_invocation_attempt_number(run_id, logical_key),
+                provider=provider,
+                model=model,
+                inputs=inputs,
+            )
+            connection.execute(
+                """
+                INSERT INTO lexicon_invocation_details
+                (invocation_id, work_item_id, provider, model, actual_config_json,
+                 response_id, provider_usage_json, provider_cost,
+                 retry_parent_invocation_id, retry_reason, failure_code,
+                 failure_details_json)
+                VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL, NULL)
+                """,
+                (
+                    invocation_id,
+                    work_item_id,
+                    provider,
+                    model,
+                    json.dumps(actual_config, ensure_ascii=False, sort_keys=True),
+                    retry_parent_invocation_id,
+                    retry_reason,
+                ),
+            )
+        return invocation_id
+
+    def update_lexicon_invocation_details(
+        self,
+        invocation_id: str,
+        *,
+        response_id: str | None = None,
+        provider_usage: Mapping[str, Any] | None = None,
+        provider_cost: float | None = None,
+        failure_code: str | None = None,
+        failure_details: Mapping[str, Any] | None = None,
+    ) -> None:
+        self._connection.execute(
+            """
+            UPDATE lexicon_invocation_details
+            SET response_id=?, provider_usage_json=?, provider_cost=?, failure_code=?,
+                failure_details_json=?
+            WHERE invocation_id=?
+            """,
+            (
+                response_id,
+                json.dumps(provider_usage, ensure_ascii=False, sort_keys=True)
+                if provider_usage is not None
+                else None,
+                provider_cost,
+                failure_code,
+                json.dumps(failure_details, ensure_ascii=False, sort_keys=True)
+                if failure_details is not None
+                else None,
+                invocation_id,
+            ),
+        )
+        self._connection.commit()
+
+    def lexicon_invocations_for_work_item(self, work_item_id: str) -> list[sqlite3.Row]:
+        return self._connection.execute(
+            """
+            SELECT i.*, d.work_item_id, d.actual_config_json,
+                   d.provider_usage_json, d.provider_cost,
+                   d.retry_parent_invocation_id, d.retry_reason,
+                   d.failure_code, d.failure_details_json
+            FROM lexicon_invocation_details d
+            JOIN invocations i ON i.invocation_id=d.invocation_id
+            WHERE d.work_item_id=? ORDER BY i.attempt_number, i.created_at
+            """,
+            (work_item_id,),
+        ).fetchall()
+
+    def sent_lexicon_attempt_count(self, work_item_id: str) -> int:
+        row = self._connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM lexicon_invocation_details d
             JOIN invocations i ON i.invocation_id=d.invocation_id
             WHERE d.work_item_id=? AND i.status NOT IN ('created','definitely_not_sent')
             """,

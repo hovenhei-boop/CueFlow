@@ -1,14 +1,14 @@
 # CueFlow Roadmap
 
-## v0.3.0 当前能力
+## v0.4.0 当前能力
 
 Source 主链提供本地媒体准备、远端语义转写与纠错、本地 Forced Alignment、字幕切分、QA 和 SRT 导出。
 
-Reference 旁路提供登记/relocate、确定性文档和字幕提取、远端 ASR/Vision/Document Parse、provenance、独立 Run/outcome、work-item retry 和 bundle。Evidence 不自动进入 Source 主链。
+Reference 旁路提供登记/relocate、确定性文档和字幕提取、远端 ASR/Vision/Document Parse、provenance、独立 Run/outcome、work-item retry 和 bundle。Evidence 自动增量生成 Suggested Terms；用户可审核、编辑和维护 Project Lexicon、Trash、Blacklist，并可在应用级按领域管理所有项目共享的 Official Packs。
 
 ## 待独立设计
 
-术语/词库、terminology mining、candidate、acceptance、证据融合、Reference Evidence 的产品化消费、PPT/板书/屏幕画面补充抽取和 UI 均不在当前实现内。
+Project Lexicon/Official Packs 对 Source 的实际消费、相关性检索与容量预算、不可变 Effective Glossary Snapshot、证据融合、PPT/板书/屏幕画面补充抽取和 UI 均不在当前实现内。v0.4.0 不允许新词库状态改变现有 Effective Glossary、Source stale 状态或 SRT。
 
 Forced Aligner 的部署与依赖策略需另行实验和批准；当前使用本地实现。
 
