@@ -116,7 +116,7 @@ def test_status_add_and_relocate_do_not_recover_source_or_reference_runs(
     reference_path = tmp_path / "reference.txt"
     reference_path.write_text("reference", encoding="utf-8")
     reference = register_reference_asset(context, reference_path)
-    source_run = context.registry.create_run(
+    source_run = context.registry.create_source_run(
         context.project_id, {"source_asset_id": "fixture"}, hash_json({"source": True})
     )
     reference_run = context.registry.create_reference_run(

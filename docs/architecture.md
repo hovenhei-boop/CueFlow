@@ -1,4 +1,4 @@
-# CueFlow v0.4.1 Architecture
+# CueFlow v0.5.0 Architecture
 
 ## 1. 产品边界
 
@@ -17,7 +17,7 @@ Source Media
 → output/subtitles.srt
 ```
 
-目标是忠实转写、精确时间轴、纠错和导出。独立的 Reference 路径为 `Reference Material → deterministic extraction / optional Reference ASR, Vision, Cloud Document Parse → Reference Evidence → automatic terminology discovery → Suggested Terms → human review → Project Lexicon`。该旁路不创建或修改 Source Transcript、Effective Glossary、Alignment、Subtitle、QA 或 SRT；v0.4.1 不增加 UI。
+目标是忠实转写、精确时间轴、纠错和导出。独立的 Reference 路径为 `Reference Material → deterministic extraction / optional Reference ASR, Vision, Cloud Document Parse → Reference Evidence → automatic terminology discovery → Suggested Terms → human review → Project Lexicon`。该旁路不创建或修改 Source Transcript、Effective Glossary、Alignment、Subtitle、QA 或 SRT；v0.5.0 不增加 UI。
 
 ## 2. 核心不变量
 
@@ -127,7 +127,7 @@ failed/interrupted --explicit targeted retry→ running
 
 ## 9. CLI 与输出
 
-CLI 提供 `init`、显式 Registry `migrate`、`glossary set`、`asset add`、`run`、`status`、`retry`、Reference 管理以及 Suggested Terms、Project Lexicon、Project Blacklist 和 Official Pack 管理。不提供用户主动创建或 rebuild Lexicon Run 的命令，也不提供 Project→Pack select。失败 JSON 在可用时包含 Run/Invocation/work-item identity、当前状态和合法下一步；它只描述显式操作，不自动 retry。
+CLI 提供 `init`、`glossary set`、`asset add`、`run`、`status`、`retry`、Reference 管理以及 Suggested Terms、Project Lexicon、Project Blacklist 和 Official Pack 管理。不提供用户主动创建或 rebuild Lexicon Run 的命令，也不提供 Project→Pack select。失败 JSON 在可用时包含 Run/Invocation/work-item identity、当前状态和合法下一步；它只描述显式操作，不自动 retry。
 
 唯一正常用户输出是 `output/subtitles.srt`。内部 Artifact、SQLite、blob 和临时文件位于 `.cueflow/`；临时文件完成后清理。
 

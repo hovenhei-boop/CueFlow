@@ -1,4 +1,4 @@
-# CueFlow v0.4.1 Lexicon
+# CueFlow v0.5.0 Lexicon
 
 ## 1. 用户模型与边界
 
@@ -13,9 +13,7 @@
 
 内部为审计和 retry 使用 `runs.kind=lexicon`，但产品不提供“构建/重建 Lexicon Run”命令。每次新增或重新提取得到新的 Evidence，系统自动做增量术语发现；修改词库或 Project Blacklist 只改变本地项目状态，不重新扫描全部 Reference，也不调用模型。
 
-v0.4.1 只构建词库。Project Lexicon 与 Official Packs 不修改现有 System/Project/Effective Glossary，不使 Source Artifact stale，不进入语义模型 prompt，也不修改 Transcript 或 SRT。
-
-Registry v4 Project 不会在普通打开时被静默改写；用户必须显式执行 `cueflow migrate PROJECT`。迁移在一个 SQLite 事务内完成，最后执行 foreign-key 与精确 schema 校验，失败则完整回滚。
+v0.5.0 只构建词库。Project Lexicon 与 Official Packs 不修改现有 System/Project/Effective Glossary，不使 Source Artifact stale，不进入语义模型 prompt，也不修改 Transcript 或 SRT。
 
 ## 2. 自动发现与增量边界
 
@@ -88,7 +86,7 @@ Official Packs 是应用级全局资源，位于：
 
 Catalog entry 绑定 Pack ID、domain、numeric SemVer、local/HTTPS descriptor source 与 manifest hash。Descriptor 包含 manifest 和 terms；manifest 必须提供 schema、Pack identity、license name/URL、term count 与 terms hash。安装先完整校验 schema、identity、category/subtype、NFC+trim 后重复、license、manifest hash 和 terms hash/count，再通过应用目录独占锁、临时目录、原子 rename 与 current pointer 发布 immutable version。`repair` 只在用户显式调用时清理本存储的残留临时项并修复已安装版本。
 
-`init`、Source Run 和普通 Reference 管理不会静默下载 Pack。v0.4.1 仅读取 installed terms 作为未来检索池，不把全部词直接塞给模型。
+`init`、Source Run 和普通 Reference 管理不会静默下载 Pack。v0.5.0 仅读取 installed terms 作为未来检索池，不把全部词直接塞给模型。
 
 ## 7. CLI 摘要
 

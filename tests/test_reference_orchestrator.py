@@ -139,7 +139,7 @@ def test_each_extract_creates_new_run_and_overwrite_reads_current_file(
 
 def test_reference_run_never_overwrites_latest_source_run_status(tmp_path: Path) -> None:
     context = ProjectContext.create(tmp_path / "project", "Status")
-    source_run = context.registry.create_run(
+    source_run = context.registry.create_source_run(
         context.project_id, {"source_asset_id": "source"}, "sha256:" + "0" * 64
     )
     context.registry.set_run_status(source_run, "succeeded")

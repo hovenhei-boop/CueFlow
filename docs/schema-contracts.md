@@ -1,10 +1,10 @@
-# CueFlow v0.4.1 Schema Contracts
+# CueFlow v0.5.0 Schema Contracts
 
 ## 1. Envelope 与哈希
 
 Artifact Envelope 包含 `schema_version`、`artifact_id`、kind、scope、content hash、created time、Producer、ordered inputs 和 payload。内容哈希使用 RFC 8785 JCS UTF-8 bytes 后计算 SHA-256，覆盖 kind、scope、Schema major/minor、Producer、inputs 与 payload；不覆盖 Artifact ID、created_at 或路径。只接受当前 Schema 版本，其他版本的 payload 不得解释。Producer 恰好包含 `component`、`component_version`、`provider`、`model`、`config_hash`；缺字段或额外字段均拒绝。
 
-合法 Artifact kinds：`media_probe`、`timeline_audio`、`chunk_plan`、`media_chunk`、`system_glossary`、`project_glossary`、`effective_glossary`、`transcript`、`alignment`、`subtitle`、`qa`、`srt_render`、`reference_input`、`reference_evidence`、`reference_bundle`、`lexicon_input`、`term_candidate_set`、`project_lexicon`。当前 Artifact Schema 为 `3.0.0`。
+合法 Artifact kinds：`media_probe`、`timeline_audio`、`chunk_plan`、`media_chunk`、`system_glossary`、`project_glossary`、`effective_glossary`、`transcript`、`alignment`、`subtitle`、`qa`、`srt_render`、`reference_input`、`reference_evidence`、`reference_bundle`、`lexicon_input`、`term_candidate_set`、`project_lexicon`。当前 Artifact Schema 为 `4.0.0`。
 
 ## 2. SourceAsset
 
@@ -78,7 +78,7 @@ SrtRender payload 保存精确 Subtitle/QA IDs、UTF-8、byte length 和 text，
 
 SQLite 包含 Source、Reference 与 Lexicon 三组完整表。公共 Run 表的 `kind` 非空且只允许 `source`、`reference`、`lexicon`；各查询和 crash recovery 必须正向按 kind 选择，不能再以“不是 Reference”推断 Source。
 
-Registry 使用 SQLite `user_version = 5`。空库直接初始化当前完整结构；普通打开遇到非当前版本、缺表或 column 不匹配时明确拒绝且不修改已有库。v4 只能通过显式 `cueflow migrate PROJECT` 在单一事务中迁移；迁移以 `foreign_key_check` 和当前精确列契约为提交门槛。Project 列恰好为 `project_id`、`display_name`、`created_at`。
+Registry 使用 SQLite `user_version = 6`。空库直接初始化当前完整结构；普通打开遇到非当前版本、缺表或 column 不匹配时明确拒绝且不修改已有库。Project 列恰好为 `project_id`、`display_name`、`created_at`。
 
 InvocationInput 主键为 `(invocation_id, ordinal)`，每行保存 role 与精确 `input_artifact_id`。Targeted retry 只能读取这些绑定。
 

@@ -1,4 +1,4 @@
-# CueFlow v0.4.1 Domain Model
+# CueFlow v0.5.0 Domain Model
 
 ## 1. Project 与 SourceAsset
 
@@ -123,4 +123,4 @@ Project Blacklist 只作用于当前 Project，并阻止同一 exact term 进入
 
 Official Pack 是应用级全局只读资源，不属于任何 Project。Catalog 记录 Pack ID、领域、version、source 与 manifest hash；manifest 记录 Pack schema、identity、license、term count 与 terms hash。setup 默认安装 catalog 全部领域，也允许用户只选领域；所有项目读取同一 installed set。没有 Project 类型、Project→Pack 绑定、逐词 select 或项目复制。
 
-v0.4.1 只构建和管理这些数据，不把 Project Lexicon 或 Official Pack 自动注入 Effective Glossary/Source。未来消费必须先做相关性与容量限制，并把所选 entry、Pack version 和选择算法一并冻结为 Source Run 的不可变 Effective Glossary Snapshot；targeted retry 继续绑定原 snapshot。
+v0.5.0 只构建和管理这些数据，不把 Project Lexicon 或 Official Pack 自动注入 Effective Glossary/Source。未来消费必须先做相关性与容量限制，并把所选 entry、Pack version 和选择算法一并冻结为 Source Run 的不可变 Effective Glossary Snapshot；targeted retry 继续绑定原 snapshot。

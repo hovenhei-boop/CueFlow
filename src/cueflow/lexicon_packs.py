@@ -208,7 +208,7 @@ class OfficialPackStore:
         return {"status": "repaired", "repaired": repaired}
 
     def installed_terms(self) -> list[dict[str, Any]]:
-        """Return the shared retrieval pool; Source does not consume it in v0.4.1."""
+        """Return the shared retrieval pool; Source does not consume it."""
         result: list[dict[str, Any]] = []
         for pack_id, version in sorted(self._current().items()):
             _manifest, terms = _read_installed_pack(self._version_dir(pack_id, version))

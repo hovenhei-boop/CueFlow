@@ -44,7 +44,6 @@ from cueflow.reference_orchestrator import (
     reference_status,
     retry_reference_work_item,
 )
-from cueflow.registry import migrate_registry
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,9 +53,6 @@ def build_parser() -> argparse.ArgumentParser:
     init = commands.add_parser("init", help="create a CueFlow project")
     init.add_argument("project_dir", type=Path)
     init.add_argument("--name", required=True)
-
-    migrate = commands.add_parser("migrate", help="explicitly migrate a CueFlow project")
-    migrate.add_argument("project_dir", type=Path)
 
     glossary = commands.add_parser("glossary", help="manage the project glossary")
     glossary_commands = glossary.add_subparsers(dest="glossary_command", required=True)
@@ -289,9 +285,6 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             }
         finally:
             context.close()
-    if args.command == "migrate":
-        result = migrate_registry(args.project_dir / ".cueflow" / "registry.sqlite3")
-        return {**result, "project_dir": str(args.project_dir.resolve())}
     if args.command == "lexicon" and args.lexicon_command == "pack":
         return _dispatch_pack(args, OfficialPackStore())
     context = ProjectContext.open(args.project_dir)

@@ -338,7 +338,7 @@ def test_lexicon_recovery_is_isolated_from_source_and_reference_runs(tmp_path: P
         extracted = _extract_text_reference(context, path, extractor)
         lexicon_run_id = extracted["suggestions"]["run_id"]
         reference_run_id = extracted["run_id"]
-        source_run_id = context.registry.create_run(
+        source_run_id = context.registry.create_source_run(
             context.project_id, {"source_asset_id": "fixture"}, "sha256:" + "0" * 64
         )
         context.registry.set_run_status(source_run_id, "running")

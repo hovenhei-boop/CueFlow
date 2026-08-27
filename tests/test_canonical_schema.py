@@ -91,7 +91,7 @@ def test_atomizer_keeps_internal_apostrophe_and_hyphen_inside_word() -> None:
     assert [atom["text"] for atom in payload["atoms"]] == ["wasn't", "Heriot-Watt"]
 
 
-@pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "2.0.0", "4.0.0"])
+@pytest.mark.parametrize("version", ["0.0.0", "999.0.0"])
 def test_envelope_roundtrip_and_incompatible_schema_rejected(version: str) -> None:
     payload = build_transcript_payload(
         chunk_id="chunk_0001", source_text="测试", language="Chinese"
@@ -103,6 +103,7 @@ def test_envelope_roundtrip_and_incompatible_schema_rejected(version: str) -> No
         inputs=(InputRef(role="media_chunk", artifact_id="art_input"),),
         payload=payload,
     )
+    assert envelope.schema_version == SCHEMA_VERSION == "4.0.0"
     assert ArtifactEnvelope.from_dict(json.loads(json.dumps(envelope.as_dict()))) == envelope
     invalid = envelope.as_dict()
     invalid["schema_version"] = version
@@ -187,8 +188,9 @@ def test_lexicon_artifact_payloads_validate_provenance_and_exact_identity() -> N
     }
     validate_term_candidate_set_payload(candidate_payload)
     candidate_payload["candidates"][0]["candidate_id"] = None
-    candidate_payload["candidates"][0]["disposition"] = "suppressed_trash"
-    validate_term_candidate_set_payload(candidate_payload)
+    candidate_payload["candidates"][0]["disposition"] = "not_a_disposition"
+    with pytest.raises(ContractError, match="invalid disposition"):
+        validate_term_candidate_set_payload(candidate_payload)
     candidate_payload["candidates"][0]["candidate_id"] = "cand_1"
     candidate_payload["candidates"][0]["disposition"] = "suggested"
     candidate_payload["candidates"][0]["occurrences"][0]["end_offset"] = 4

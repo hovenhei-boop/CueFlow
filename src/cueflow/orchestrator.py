@@ -101,10 +101,10 @@ def run_project(
     semantic_factory: SemanticFactory | None = None,
     aligner_factory: AlignerFactory | None = None,
 ) -> dict[str, Any]:
-    context.registry.recover_running_runs()
+    context.registry.recover_running_source_runs()
     chosen_runtime = runtime or RuntimeConfig.detect()
     source_asset = context.register_external_asset(media_path, asset_kind="media")
-    run_id = context.registry.create_run(
+    run_id = context.registry.create_source_run(
         context.project_id,
         {
             "source_asset_id": source_asset["source_asset_id"],
@@ -147,7 +147,7 @@ def retry_invocation(
     semantic_factory: SemanticFactory | None = None,
     aligner_factory: AlignerFactory | None = None,
 ) -> dict[str, Any]:
-    context.registry.recover_running_runs()
+    context.registry.recover_running_source_runs()
     invocation = context.registry.invocation(invocation_id)
     if invocation["project_id"] != context.project_id:
         raise ContractError("Invocation belongs to a different project")
@@ -159,7 +159,7 @@ def retry_invocation(
         raise ContractError("only a failed or ambiguous Invocation can be explicitly retried")
     operation = str(invocation["operation"])
     if operation not in {"semantic_transcription", "forced_alignment", "qa_alignment_repair"}:
-        raise ContractError("Invocation operation is not a retryable v0.1.1 operation")
+        raise ContractError("Invocation operation is not retryable")
     run_id = str(invocation["run_id"])
     run = context.registry.run(run_id)
     if run["status"] not in {"failed", "interrupted"}:

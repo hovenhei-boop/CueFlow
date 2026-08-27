@@ -244,7 +244,7 @@ def test_glossary_rework_publishes_new_versions_and_stable_warning(tmp_path: Pat
         )
         assert result["status"] == "succeeded"
         assert StableConflictSemantic.calls == 3
-        latest = context.registry.latest_run(context.project_id)
+        latest = context.registry.latest_source_run(context.project_id)
         assert latest is not None
         invocations = context.registry.invocations_for_run(str(latest["run_id"]))
         semantic_invocations = [
@@ -345,7 +345,7 @@ def test_delivery_ambiguous_semantic_invocation_is_not_automatically_retried(
                 aligner_factory=lambda value: FakeAligner(),
             )
         assert AmbiguousSemantic.calls == 1
-        latest = context.registry.latest_run(context.project_id)
+        latest = context.registry.latest_source_run(context.project_id)
         assert latest is not None
         run_id = str(latest["run_id"])
         invocations = context.registry.invocations_for_run(str(latest["run_id"]))
@@ -420,7 +420,7 @@ def test_delivery_ambiguous_semantic_invocation_is_not_automatically_retried(
                     semantic_factory=lambda cls=provider_type: cls(),
                     aligner_factory=lambda value: FakeAligner(),
                 )
-            interrupted_run = interrupted_context.registry.latest_run(
+            interrupted_run = interrupted_context.registry.latest_source_run(
                 interrupted_context.project_id
             )
             assert interrupted_run is not None
@@ -458,7 +458,7 @@ def test_delivery_ambiguous_semantic_invocation_is_not_automatically_retried(
                 semantic_factory=lambda: FakeSemantic(),
                 aligner_factory=lambda value: FakeAligner(),
             )
-        created_run = created_context.registry.latest_run(created_context.project_id)
+        created_run = created_context.registry.latest_source_run(created_context.project_id)
         assert created_run is not None and created_run["status"] == "interrupted"
         created_invocations = created_context.registry.invocations_for_run(
             str(created_run["run_id"])

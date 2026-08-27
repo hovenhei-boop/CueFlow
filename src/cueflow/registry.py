@@ -12,8 +12,7 @@ from cueflow.config import SEMANTIC_RETRY_RESET_LIMIT
 from cueflow.errors import ContractError, IntegrityError
 from cueflow.schema import ArtifactEnvelope, utc_now
 
-REGISTRY_SCHEMA_VERSION = 5
-LEGACY_REGISTRY_SCHEMA_VERSION = 4
+REGISTRY_SCHEMA_VERSION = 6
 RUN_KINDS = frozenset({"source", "reference", "lexicon"})
 SOURCE_TABLES = frozenset(
     {
@@ -201,7 +200,7 @@ REFERENCE_TABLE_COLUMNS = {
     ),
 }
 
-V4_LEXICON_TABLE_COLUMNS = {
+LEXICON_TABLE_COLUMNS = {
     "lexicon_runs": (
         "run_id",
         "trigger_reference_run_id",
@@ -303,33 +302,6 @@ V4_LEXICON_TABLE_COLUMNS = {
         "decision_id",
         "created_at",
     ),
-    "lexicon_trash": (
-        "trash_id",
-        "object_kind",
-        "object_id",
-        "normalization_version",
-        "normalized_surface_form",
-        "restore_payload_json",
-        "deleted_at",
-        "expires_at",
-        "status",
-        "restored_at",
-    ),
-    "lexicon_blacklist": (
-        "blacklist_id",
-        "normalization_version",
-        "normalized_surface_form",
-        "surface_form",
-        "created_at",
-    ),
-    "lexicon_settings": ("singleton", "trash_retention_days", "updated_at"),
-}
-
-LEXICON_TABLE_COLUMNS = {
-    key: value
-    for key, value in V4_LEXICON_TABLE_COLUMNS.items()
-    if key not in {"lexicon_trash", "lexicon_settings", "lexicon_blacklist"}
-} | {
     "lexicon_blacklist": (
         "blacklist_id",
         "normalization_version",
@@ -340,7 +312,7 @@ LEXICON_TABLE_COLUMNS = {
         "revision",
         "created_at",
         "updated_at",
-    )
+    ),
 }
 
 REFERENCE_DDL_STATEMENTS = (
@@ -719,398 +691,6 @@ PRAGMA user_version = {REGISTRY_SCHEMA_VERSION};
 """
 
 
-def migrate_registry(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        raise IntegrityError(f"not a CueFlow registry: {path}")
-    connection = sqlite3.connect(path)
-    connection.row_factory = sqlite3.Row
-    try:
-        version_row = connection.execute("PRAGMA user_version").fetchone()
-        assert version_row is not None
-        version = int(version_row[0])
-        if version == REGISTRY_SCHEMA_VERSION:
-            _validate_schema_connection(
-                connection,
-                REQUIRED_TABLES,
-                SOURCE_TABLE_COLUMNS | REFERENCE_TABLE_COLUMNS | LEXICON_TABLE_COLUMNS,
-            )
-            return {
-                "status": "already_current",
-                "from_version": version,
-                "to_version": REGISTRY_SCHEMA_VERSION,
-            }
-        if version != LEGACY_REGISTRY_SCHEMA_VERSION:
-            raise IntegrityError(
-                "incompatible CueFlow registry schema version: "
-                f"expected {LEGACY_REGISTRY_SCHEMA_VERSION} for migration, found {version}"
-            )
-        legacy_tables = SOURCE_TABLES | REFERENCE_TABLES | frozenset(
-            V4_LEXICON_TABLE_COLUMNS
-        )
-        _validate_schema_connection(
-            connection,
-            legacy_tables,
-            SOURCE_TABLE_COLUMNS | REFERENCE_TABLE_COLUMNS | V4_LEXICON_TABLE_COLUMNS,
-        )
-        migration_result = _migrate_registry_v4_to_v5(connection)
-        return {
-            "status": "migrated",
-            "from_version": LEGACY_REGISTRY_SCHEMA_VERSION,
-            "to_version": REGISTRY_SCHEMA_VERSION,
-            **migration_result,
-        }
-    finally:
-        connection.close()
-
-
-def _migrate_registry_v4_to_v5(connection: sqlite3.Connection) -> dict[str, int]:
-    # Acquire the write lock before reading v4 state so rule selection and the
-    # replacement-table writes are based on one transactional snapshot.
-    connection.execute("PRAGMA foreign_keys = OFF")
-    connection.execute("BEGIN IMMEDIATE")
-    now = utc_now()
-    active_glossary = {
-        (str(row["normalization_version"]), str(row["normalized_surface_form"]))
-        for row in connection.execute(
-            "SELECT normalization_version, normalized_surface_form "
-            "FROM project_lexicon_entries WHERE status='active'"
-        ).fetchall()
-    }
-    candidates = {
-        str(row["candidate_id"]): row
-        for row in connection.execute("SELECT * FROM term_candidates").fetchall()
-    }
-    entries = {
-        str(row["entry_id"]): row
-        for row in connection.execute("SELECT * FROM project_lexicon_entries").fetchall()
-    }
-    rules: dict[tuple[str, str], dict[str, Any]] = {}
-    collision_sources: dict[tuple[str, str], set[str]] = {}
-
-    def consider_rule(
-        *,
-        blacklist_id: str,
-        normalization_version: str,
-        normalized_surface_form: str,
-        surface_form: str,
-        kind: str,
-        expires_at: str | None,
-        created_at: str,
-        source: str,
-    ) -> None:
-        key = (normalization_version, normalized_surface_form)
-        if key in active_glossary:
-            collision_sources.setdefault(key, set()).add(source)
-            return
-        current = rules.get(key)
-        value = {
-            "blacklist_id": blacklist_id,
-            "normalization_version": normalization_version,
-            "normalized_surface_form": normalized_surface_form,
-            "surface_form": surface_form,
-            "kind": kind,
-            "expires_at": expires_at,
-            "created_at": created_at,
-        }
-        if current is None:
-            rules[key] = value
-            return
-        if current["kind"] == "permanent":
-            return
-        if kind == "permanent" or cast(str, expires_at) > cast(str, current["expires_at"]):
-            rules[key] = value
-
-    for row in connection.execute("SELECT * FROM lexicon_blacklist").fetchall():
-        consider_rule(
-            blacklist_id=str(row["blacklist_id"]),
-            normalization_version=str(row["normalization_version"]),
-            normalized_surface_form=str(row["normalized_surface_form"]),
-            surface_form=str(row["surface_form"]),
-            kind="permanent",
-            expires_at=None,
-            created_at=str(row["created_at"]),
-            source="blacklist",
-        )
-
-    for row in connection.execute(
-        "SELECT * FROM lexicon_trash WHERE status='active'"
-    ).fetchall():
-        expires_at = cast(str | None, row["expires_at"])
-        if expires_at is not None and expires_at <= now:
-            continue
-        object_id = str(row["object_id"])
-        if row["object_kind"] == "candidate":
-            source_row = candidates.get(object_id)
-            source_name = "candidate_trash"
-            surface_form = (
-                None if source_row is None else str(source_row["display_term"])
-            )
-        else:
-            source_row = entries.get(object_id)
-            source_name = "entry_trash"
-            surface_form = None if source_row is None else str(source_row["term"])
-        if surface_form is None:
-            raise IntegrityError(
-                f"v4 Trash item {row['trash_id']} references an unknown object"
-            )
-        consider_rule(
-            blacklist_id="black_" + uuid.uuid4().hex,
-            normalization_version=str(row["normalization_version"]),
-            normalized_surface_form=str(row["normalized_surface_form"]),
-            surface_form=surface_form,
-            kind="permanent" if expires_at is None else "temporary",
-            expires_at=expires_at,
-            created_at=str(row["deleted_at"]),
-            source=source_name,
-        )
-
-    try:
-        for statement in _V5_REPLACEMENT_TABLE_DDL:
-            connection.execute(statement)
-        connection.execute(
-            """
-            INSERT INTO term_candidates_v5
-            SELECT candidate_id, normalization_version, normalized_surface_form,
-                   display_term, display_category, proper_noun_subtype,
-                   CASE WHEN status='rejected' THEN 'dismissed' ELSE status END,
-                   revision, created_at, updated_at
-            FROM term_candidates
-            """
-        )
-        connection.execute(
-            "INSERT INTO term_occurrences_v5 SELECT * FROM term_occurrences"
-        )
-        connection.execute(
-            "INSERT INTO candidate_decisions_v5 SELECT * FROM candidate_decisions"
-        )
-        connection.execute(
-            """
-            INSERT INTO project_lexicon_entries_v5
-            SELECT entry_id, term, normalization_version, normalized_surface_form,
-                   category, proper_noun_subtype, source_candidate_id, enabled,
-                   CASE WHEN status='deleted' THEN 'removed' ELSE status END,
-                   revision, created_at, updated_at
-            FROM project_lexicon_entries
-            """
-        )
-        connection.execute(
-            "INSERT INTO project_lexicon_revisions_v5 SELECT * FROM project_lexicon_revisions"
-        )
-        connection.executemany(
-            """
-            INSERT INTO lexicon_blacklist_v5
-            (blacklist_id, normalization_version, normalized_surface_form,
-             surface_form, kind, expires_at, revision, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
-            """,
-            [
-                (
-                    rule["blacklist_id"],
-                    rule["normalization_version"],
-                    rule["normalized_surface_form"],
-                    rule["surface_form"],
-                    rule["kind"],
-                    rule["expires_at"],
-                    rule["created_at"],
-                    now,
-                )
-                for rule in rules.values()
-            ],
-        )
-        connection.executemany(
-            """
-            UPDATE term_candidates_v5
-            SET status='accepted'
-            WHERE normalization_version=? AND normalized_surface_form=?
-            """,
-            sorted(active_glossary),
-        )
-        connection.executemany(
-            """
-            UPDATE term_candidates_v5
-            SET status='blacklisted'
-            WHERE normalization_version=? AND normalized_surface_form=?
-            """,
-            sorted(rules),
-        )
-
-        for table in (
-            "project_lexicon_revisions",
-            "lexicon_trash",
-            "lexicon_settings",
-            "lexicon_blacklist",
-            "project_lexicon_entries",
-            "candidate_decisions",
-            "term_occurrences",
-            "term_candidates",
-        ):
-            connection.execute(f"DROP TABLE {table}")
-        for old, new in (
-            ("term_candidates_v5", "term_candidates"),
-            ("term_occurrences_v5", "term_occurrences"),
-            ("candidate_decisions_v5", "candidate_decisions"),
-            ("project_lexicon_entries_v5", "project_lexicon_entries"),
-            ("project_lexicon_revisions_v5", "project_lexicon_revisions"),
-            ("lexicon_blacklist_v5", "lexicon_blacklist"),
-        ):
-            connection.execute(f"ALTER TABLE {old} RENAME TO {new}")
-        connection.execute(
-            "CREATE UNIQUE INDEX project_lexicon_active_term "
-            "ON project_lexicon_entries(normalization_version, normalized_surface_form) "
-            "WHERE status='active'"
-        )
-        for key, sources in sorted(collision_sources.items()):
-            candidate = connection.execute(
-                "SELECT candidate_id FROM term_candidates "
-                "WHERE normalization_version=? AND normalized_surface_form=?",
-                key,
-            ).fetchone()
-            connection.execute(
-                """
-                INSERT INTO candidate_decisions
-                (decision_id, candidate_id, action, payload_json, created_at)
-                VALUES (?, ?, 'migration_suppression_removed_for_active_entry', ?, ?)
-                """,
-                (
-                    "dec_" + uuid.uuid4().hex,
-                    None if candidate is None else str(candidate["candidate_id"]),
-                    json.dumps(
-                        {
-                            "normalization_version": key[0],
-                            "normalized_surface_form": key[1],
-                            "sources": sorted(sources),
-                        },
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    ),
-                    now,
-                ),
-            )
-        connection.execute(f"PRAGMA user_version = {REGISTRY_SCHEMA_VERSION}")
-        foreign_key_failures = connection.execute("PRAGMA foreign_key_check").fetchall()
-        if foreign_key_failures:
-            raise IntegrityError("v4 to v5 registry migration failed foreign-key validation")
-        _validate_schema_connection(
-            connection,
-            REQUIRED_TABLES,
-            SOURCE_TABLE_COLUMNS | REFERENCE_TABLE_COLUMNS | LEXICON_TABLE_COLUMNS,
-        )
-    except BaseException:
-        connection.rollback()
-        raise
-    else:
-        connection.commit()
-    finally:
-        connection.execute("PRAGMA foreign_keys = ON")
-    return {
-        "blacklist_rules": len(rules),
-        "glossary_conflicts_resolved": len(collision_sources),
-    }
-
-
-_V5_REPLACEMENT_TABLE_DDL = (
-    """
-    CREATE TABLE term_candidates_v5 (
-        candidate_id TEXT PRIMARY KEY,
-        normalization_version TEXT NOT NULL,
-        normalized_surface_form TEXT NOT NULL COLLATE BINARY,
-        display_term TEXT NOT NULL,
-        display_category TEXT NOT NULL
-            CHECK (display_category IN ('proper_noun','noun_or_term','verb','other')),
-        proper_noun_subtype TEXT,
-        status TEXT NOT NULL
-            CHECK (status IN ('pending','accepted','edited_accepted','dismissed','blacklisted')),
-        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        UNIQUE (normalization_version, normalized_surface_form)
-    )
-    """,
-    """
-    CREATE TABLE term_occurrences_v5 (
-        occurrence_id TEXT PRIMARY KEY,
-        candidate_id TEXT NOT NULL,
-        evidence_artifact_id TEXT NOT NULL,
-        reference_role TEXT NOT NULL,
-        raw_surface_form TEXT NOT NULL,
-        suggested_surface_form TEXT,
-        proposed_category TEXT NOT NULL
-            CHECK (proposed_category IN ('proper_noun','noun_or_term','verb','other')),
-        proper_noun_subtype TEXT,
-        risk_tags_json TEXT NOT NULL,
-        field_path_json TEXT NOT NULL,
-        start_offset INTEGER NOT NULL CHECK (start_offset >= 0),
-        end_offset INTEGER NOT NULL CHECK (end_offset > start_offset),
-        context_before TEXT NOT NULL,
-        context_after TEXT NOT NULL,
-        coordinates_json TEXT,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (candidate_id) REFERENCES term_candidates_v5(candidate_id),
-        UNIQUE (candidate_id, evidence_artifact_id, field_path_json,
-                start_offset, end_offset, raw_surface_form)
-    )
-    """,
-    """
-    CREATE TABLE candidate_decisions_v5 (
-        decision_id TEXT PRIMARY KEY,
-        candidate_id TEXT,
-        action TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (candidate_id) REFERENCES term_candidates_v5(candidate_id)
-    )
-    """,
-    """
-    CREATE TABLE project_lexicon_entries_v5 (
-        entry_id TEXT PRIMARY KEY,
-        term TEXT NOT NULL,
-        normalization_version TEXT NOT NULL,
-        normalized_surface_form TEXT NOT NULL COLLATE BINARY,
-        category TEXT NOT NULL
-            CHECK (category IN ('proper_noun','noun_or_term','verb','other')),
-        proper_noun_subtype TEXT,
-        source_candidate_id TEXT,
-        enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),
-        status TEXT NOT NULL CHECK (status IN ('active','removed')),
-        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        FOREIGN KEY (source_candidate_id) REFERENCES term_candidates_v5(candidate_id)
-    )
-    """,
-    """
-    CREATE TABLE project_lexicon_revisions_v5 (
-        revision_id TEXT PRIMARY KEY,
-        ordinal INTEGER NOT NULL UNIQUE CHECK (ordinal >= 1),
-        parent_revision_id TEXT,
-        artifact_id TEXT NOT NULL,
-        decision_id TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (parent_revision_id) REFERENCES project_lexicon_revisions_v5(revision_id),
-        FOREIGN KEY (decision_id) REFERENCES candidate_decisions_v5(decision_id)
-    )
-    """,
-    """
-    CREATE TABLE lexicon_blacklist_v5 (
-        blacklist_id TEXT PRIMARY KEY,
-        normalization_version TEXT NOT NULL,
-        normalized_surface_form TEXT NOT NULL COLLATE BINARY,
-        surface_form TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('temporary','permanent')),
-        expires_at TEXT,
-        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        CHECK (
-            (kind='temporary' AND expires_at IS NOT NULL)
-            OR (kind='permanent' AND expires_at IS NULL)
-        ),
-        UNIQUE (normalization_version, normalized_surface_form)
-    )
-    """,
-)
-
-
 def _validate_schema_connection(
     connection: sqlite3.Connection,
     required_tables: frozenset[str],
@@ -1162,14 +742,10 @@ class Registry:
             self._validate_schema(self._table_names())
             return
         if version != REGISTRY_SCHEMA_VERSION:
-            migration_hint = (
-                "; run `cueflow migrate PROJECT_DIR`"
-                if version == LEGACY_REGISTRY_SCHEMA_VERSION
-                else ""
-            )
             raise IntegrityError(
-                "incompatible CueFlow registry schema version: "
-                f"expected {REGISTRY_SCHEMA_VERSION}, found {version}{migration_hint}"
+                "incompatible CueFlow registry schema: "
+                f"expected {REGISTRY_SCHEMA_VERSION}, found {version}. "
+                "Create a new project in an empty directory; existing data was not modified."
             )
         self._validate_schema(tables)
 
@@ -1615,15 +1191,9 @@ class Registry:
             (project_id, artifact_kind),
         ).fetchall()
 
-    def create_run(
+    def create_source_run(
         self, project_id: str, input_identity: Mapping[str, Any], config_hash: str
     ) -> str:
-        """Create a Source Run.
-
-        The legacy method name remains the Source-facing public API. Other run
-        kinds have dedicated creation methods so callers cannot accidentally
-        create an unclassified execution.
-        """
         run_id = "run_" + uuid.uuid4().hex
         now = utc_now()
         self._connection.execute(
@@ -2074,14 +1644,6 @@ class Registry:
         if row is None:
             raise IntegrityError(f"unknown run: {run_id}")
         return cast(sqlite3.Row, row)
-
-    def latest_run(self, project_id: str) -> sqlite3.Row | None:
-        """Return the latest Source Run."""
-        return self.latest_source_run(project_id)
-
-    def recover_running_runs(self) -> list[str]:
-        """Recover Source Runs without changing Reference Runs."""
-        return self.recover_running_source_runs()
 
     def recover_running_source_runs(self) -> list[str]:
         return self._recover_running_runs(kind="source")

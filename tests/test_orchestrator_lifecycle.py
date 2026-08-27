@@ -320,7 +320,7 @@ def test_qa_does_not_start_a_second_alignment_repair_wave(
                 semantic_factory=lambda: _Semantic(),
                 aligner_factory=aligner_factory,
             )
-        run = context.registry.latest_run(context.project_id)
+        run = context.registry.latest_source_run(context.project_id)
         assert run is not None
         run_id = str(run["run_id"])
         assert len(_operation_rows(context, run_id, "qa_alignment_repair")) == 1
@@ -370,7 +370,7 @@ def test_targeted_retry_has_two_audited_resets_and_twelve_attempt_hard_cap(
                 semantic_factory=semantic_factory,
                 aligner_factory=lambda runtime: _Aligner(),
             )
-        run = context.registry.latest_run(context.project_id)
+        run = context.registry.latest_source_run(context.project_id)
         assert run is not None
         run_id = str(run["run_id"])
         source.unlink()
@@ -464,7 +464,7 @@ def test_targeted_retry_uses_bound_artifacts_and_skips_other_successful_chunk(
                 semantic_factory=semantic_factory,
                 aligner_factory=lambda runtime: _Aligner(),
             )
-        run = context.registry.latest_run(context.project_id)
+        run = context.registry.latest_source_run(context.project_id)
         assert run is not None
         run_id = str(run["run_id"])
         original_rows = _operation_rows(context, run_id, "semantic_transcription")

@@ -1,6 +1,6 @@
 # CueFlow
 
-CueFlow v0.4.1 是面向已剪辑完成媒体的项目式字幕生成与检查引擎。Source 主链为 Media Prep → 远端语义转写与纠错 → 本地 Forced Alignment → Subtitle → QA → SRT。独立的 Reference 旁路通过确定性提取或远端 ASR、Vision、Document Parse 生成带 provenance 的 Evidence，并自动生成等待人工处理的 Suggested Terms。Project Lexicon 与全局 Official Packs 在本版不进入 Source Transcript、Effective Glossary、Alignment 或 SRT。
+CueFlow v0.5.0 是面向已剪辑完成媒体的项目式字幕生成与检查引擎。Source 主链为 Media Prep → 远端语义转写与纠错 → 本地 Forced Alignment → Subtitle → QA → SRT。独立的 Reference 旁路通过确定性提取或远端 ASR、Vision、Document Parse 生成带 provenance 的 Evidence，并自动生成等待人工处理的 Suggested Terms。Project Lexicon 与全局 Official Packs 在本版不进入 Source Transcript、Effective Glossary、Alignment 或 SRT。
 
 ## 安装
 
@@ -21,7 +21,6 @@ python -m venv .venv
 
 ```text
 cueflow init PROJECT_DIR --name NAME
-cueflow migrate PROJECT_DIR
 cueflow glossary set PROJECT_DIR GLOSSARY.json
 cueflow asset add PROJECT_DIR FILE --kind auxiliary
 cueflow run PROJECT_DIR MEDIA
@@ -38,7 +37,7 @@ cueflow lexicon blacklist list|add|update|unblock ...
 cueflow lexicon pack list|setup|install|uninstall|update|status|repair ...
 ```
 
-Registry v4 Project 不会在普通打开时被静默修改；升级后必须先显式执行 `cueflow migrate PROJECT_DIR`。迁移在一个 SQLite 事务内完成，失败保持原 v4 状态。
+Registry 只接受当前精确契约。全新空库初始化当前结构；版本、表或列不符合当前契约时明确拒绝且不修改已有数据。
 
 `run` 与每次被接受的 `reference extract` 都在 Project 下创建全新 Run；Source `retry` 与 `reference retry` 都只在原 Run 内最小重放。Reference retry 以 work-item 为粒度，成功项永不重跑。项目内部状态位于 `PROJECT_DIR/.cueflow/`，Source 主链的唯一正常用户输出仍为 `PROJECT_DIR/output/subtitles.srt`。
 

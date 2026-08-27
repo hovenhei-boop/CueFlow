@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from argparse import _SubParsersAction
 from pathlib import Path
 
 import pytest
@@ -170,12 +171,23 @@ def test_official_pack_cli_is_global_and_setup_is_explicit(
 
 def test_lexicon_cli_exposes_no_manual_build_or_project_pack_select() -> None:
     parser = build_parser()
+    top_level = next(
+        action for action in parser._actions if isinstance(action, _SubParsersAction)
+    )
+    assert set(top_level.choices) == {
+        "init",
+        "glossary",
+        "asset",
+        "run",
+        "status",
+        "retry",
+        "reference",
+        "lexicon",
+    }
     with pytest.raises(SystemExit):
         parser.parse_args(["lexicon", "build", "project"])
     with pytest.raises(SystemExit):
         parser.parse_args(["lexicon", "pack", "select", "project", "ai-software"])
-    with pytest.raises(SystemExit):
-        parser.parse_args(["lexicon", "trash", "list", "project"])
     with pytest.raises(SystemExit):
         parser.parse_args(
             [
@@ -202,15 +214,3 @@ def test_lexicon_cli_exposes_no_manual_build_or_project_pack_select() -> None:
                 "1",
             ]
         )
-
-
-def test_migrate_cli_is_explicit_and_idempotent(
-    tmp_path: Path, capfd: pytest.CaptureFixture[str]
-) -> None:
-    project = tmp_path / "project"
-    assert main(["init", str(project), "--name", "Migrate CLI"]) == 0
-    capfd.readouterr()
-    assert main(["migrate", str(project)]) == 0
-    result = json.loads(capfd.readouterr().out)
-    assert result["status"] == "already_current"
-    assert result["from_version"] == result["to_version"] == 5
