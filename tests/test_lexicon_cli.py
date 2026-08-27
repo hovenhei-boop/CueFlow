@@ -10,14 +10,26 @@ from cueflow.cli import build_parser, main
 from cueflow.lexicon_packs import PACK_SCHEMA_VERSION
 
 
-def test_project_lexicon_cli_and_structured_suppression_conflict(
+def test_project_lexicon_cli_and_structured_blacklist_conflict(
     tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     project = tmp_path / "project"
     assert main(["init", str(project), "--name", "Lexicon CLI"]) == 0
     capfd.readouterr()
 
-    assert main(["lexicon", "blacklist", "add", str(project), "CueFlow"]) == 0
+    assert (
+        main(
+            [
+                "lexicon",
+                "blacklist",
+                "add",
+                str(project),
+                "CueFlow",
+                "--permanent",
+            ]
+        )
+        == 0
+    )
     blacklist = json.loads(capfd.readouterr().out)
     assert blacklist["status"] == "blacklisted"
 
@@ -39,7 +51,7 @@ def test_project_lexicon_cli_and_structured_suppression_conflict(
     )
     conflict = json.loads(capfd.readouterr().err)
     assert conflict["conflicts"] == ["blacklist"]
-    assert conflict["choices"] == ["remove_and_add", "keep_and_add", "cancel"]
+    assert conflict["choices"] == ["unblock_and_add", "cancel"]
 
     assert (
         main(
@@ -53,8 +65,8 @@ def test_project_lexicon_cli_and_structured_suppression_conflict(
                 "proper_noun",
                 "--proper-noun-subtype",
                 "product_brand_model_software",
-                "--suppression-policy",
-                "keep_and_add",
+                "--blacklist-policy",
+                "unblock_and_add",
             ]
         )
         == 0
@@ -79,8 +91,27 @@ def test_project_lexicon_cli_and_structured_suppression_conflict(
         == 0
     )
     capfd.readouterr()
-    assert main(["lexicon", "trash", "retention", str(project), "never"]) == 0
-    assert json.loads(capfd.readouterr().out) == {"trash_retention_days": None}
+    assert (
+        main(
+            [
+                "lexicon",
+                "entry",
+                "block",
+                str(project),
+                entry["entry_id"],
+                "--temporary",
+                "15",
+                "--expected-revision",
+                str(entry["revision"] + 1),
+            ]
+        )
+        == 0
+    )
+    blocked = json.loads(capfd.readouterr().out)
+    assert blocked["kind"] == "temporary"
+    assert main(["lexicon", "blacklist", "list", str(project), "--kind", "temporary"]) == 0
+    rows = json.loads(capfd.readouterr().out)["blacklist"]
+    assert [row["blacklist_id"] for row in rows] == [blocked["blacklist_id"]]
 
 
 def test_official_pack_cli_is_global_and_setup_is_explicit(
@@ -143,3 +174,43 @@ def test_lexicon_cli_exposes_no_manual_build_or_project_pack_select() -> None:
         parser.parse_args(["lexicon", "build", "project"])
     with pytest.raises(SystemExit):
         parser.parse_args(["lexicon", "pack", "select", "project", "ai-software"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["lexicon", "trash", "list", "project"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "lexicon",
+                "entry",
+                "delete",
+                "project",
+                "entry-id",
+                "--expected-revision",
+                "1",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "lexicon",
+                "suggestions",
+                "review",
+                "project",
+                "candidate-id",
+                "--action",
+                "reject",
+                "--expected-revision",
+                "1",
+            ]
+        )
+
+
+def test_migrate_cli_is_explicit_and_idempotent(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    assert main(["init", str(project), "--name", "Migrate CLI"]) == 0
+    capfd.readouterr()
+    assert main(["migrate", str(project)]) == 0
+    result = json.loads(capfd.readouterr().out)
+    assert result["status"] == "already_current"
+    assert result["from_version"] == result["to_version"] == 5

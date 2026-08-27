@@ -6,22 +6,23 @@ import pytest
 
 from cueflow.errors import ContractError, SuppressionConflictError
 from cueflow.lexicon import (
+    add_blacklist,
     add_entry,
-    delete_entry,
+    block_entry,
     edit_entry,
     ingest_candidate_occurrences,
     list_blacklist,
     list_entries,
     list_suggestions,
-    list_trash,
-    remove_blacklist,
-    restore_trash,
+    remove_entry,
     review_candidate,
     set_entry_enabled,
-    set_trash_retention,
+    unblock_blacklist,
+    update_blacklist,
 )
 from cueflow.orchestrator import initialize_project
 from cueflow.project import ProjectContext
+from cueflow.schema import utc_now
 from cueflow.term_candidates import CandidateOccurrence, EvidenceUnit, validate_occurrence
 
 
@@ -102,73 +103,200 @@ def test_candidate_identity_provenance_categories_and_sorting(tmp_path: Path) ->
         context.close()
 
 
-def test_review_trash_blacklist_and_explicit_conflict_choices(tmp_path: Path) -> None:
+def test_candidate_dismiss_temporary_permanent_and_expiry(tmp_path: Path) -> None:
     context = initialize_project(tmp_path / "project", "Review")
     try:
         effective_before = context.current_artifact("effective_glossary").artifact_id
-        _ingest(context, "e1", _occurrence("RejectMe"), _occurrence("BlockMe"))
+        _ingest(
+            context,
+            "e1",
+            _occurrence("DismissMe"),
+            _occurrence("Temporary"),
+            _occurrence("Permanent"),
+        )
         by_term = {row["display_term"]: row for row in list_suggestions(context)}
 
-        rejected = review_candidate(
+        dismissed = review_candidate(
             context,
-            by_term["RejectMe"]["candidate_id"],
-            "reject",
-            expected_revision=by_term["RejectMe"]["revision"],
+            by_term["DismissMe"]["candidate_id"],
+            "dismiss",
+            expected_revision=by_term["DismissMe"]["revision"],
         )
-        assert rejected["status"] == "rejected"
-        trash_id = list_trash(context)[0]["trash_id"]
-        assert _ingest(context, "e2", _occurrence("RejectMe"))[0]["disposition"] == (
-            "suppressed_trash"
+        assert dismissed["status"] == "dismissed"
+        assert _ingest(context, "e2", _occurrence("DismissMe"))[0]["disposition"] == (
+            "suggested"
         )
-        assert restore_trash(context, trash_id)["status"] == "restored"
-        assert [row["display_term"] for row in list_suggestions(context)] == [
-            "RejectMe",
-            "BlockMe",
-        ]
 
-        block = next(row for row in list_suggestions(context) if row["display_term"] == "BlockMe")
-        review_candidate(
+        temporary = by_term["Temporary"]
+        blocked = review_candidate(
             context,
-            block["candidate_id"],
-            "blacklist",
-            expected_revision=block["revision"],
+            temporary["candidate_id"],
+            "block_temporary",
+            blacklist_days=15,
+            expected_revision=temporary["revision"],
         )
-        assert _ingest(context, "e3", _occurrence("BlockMe"))[0]["disposition"] == (
+        assert blocked["kind"] == "temporary"
+        assert blocked["expires_at"] is not None
+        assert _ingest(context, "e3", _occurrence("Temporary"))[0]["disposition"] == (
             "suppressed_blacklist"
         )
-        blacklist_id = list_blacklist(context)[0]["blacklist_id"]
+        context.registry._connection.execute(
+            "UPDATE lexicon_blacklist SET expires_at=? WHERE blacklist_id=?",
+            (utc_now(), blocked["blacklist_id"]),
+        )
+        context.registry._connection.commit()
+        assert _ingest(context, "e4", _occurrence("Temporary"))[0]["disposition"] == (
+            "suggested"
+        )
 
-        with pytest.raises(SuppressionConflictError) as conflict:
-            add_entry(context, "BlockMe", category="noun_or_term")
-        assert conflict.value.conflicts == ("blacklist",)
-        assert (
-            add_entry(
-                context,
-                "BlockMe",
-                category="noun_or_term",
-                suppression_policy="cancel",
-            )["status"]
-            == "cancelled"
-        )
-        kept = add_entry(
+        permanent = by_term["Permanent"]
+        permanent_block = review_candidate(
             context,
-            "BlockMe",
-            category="noun_or_term",
-            suppression_policy="keep_and_add",
+            permanent["candidate_id"],
+            "block_permanent",
+            expected_revision=permanent["revision"],
         )
-        assert kept["status"] == "added"
-        assert len(list_blacklist(context)) == 1
-        assert _ingest(context, "e4", _occurrence("BlockMe"))[0]["disposition"] == (
-            "already_in_project_lexicon"
+        assert permanent_block["expires_at"] is None
+        assert _ingest(context, "e5", _occurrence("Permanent"))[0]["disposition"] == (
+            "suppressed_blacklist"
         )
-        remove_blacklist(context, blacklist_id)
-        assert list_blacklist(context) == []
+        assert unblock_blacklist(
+            context,
+            permanent_block["blacklist_id"],
+            expected_revision=permanent_block["revision"],
+        )["status"] == "unblocked"
+        assert _ingest(context, "e6", _occurrence("Permanent"))[0]["disposition"] == (
+            "suggested"
+        )
         assert context.current_artifact("effective_glossary").artifact_id == effective_before
     finally:
         context.close()
 
 
-def test_project_lexicon_edit_disable_delete_restore_and_retention(tmp_path: Path) -> None:
+def test_entry_remove_block_and_blacklist_exclusivity(tmp_path: Path) -> None:
+    context = initialize_project(tmp_path / "project", "Entries")
+    other = initialize_project(tmp_path / "other", "Other")
+    try:
+        _ingest(context, "e1", _occurrence("RemoveMe"))
+        candidate = list_suggestions(context)[0]
+        accepted = review_candidate(
+            context,
+            candidate["candidate_id"],
+            "accept",
+            expected_revision=candidate["revision"],
+        )
+        entry = list_entries(context)[0]
+        assert remove_entry(
+            context, accepted["entry_id"], expected_revision=entry["revision"]
+        )["status"] == "removed"
+        assert _ingest(context, "e2", _occurrence("RemoveMe"))[0]["disposition"] == (
+            "suggested"
+        )
+
+        added = add_entry(context, "BlockMe", category="noun_or_term")
+        block_entry_row = next(
+            row for row in list_entries(context) if row["entry_id"] == added["entry_id"]
+        )
+        blocked = block_entry(
+            context,
+            added["entry_id"],
+            kind="temporary",
+            days=30,
+            expected_revision=block_entry_row["revision"],
+        )
+        assert blocked["status"] == "blacklisted"
+        assert _ingest(context, "e3", _occurrence("BlockMe"))[0]["disposition"] == (
+            "suppressed_blacklist"
+        )
+
+        manual = add_blacklist(
+            context, "Conflict", kind="permanent", days=None
+        )
+        with pytest.raises(SuppressionConflictError) as conflict:
+            add_entry(context, "Conflict", category="noun_or_term")
+        assert conflict.value.conflicts == ("blacklist",)
+        assert add_entry(
+            context,
+            "Conflict",
+            category="noun_or_term",
+            blacklist_policy="cancel",
+        )["status"] == "cancelled"
+        added_conflict = add_entry(
+            context,
+            "Conflict",
+            category="noun_or_term",
+            blacklist_policy="unblock_and_add",
+        )
+        assert added_conflict["status"] == "added"
+        assert all(row["blacklist_id"] != manual["blacklist_id"] for row in list_blacklist(context))
+        with pytest.raises(ContractError, match="Project Lexicon already"):
+            add_blacklist(context, "Conflict", kind="permanent", days=None)
+
+        overlap = context.registry._connection.execute(
+            """
+            SELECT COUNT(*) FROM project_lexicon_entries e
+            JOIN lexicon_blacklist b
+              ON b.normalization_version=e.normalization_version
+             AND b.normalized_surface_form=e.normalized_surface_form
+            WHERE e.status='active'
+            """
+        ).fetchone()
+        assert overlap is not None and overlap[0] == 0
+
+        assert _ingest(other, "other-e1", _occurrence("BlockMe"))[0]["disposition"] == (
+            "suggested"
+        )
+    finally:
+        context.close()
+        other.close()
+
+
+def test_blacklist_update_fixed_durations_and_revision(tmp_path: Path) -> None:
+    context = ProjectContext.create(tmp_path / "project", "Blacklist")
+    try:
+        with pytest.raises(ContractError, match="must be one of"):
+            add_blacklist(context, "Invalid", kind="temporary", days=7)
+        temporary = add_blacklist(context, "Mutable", kind="temporary", days=15)
+        with pytest.raises(ContractError, match="revision conflict"):
+            update_blacklist(
+                context,
+                temporary["blacklist_id"],
+                kind="temporary",
+                days=30,
+                expected_revision=99,
+            )
+        updated = update_blacklist(
+            context,
+            temporary["blacklist_id"],
+            kind="temporary",
+            days=30,
+            expected_revision=temporary["revision"],
+        )
+        assert updated["revision"] == 2
+        permanent = update_blacklist(
+            context,
+            temporary["blacklist_id"],
+            kind="permanent",
+            days=None,
+            expected_revision=updated["revision"],
+        )
+        assert permanent["kind"] == "permanent"
+        assert permanent["expires_at"] is None
+        with pytest.raises(ContractError, match="can only be unblocked"):
+            update_blacklist(
+                context,
+                temporary["blacklist_id"],
+                kind="temporary",
+                days=60,
+                expected_revision=permanent["revision"],
+            )
+        assert list_blacklist(context, kind="temporary") == []
+        assert len(list_blacklist(context, kind="permanent")) == 1
+    finally:
+        context.close()
+
+
+def test_project_lexicon_edit_disable_and_remove(tmp_path: Path) -> None:
     context = ProjectContext.create(tmp_path / "project", "Entries")
     try:
         added = add_entry(
@@ -197,25 +325,19 @@ def test_project_lexicon_edit_disable_delete_restore_and_retention(tmp_path: Pat
         assert entry["term"] == "Qwen-ASR"
         assert entry["enabled"] == 0
 
-        deleted = delete_entry(context, entry_id, expected_revision=entry["revision"])
+        removed = remove_entry(context, entry_id, expected_revision=entry["revision"])
+        assert removed["status"] == "removed"
         assert list_entries(context) == []
-        assert restore_trash(context, deleted["trash_id"])["status"] == "restored"
-        restored = list_entries(context)[0]
-        assert restored["term"] == "Qwen-ASR"
-        assert restored["enabled"] == 0
-
-        assert set_trash_retention(context, 15) == {"trash_retention_days": 15}
-        assert set_trash_retention(context, None) == {"trash_retention_days": None}
-        with pytest.raises(ContractError, match="trash retention"):
-            set_trash_retention(context, 7)
+        removed_entry = list_entries(context, include_removed=True)[0]
+        assert removed_entry["term"] == "Qwen-ASR"
+        assert removed_entry["enabled"] == 0
+        assert removed_entry["status"] == "removed"
 
         revisions = context.registry._connection.execute(
             "SELECT ordinal FROM project_lexicon_revisions ORDER BY ordinal"
         ).fetchall()
-        assert [row[0] for row in revisions] == [1, 2, 3, 4, 5]
-        assert context.current_artifact("project_lexicon").payload["entries"][0][
-            "enabled"
-        ] is False
+        assert [row[0] for row in revisions] == [1, 2, 3, 4]
+        assert context.current_artifact("project_lexicon").payload["entries"] == []
     finally:
         context.close()
 

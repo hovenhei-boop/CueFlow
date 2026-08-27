@@ -1,4 +1,4 @@
-# CueFlow v0.4.0 Failure Model
+# CueFlow v0.4.1 Failure Model
 
 ## 1. 原则
 
@@ -91,6 +91,6 @@ Lexicon model work item 每个最多两个 sent attempt；`definitely_not_sent` 
 
 Reference complete/partial bundle 已发布后才触发 Lexicon，因此 Lexicon 失败不能回滚或掩盖 Reference 成功 Evidence。Lexicon Run complete/partial/failed 独立聚合；显式 suggestion retry 留在原 Run，只重放目标失败 batch。Lexicon recovery 只处理 `kind=lexicon`，不改变 Source/Reference Run。
 
-Trash/Blacklist 冲突不是自动失败恢复。人工写入命中抑制时默认抛 `SuppressionConflictError`，结构化返回 normalized term、冲突种类与 remove_and_add、keep_and_add、cancel 三个选择。只有调用方再次显式给出选择才变更状态。
+Project Blacklist 冲突不是自动失败恢复。人工写入命中有效规则时默认抛 `SuppressionConflictError`，结构化返回 normalized term、冲突种类与 `unblock_and_add/cancel` 两个选择。只有调用方再次显式给出选择才变更状态。Entry Block 在一个事务中移出 Active Project Lexicon 并建立规则；revision 冲突、非法期限或任一写入失败都不得留下半状态。
 
 Official Pack 安装在应用数据目录加独占锁，下载/读取到临时位置，完成 schema、identity、license、manifest hash、terms hash/count 校验后原子 rename 并更新 current pointer。失败保留旧 current；`repair` 只在用户显式调用时清理自身临时项并按已持久化 catalog 修复当前版本。运行 Source 或初始化 Project 不隐式下载 Pack。

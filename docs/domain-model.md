@@ -1,4 +1,4 @@
-# CueFlow v0.4.0 Domain Model
+# CueFlow v0.4.1 Domain Model
 
 ## 1. Project 与 SourceAsset
 
@@ -111,16 +111,16 @@ Candidate identity 为 `(normalization_version, NFC+trim exact surface)`；大�
 
 分类固定为 `proper_noun`、`noun_or_term`、`verb`、`other`。专名 subtype 顺序固定为 person、organization、location、event、project_or_program、product_brand_model_software、standard_protocol_code、work_or_title、other。显示顺序按分类、词长降序、UTF-8 binary、Candidate ID 决定。
 
-## 13. Project Lexicon、Trash 与 Blacklist
+## 13. Project Lexicon、Neutral 与 Project Blacklist
 
-Accept 或 Edit & Accept 创建 Project Lexicon entry；也可手工 Add。Entry 支持 Edit、Disable、Delete、Restore，并用 revision 做并发冲突检查。每次可见状态改变生成一条 decision 与不可变 `project_lexicon` revision。不存在 alias、merge、replacement 或实体归一化。
+Accept 或 Edit & Accept 创建 Project Lexicon entry；也可手工 Add。Candidate 的 Dismiss 与 entry 的 Remove 都进入逻辑 Neutral，不建立抑制。Entry 支持 Edit、Disable、Remove 和原子 Block，并用 revision 做并发冲突检查。每次 Project Lexicon 可见状态改变生成一条 decision 与不可变 `project_lexicon` revision。不存在 alias、merge、replacement 或实体归一化。
 
-Reject 与 Delete 进入 Trash，保留期只允许 15/30/60/120 日或永久，默认 30 日。活动 Trash 在期限内阻止同一 exact term 重新成为 suggestion；过期后新的 Evidence 可以再次建议。Blacklist 永久阻止同一 exact term 进入 Reference suggestion/Project Lexicon 自动候选路径，但不审查 Source 或 SRT。
+Project Blacklist 只作用于当前 Project，并阻止同一 exact term 进入 Reference suggestion/Project Lexicon 自动候选路径，但不审查 Source 或 SRT。Temporary rule 只允许 15/30/60/120 日，在 `now >= expires_at` 时自动解除；Permanent rule 不自动过期，但可由用户主动 Unblock。Temporary 可修改期限或转 Permanent；Permanent 不转 Temporary。
 
-人工 Add、Edit & Accept 或 entry Edit 若命中活动 Trash/Blacklist，调用方必须明确选择 remove_and_add、keep_and_add 或 cancel；默认返回结构化冲突，不静默修改抑制状态。用户显式选择 keep 时，Project Lexicon entry 可与 Trash/Blacklist 共存。
+同一 exact normalized term 不能同时存在于 Active Project Lexicon 与有效 Project Blacklist。人工 Add、Edit & Accept 或 entry Edit 若命中 Blacklist，调用方必须明确选择 `unblock_and_add` 或 `cancel`；默认返回结构化冲突，不静默修改规则。手工 Blacklist Add 命中 Active Entry 时失败，必须改用带 entry revision 的原子 Block。
 
 ## 14. Official Lexicon Pack
 
 Official Pack 是应用级全局只读资源，不属于任何 Project。Catalog 记录 Pack ID、领域、version、source 与 manifest hash；manifest 记录 Pack schema、identity、license、term count 与 terms hash。setup 默认安装 catalog 全部领域，也允许用户只选领域；所有项目读取同一 installed set。没有 Project 类型、Project→Pack 绑定、逐词 select 或项目复制。
 
-v0.4.0 只构建和管理这些数据，不把 Project Lexicon 或 Official Pack 自动注入 Effective Glossary/Source。未来消费必须先做相关性与容量限制，并把所选 entry、Pack version 和选择算法一并冻结为 Source Run 的不可变 Effective Glossary Snapshot；targeted retry 继续绑定原 snapshot。
+v0.4.1 只构建和管理这些数据，不把 Project Lexicon 或 Official Pack 自动注入 Effective Glossary/Source。未来消费必须先做相关性与容量限制，并把所选 entry、Pack version 和选择算法一并冻结为 Source Run 的不可变 Effective Glossary Snapshot；targeted retry 继续绑定原 snapshot。

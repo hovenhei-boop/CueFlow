@@ -1,4 +1,4 @@
-# CueFlow v0.4.0 Architecture
+# CueFlow v0.4.1 Architecture
 
 ## 1. 产品边界
 
@@ -17,7 +17,7 @@ Source Media
 → output/subtitles.srt
 ```
 
-目标是忠实转写、精确时间轴、纠错和导出。独立的 Reference 路径为 `Reference Material → deterministic extraction / optional Reference ASR, Vision, Cloud Document Parse → Reference Evidence → automatic terminology discovery → Suggested Terms → human review → Project Lexicon`。该旁路不创建或修改 Source Transcript、Effective Glossary、Alignment、Subtitle、QA 或 SRT；v0.4.0 不增加 UI。
+目标是忠实转写、精确时间轴、纠错和导出。独立的 Reference 路径为 `Reference Material → deterministic extraction / optional Reference ASR, Vision, Cloud Document Parse → Reference Evidence → automatic terminology discovery → Suggested Terms → human review → Project Lexicon`。该旁路不创建或修改 Source Transcript、Effective Glossary、Alignment、Subtitle、QA 或 SRT；v0.4.1 不增加 UI。
 
 ## 2. 核心不变量
 
@@ -127,7 +127,7 @@ failed/interrupted --explicit targeted retry→ running
 
 ## 9. CLI 与输出
 
-CLI 提供 `init`、`glossary set`、`asset add`、`run`、`status`、`retry`、Reference 管理以及 Suggested Terms、Project Lexicon、Trash、Blacklist 和 Official Pack 管理。不提供用户主动创建或 rebuild Lexicon Run 的命令，也不提供 Project→Pack select。失败 JSON 在可用时包含 Run/Invocation/work-item identity、当前状态和合法下一步；它只描述显式操作，不自动 retry。
+CLI 提供 `init`、显式 Registry `migrate`、`glossary set`、`asset add`、`run`、`status`、`retry`、Reference 管理以及 Suggested Terms、Project Lexicon、Project Blacklist 和 Official Pack 管理。不提供用户主动创建或 rebuild Lexicon Run 的命令，也不提供 Project→Pack select。失败 JSON 在可用时包含 Run/Invocation/work-item identity、当前状态和合法下一步；它只描述显式操作，不自动 retry。
 
 唯一正常用户输出是 `output/subtitles.srt`。内部 Artifact、SQLite、blob 和临时文件位于 `.cueflow/`；临时文件完成后清理。
 
@@ -150,6 +150,6 @@ all succeeded ReferenceEvidence in one Run → ReferenceBundle
 
 Reference bundle 发布后自动触发内部 `kind=lexicon` Run。系统只处理尚无 coverage 记录的 exact Evidence Artifact ID；Reference retry 的旧 Evidence 不重跑，新 Evidence 独立进入有界 batch。一个 Run 只发布一个 `lexicon_input` manifest，每个 batch 可发布一个 `term_candidate_set`。Candidate 必须逐字引用所发送 Evidence unit 的 field path 和半开 offset；客户端重新绑定完整 Evidence 并校验，非法位置使该 work item 失败。
 
-Suggested Term 经过 Accept、Edit & Accept、Reject 或 Blacklist 后更新项目状态。Project Lexicon 的 Add、Edit、Disable、Delete 与 Restore 每次发布不可变 `project_lexicon` revision。Reject/Delete 进入有时限 Trash，Blacklist 只阻止同一精确词面再次作为 Reference suggestion 出现。两者都不禁止 Source/SRT 输出该词。
+Suggested Term 经过 Accept、Edit & Accept、Dismiss 或 Temporary/Permanent Block 后更新项目状态。Project Lexicon 的 Add、Edit、Disable、Remove 与原子 Block 每次发布不可变 `project_lexicon` revision。Dismiss/Remove 进入逻辑 Neutral；Block 建立仅作用于当前 Project 的规则。Temporary 在到期时解除，Permanent 只由用户 Unblock；两者都只阻止同一精确词面再次作为 Reference suggestion 出现，不禁止 Source/SRT 输出该词。同一 exact term 不能同时存在于 Active Project Lexicon 与有效 Project Blacklist。
 
 Official Packs 位于应用级数据目录，由全部项目共享。用户在显式 setup/install 时按领域选择，setup 未指定领域时默认全选；不存在项目分类或项目绑定。Pack version 不可变，安装校验 catalog manifest hash、Pack schema、terms hash/count 与 license，并使用目录锁、临时目录、原子 rename 和 current pointer。详见 [Lexicon](lexicon.md)。

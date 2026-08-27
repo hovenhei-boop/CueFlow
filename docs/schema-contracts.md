@@ -1,4 +1,4 @@
-# CueFlow v0.4.0 Schema Contracts
+# CueFlow v0.4.1 Schema Contracts
 
 ## 1. Envelope 与哈希
 
@@ -78,7 +78,7 @@ SrtRender payload 保存精确 Subtitle/QA IDs、UTF-8、byte length 和 text，
 
 SQLite 包含 Source、Reference 与 Lexicon 三组完整表。公共 Run 表的 `kind` 非空且只允许 `source`、`reference`、`lexicon`；各查询和 crash recovery 必须正向按 kind 选择，不能再以“不是 Reference”推断 Source。
 
-Registry 使用 SQLite `user_version = 4`。空库直接初始化当前完整结构；非当前版本、缺表或 column 不匹配均明确拒绝，不修改已有库。Project 列恰好为 `project_id`、`display_name`、`created_at`。
+Registry 使用 SQLite `user_version = 5`。空库直接初始化当前完整结构；普通打开遇到非当前版本、缺表或 column 不匹配时明确拒绝且不修改已有库。v4 只能通过显式 `cueflow migrate PROJECT` 在单一事务中迁移；迁移以 `foreign_key_check` 和当前精确列契约为提交门槛。Project 列恰好为 `project_id`、`display_name`、`created_at`。
 
 InvocationInput 主键为 `(invocation_id, ordinal)`，每行保存 role 与精确 `input_artifact_id`。Targeted retry 只能读取这些绑定。
 
@@ -106,8 +106,8 @@ Reference Artifact input 可以使用 `reference_asset_id`，并与 `artifact_id
 
 `lexicon_input.scope_key == payload.run_id`，payload 保存触发 Reference Run/Bundle、normalization version 与非空 batches。每个 unit 必须保存非空 field path、完整 Evidence 中的半开 source offset、切片 text hash 与来源坐标；manifest 不持久化发送正文。
 
-`term_candidate_set.scope_key == payload.work_item_id`，绑定 run/work-item/Evidence，并保存候选 observation。每个 observation 保留 normalized/display term、显示分类、disposition 与至少一个 exact occurrence；空模型结果用空 candidate array 表示成功。
+`term_candidate_set.scope_key == payload.work_item_id`，绑定 run/work-item/Evidence，并保存候选 observation。当前生产的 disposition 只允许 `suggested`、`already_in_project_lexicon`、`suppressed_blacklist`。每个 observation 保留 normalized/display term、显示分类、disposition 与至少一个 exact occurrence；空模型结果用空 candidate array 表示成功。
 
-`term_candidates` 对 `(normalization_version, normalized_surface_form COLLATE BINARY)` 唯一；`term_occurrences` 保存 Evidence/role、raw 与 suggested surface、分类、risk tags、field path、offset、context 和 coordinates。`project_lexicon_entries` 只对活动 exact normalized term 唯一，带 enabled/status/revision；`project_lexicon_revisions` 形成 ordinal/parent 不可变链。Trash、Blacklist 和 retention setting 分表保存。
+`term_candidates` 对 `(normalization_version, normalized_surface_form COLLATE BINARY)` 唯一；`term_occurrences` 保存 Evidence/role、raw 与 suggested surface、分类、risk tags、field path、offset、context 和 coordinates。`project_lexicon_entries` 只对活动 exact normalized term 唯一，带 enabled/status/revision；`project_lexicon_revisions` 形成 ordinal/parent 不可变链。`lexicon_blacklist` 对 exact normalized term 唯一，保存 temporary/permanent kind、nullable `expires_at`、revision 与时间戳；Temporary 必须有到期时间，Permanent 必须没有到期时间。
 
 `project_lexicon` 使用 global scope，保存 revision/parent/decision 与当次全部活动 entries。发布它不得 stale 或改写 `effective_glossary`、Transcript、Alignment、Subtitle、QA 或 SRT pointer。

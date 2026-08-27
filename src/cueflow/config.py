@@ -7,7 +7,7 @@ from importlib import import_module
 from typing import Any
 
 SCHEMA_VERSION = "3.0.0"
-COMPONENT_VERSION = "0.4.0"
+COMPONENT_VERSION = "0.4.1"
 ATOMIZER_VERSION = "0.1.0"
 GLOSSARY_NORMALIZATION_VERSION = "0.1.0"
 SEMANTIC_RETRY_RESET_LIMIT = 2

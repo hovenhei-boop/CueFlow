@@ -463,6 +463,9 @@ def validate_term_candidate_set_payload(payload: Mapping[str, Any]) -> None:
         }:
             raise ContractError("term_candidate_set candidate fields are invalid")
         disposition = _string(candidate.get("disposition"), "disposition")
+        # v0.4.1 only emits suggested/already_in_project_lexicon/
+        # suppressed_blacklist. The two Trash values remain read-only support
+        # for immutable v0.4.0 Artifact history migrated with a Project.
         if disposition not in {
             "suggested",
             "already_in_project_lexicon",

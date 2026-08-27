@@ -22,8 +22,16 @@ from cueflow.term_candidates import (
     validate_category,
 )
 
-SuppressionPolicy = Literal["prompt", "remove_and_add", "keep_and_add", "cancel"]
-CandidateAction = Literal["accept", "edit_accept", "reject", "blacklist"]
+BLACKLIST_DURATION_DAYS = (15, 30, 60, 120)
+BlacklistKind = Literal["temporary", "permanent"]
+BlacklistPolicy = Literal["prompt", "unblock_and_add", "cancel"]
+CandidateAction = Literal[
+    "accept",
+    "edit_accept",
+    "dismiss",
+    "block_temporary",
+    "block_permanent",
+]
 
 
 def ingest_candidate_occurrences(
@@ -38,10 +46,9 @@ def ingest_candidate_occurrences(
         grouped[occurrence.normalized_surface_form].append(occurrence)
     observations: list[dict[str, Any]] = []
     with context.registry.transaction() as connection:
-        _purge_expired_trash(connection)
+        _expire_temporary_blacklist(connection)
         for normalized in sorted(grouped, key=lambda value: value.encode("utf-8")):
             values = grouped[normalized]
-            suppression = _suppression_kinds(connection, normalized)
             active_entry = connection.execute(
                 """
                 SELECT entry_id FROM project_lexicon_entries
@@ -53,8 +60,8 @@ def ingest_candidate_occurrences(
             if active_entry is not None:
                 disposition = "already_in_project_lexicon"
                 candidate_id = None
-            elif suppression:
-                disposition = "suppressed_" + "_and_".join(suppression)
+            elif _has_blacklist(connection, normalized):
+                disposition = "suppressed_blacklist"
                 candidate_id = None
             else:
                 candidate_id = _upsert_candidate(connection, normalized, values)
@@ -84,7 +91,7 @@ def ingest_candidate_occurrences(
 
 def list_suggestions(context: ProjectContext) -> list[dict[str, Any]]:
     with context.registry.transaction() as connection:
-        _purge_expired_trash(connection)
+        _expire_temporary_blacklist(connection)
         rows = connection.execute(
             """
             SELECT c.*, COUNT(o.occurrence_id) AS occurrence_count
@@ -108,49 +115,69 @@ def review_candidate(
     edited_category: str | None = None,
     edited_subtype: str | None = None,
     expected_revision: int,
-    suppression_policy: SuppressionPolicy = "prompt",
+    blacklist_days: int | None = None,
+    blacklist_policy: BlacklistPolicy = "prompt",
 ) -> dict[str, Any]:
-    if action not in {"accept", "edit_accept", "reject", "blacklist"}:
+    if action not in {
+        "accept",
+        "edit_accept",
+        "dismiss",
+        "block_temporary",
+        "block_permanent",
+    }:
         raise ContractError("invalid candidate action")
+    block_kind = _candidate_block_kind(action)
+    _validate_blacklist_duration(block_kind, blacklist_days)
     with context.registry.transaction() as connection:
-        _purge_expired_trash(connection)
+        _expire_temporary_blacklist(connection)
         candidate = _candidate(connection, candidate_id)
         if candidate["status"] != "pending":
             raise ContractError("only a pending Suggested Term can be reviewed")
         if int(candidate["revision"]) != expected_revision:
             raise ContractError("candidate revision conflict")
-        if action == "reject":
+        if action == "dismiss":
             decision_id = _record_decision(
-                connection, candidate_id, "reject", {"revision": expected_revision}
+                connection, candidate_id, "dismiss", {"revision": expected_revision}
             )
             connection.execute(
-                "UPDATE term_candidates SET status='rejected', revision=revision+1, "
+                "UPDATE term_candidates SET status='dismissed', revision=revision+1, "
                 "updated_at=? WHERE candidate_id=?",
                 (utc_now(), candidate_id),
             )
-            _insert_trash(
-                connection,
-                object_kind="candidate",
-                object_id=candidate_id,
-                normalized=str(candidate["normalized_surface_form"]),
-                restore_payload={"candidate_id": candidate_id},
-            )
-            return {"status": "rejected", "decision_id": decision_id}
-        if action == "blacklist":
-            decision_id = _record_decision(
-                connection, candidate_id, "blacklist", {"revision": expected_revision}
-            )
-            _insert_blacklist(
+            return {"status": "dismissed", "decision_id": decision_id}
+        if block_kind is not None:
+            normalized = str(candidate["normalized_surface_form"])
+            blacklist_id = _insert_blacklist(
                 connection,
                 str(candidate["display_term"]),
-                str(candidate["normalized_surface_form"]),
+                normalized,
+                kind=block_kind,
+                days=blacklist_days,
+            )
+            decision_id = _record_decision(
+                connection,
+                candidate_id,
+                "block_" + block_kind,
+                {
+                    "revision": expected_revision,
+                    "blacklist_id": blacklist_id,
+                    "days": blacklist_days,
+                },
             )
             connection.execute(
                 "UPDATE term_candidates SET status='blacklisted', revision=revision+1, "
                 "updated_at=? WHERE candidate_id=?",
                 (utc_now(), candidate_id),
             )
-            return {"status": "blacklisted", "decision_id": decision_id}
+            blacklist = _blacklist(connection, blacklist_id)
+            return {
+                "status": "blacklisted",
+                "blacklist_id": blacklist_id,
+                "kind": blacklist["kind"],
+                "expires_at": blacklist["expires_at"],
+                "revision": blacklist["revision"],
+                "decision_id": decision_id,
+            }
 
         if action == "accept" and edited_term is not None:
             raise ContractError("accept does not take edited_term; use edit_accept")
@@ -167,11 +194,8 @@ def review_candidate(
             else cast(str | None, candidate["proper_noun_subtype"])
         )
         category, subtype = validate_category(category, subtype)
-        if normalized != str(candidate["normalized_surface_form"]):
-            if not _resolve_suppression_conflict(
-                connection, normalized, suppression_policy
-            ):
-                return {"status": "cancelled"}
+        if not _resolve_blacklist_conflict(connection, normalized, blacklist_policy):
+            return {"status": "cancelled"}
         _ensure_no_active_entry(connection, normalized)
         decision_id = _record_decision(
             connection,
@@ -182,7 +206,7 @@ def review_candidate(
                 "term": target_term,
                 "category": category,
                 "proper_noun_subtype": subtype,
-                "suppression_policy": suppression_policy,
+                "blacklist_policy": blacklist_policy,
             },
         )
         entry_id = _insert_entry(
@@ -218,13 +242,13 @@ def add_entry(
     *,
     category: str,
     proper_noun_subtype: str | None = None,
-    suppression_policy: SuppressionPolicy = "prompt",
+    blacklist_policy: BlacklistPolicy = "prompt",
 ) -> dict[str, Any]:
     normalized = normalize_surface_form(term)
     category, proper_noun_subtype = validate_category(category, proper_noun_subtype)
     with context.registry.transaction() as connection:
-        _purge_expired_trash(connection)
-        if not _resolve_suppression_conflict(connection, normalized, suppression_policy):
+        _expire_temporary_blacklist(connection)
+        if not _resolve_blacklist_conflict(connection, normalized, blacklist_policy):
             return {"status": "cancelled"}
         _ensure_no_active_entry(connection, normalized)
         decision_id = _record_decision(
@@ -235,7 +259,7 @@ def add_entry(
                 "term": term,
                 "category": category,
                 "proper_noun_subtype": proper_noun_subtype,
-                "suppression_policy": suppression_policy,
+                "blacklist_policy": blacklist_policy,
             },
         )
         entry_id = _insert_entry(
@@ -258,18 +282,16 @@ def edit_entry(
     category: str,
     proper_noun_subtype: str | None,
     expected_revision: int,
-    suppression_policy: SuppressionPolicy = "prompt",
+    blacklist_policy: BlacklistPolicy = "prompt",
 ) -> dict[str, Any]:
     normalized = normalize_surface_form(term)
     category, proper_noun_subtype = validate_category(category, proper_noun_subtype)
     with context.registry.transaction() as connection:
-        _purge_expired_trash(connection)
+        _expire_temporary_blacklist(connection)
         entry = _entry(connection, entry_id)
         _require_active_entry_revision(entry, expected_revision)
         if normalized != str(entry["normalized_surface_form"]):
-            if not _resolve_suppression_conflict(
-                connection, normalized, suppression_policy
-            ):
+            if not _resolve_blacklist_conflict(connection, normalized, blacklist_policy):
                 return {"status": "cancelled"}
             _ensure_no_active_entry(connection, normalized, excluding_entry_id=entry_id)
         decision_id = _record_decision(
@@ -282,7 +304,7 @@ def edit_entry(
                 "category": category,
                 "proper_noun_subtype": proper_noun_subtype,
                 "expected_revision": expected_revision,
-                "suppression_policy": suppression_policy,
+                "blacklist_policy": blacklist_policy,
             },
         )
         connection.execute(
@@ -336,7 +358,7 @@ def set_entry_enabled(
         return {"status": "enabled" if enabled else "disabled", "revision": revision}
 
 
-def delete_entry(
+def remove_entry(
     context: ProjectContext, entry_id: str, *, expected_revision: int
 ) -> dict[str, Any]:
     with context.registry.transaction() as connection:
@@ -345,35 +367,87 @@ def delete_entry(
         decision_id = _record_decision(
             connection,
             cast(str | None, entry["source_candidate_id"]),
-            "entry_delete",
+            "entry_remove",
             {"entry_id": entry_id, "expected_revision": expected_revision},
         )
-        restore_payload = dict(entry)
         connection.execute(
-            "UPDATE project_lexicon_entries SET status='deleted', revision=revision+1, "
+            "UPDATE project_lexicon_entries SET status='removed', revision=revision+1, "
             "updated_at=? WHERE entry_id=?",
             (utc_now(), entry_id),
         )
-        source_candidate_id = entry["source_candidate_id"]
-        if source_candidate_id is not None:
+        if entry["source_candidate_id"] is not None:
             connection.execute(
-                "UPDATE term_candidates SET status='rejected', revision=revision+1, "
+                "UPDATE term_candidates SET status='dismissed', revision=revision+1, "
                 "updated_at=? WHERE candidate_id=?",
-                (utc_now(), source_candidate_id),
+                (utc_now(), entry["source_candidate_id"]),
             )
-        trash_id = _insert_trash(
-            connection,
-            object_kind="entry",
-            object_id=entry_id,
-            normalized=str(entry["normalized_surface_form"]),
-            restore_payload=restore_payload,
-        )
         revision = _publish_project_lexicon_revision(context, connection, decision_id)
-        return {"status": "deleted", "trash_id": trash_id, "revision": revision}
+        return {
+            "status": "removed",
+            "entry_id": entry_id,
+            "decision_id": decision_id,
+            "revision": revision,
+        }
 
 
-def list_entries(context: ProjectContext, *, include_deleted: bool = False) -> list[dict[str, Any]]:
-    clause = "" if include_deleted else " WHERE status='active'"
+def block_entry(
+    context: ProjectContext,
+    entry_id: str,
+    *,
+    kind: BlacklistKind,
+    days: int | None,
+    expected_revision: int,
+) -> dict[str, Any]:
+    _validate_blacklist_duration(kind, days)
+    with context.registry.transaction() as connection:
+        _expire_temporary_blacklist(connection)
+        entry = _entry(connection, entry_id)
+        _require_active_entry_revision(entry, expected_revision)
+        blacklist_id = _insert_blacklist(
+            connection,
+            str(entry["term"]),
+            str(entry["normalized_surface_form"]),
+            kind=kind,
+            days=days,
+        )
+        decision_id = _record_decision(
+            connection,
+            cast(str | None, entry["source_candidate_id"]),
+            "entry_block_" + kind,
+            {
+                "entry_id": entry_id,
+                "expected_revision": expected_revision,
+                "blacklist_id": blacklist_id,
+                "days": days,
+            },
+        )
+        connection.execute(
+            "UPDATE project_lexicon_entries SET status='removed', revision=revision+1, "
+            "updated_at=? WHERE entry_id=?",
+            (utc_now(), entry_id),
+        )
+        if entry["source_candidate_id"] is not None:
+            connection.execute(
+                "UPDATE term_candidates SET status='blacklisted', revision=revision+1, "
+                "updated_at=? WHERE candidate_id=?",
+                (utc_now(), entry["source_candidate_id"]),
+            )
+        revision = _publish_project_lexicon_revision(context, connection, decision_id)
+        blacklist = _blacklist(connection, blacklist_id)
+        return {
+            "status": "blacklisted",
+            "entry_id": entry_id,
+            "blacklist_id": blacklist_id,
+            "kind": blacklist["kind"],
+            "expires_at": blacklist["expires_at"],
+            "blacklist_revision": blacklist["revision"],
+            "decision_id": decision_id,
+            "project_lexicon_revision": revision,
+        }
+
+
+def list_entries(context: ProjectContext, *, include_removed: bool = False) -> list[dict[str, Any]]:
+    clause = "" if include_removed else " WHERE status='active'"
     rows = context.registry._connection.execute(  # noqa: SLF001 - Registry owns this schema
         "SELECT * FROM project_lexicon_entries" + clause
     ).fetchall()
@@ -392,137 +466,141 @@ def list_entries(context: ProjectContext, *, include_deleted: bool = False) -> l
     return result
 
 
-def list_trash(context: ProjectContext) -> list[dict[str, Any]]:
-    with context.registry.transaction() as connection:
-        _purge_expired_trash(connection)
-        rows = connection.execute(
-            "SELECT * FROM lexicon_trash WHERE status='active' ORDER BY deleted_at, trash_id"
-        ).fetchall()
-    return [dict(row) for row in rows]
-
-
-def restore_trash(context: ProjectContext, trash_id: str) -> dict[str, Any]:
-    with context.registry.transaction() as connection:
-        _purge_expired_trash(connection)
-        row = connection.execute(
-            "SELECT * FROM lexicon_trash WHERE trash_id=? AND status='active'",
-            (trash_id,),
-        ).fetchone()
-        if row is None:
-            raise IntegrityError(f"unknown active Trash item: {trash_id}")
-        normalized = str(row["normalized_surface_form"])
-        if row["object_kind"] == "candidate":
-            candidate = _candidate(connection, str(row["object_id"]))
-            if _has_blacklist(connection, normalized):
-                raise SuppressionConflictError(normalized, ("blacklist",))
-            _ensure_no_active_entry(connection, normalized)
-            connection.execute(
-                "UPDATE term_candidates SET status='pending', revision=revision+1, "
-                "updated_at=? WHERE candidate_id=?",
-                (utc_now(), candidate["candidate_id"]),
-            )
-            decision_id = _record_decision(
-                connection,
-                str(candidate["candidate_id"]),
-                "candidate_restore",
-                {"trash_id": trash_id},
-            )
-            revision = None
-        else:
-            entry = _entry(connection, str(row["object_id"]))
-            _ensure_no_active_entry(connection, normalized)
-            connection.execute(
-                "UPDATE project_lexicon_entries SET status='active', revision=revision+1, "
-                "updated_at=? WHERE entry_id=?",
-                (utc_now(), entry["entry_id"]),
-            )
-            if entry["source_candidate_id"] is not None:
-                connection.execute(
-                    "UPDATE term_candidates SET status='accepted', revision=revision+1, "
-                    "updated_at=? WHERE candidate_id=?",
-                    (utc_now(), entry["source_candidate_id"]),
-                )
-            decision_id = _record_decision(
-                connection,
-                cast(str | None, entry["source_candidate_id"]),
-                "entry_restore",
-                {"trash_id": trash_id, "entry_id": entry["entry_id"]},
-            )
-            revision = _publish_project_lexicon_revision(context, connection, decision_id)
-        connection.execute(
-            "UPDATE lexicon_trash SET status='restored', restored_at=? WHERE trash_id=?",
-            (utc_now(), trash_id),
-        )
-        return {"status": "restored", "decision_id": decision_id, "revision": revision}
-
-
-def purge_trash(context: ProjectContext) -> int:
-    with context.registry.transaction() as connection:
-        return _purge_expired_trash(connection)
-
-
-def set_trash_retention(context: ProjectContext, days: int | None) -> dict[str, Any]:
-    if days not in {15, 30, 60, 120, None}:
-        raise ContractError("trash retention must be 15, 30, 60, 120 days, or never")
-    context.registry._connection.execute(  # noqa: SLF001 - Registry owns this schema
-        """
-        INSERT INTO lexicon_settings(singleton, trash_retention_days, updated_at)
-        VALUES (1, ?, ?)
-        ON CONFLICT(singleton) DO UPDATE SET
-          trash_retention_days=excluded.trash_retention_days,
-          updated_at=excluded.updated_at
-        """,
-        (days, utc_now()),
-    )
-    context.registry._connection.commit()  # noqa: SLF001
-    return {"trash_retention_days": days}
-
-
-def add_blacklist(context: ProjectContext, surface_form: str) -> dict[str, Any]:
+def add_blacklist(
+    context: ProjectContext,
+    surface_form: str,
+    *,
+    kind: BlacklistKind,
+    days: int | None,
+) -> dict[str, Any]:
+    _validate_blacklist_duration(kind, days)
     normalized = normalize_surface_form(surface_form)
     with context.registry.transaction() as connection:
-        blacklist_id = _insert_blacklist(connection, surface_form, normalized)
-        candidate = connection.execute(
-            "SELECT candidate_id FROM term_candidates WHERE normalization_version=? "
-            "AND normalized_surface_form=?",
-            (LEXICON_NORMALIZATION_VERSION, normalized),
-        ).fetchone()
-        candidate_id = str(candidate["candidate_id"]) if candidate is not None else None
+        _expire_temporary_blacklist(connection)
+        _ensure_no_active_entry(connection, normalized)
+        blacklist_id = _insert_blacklist(
+            connection, surface_form, normalized, kind=kind, days=days
+        )
+        candidate_id = _candidate_id_for_normalized(connection, normalized)
         if candidate_id is not None:
             connection.execute(
                 "UPDATE term_candidates SET status='blacklisted', revision=revision+1, "
                 "updated_at=? WHERE candidate_id=?",
                 (utc_now(), candidate_id),
             )
-        _record_decision(
-            connection, candidate_id, "blacklist_add", {"surface_form": surface_form}
+        decision_id = _record_decision(
+            connection,
+            candidate_id,
+            "blacklist_add_" + kind,
+            {
+                "surface_form": surface_form,
+                "blacklist_id": blacklist_id,
+                "days": days,
+            },
         )
-        return {"status": "blacklisted", "blacklist_id": blacklist_id}
+        blacklist = _blacklist(connection, blacklist_id)
+        return {
+            "status": "blacklisted",
+            "blacklist_id": blacklist_id,
+            "kind": blacklist["kind"],
+            "expires_at": blacklist["expires_at"],
+            "revision": blacklist["revision"],
+            "decision_id": decision_id,
+        }
 
 
-def remove_blacklist(context: ProjectContext, blacklist_id: str) -> dict[str, Any]:
+def update_blacklist(
+    context: ProjectContext,
+    blacklist_id: str,
+    *,
+    kind: BlacklistKind,
+    days: int | None,
+    expected_revision: int,
+) -> dict[str, Any]:
+    _validate_blacklist_duration(kind, days)
     with context.registry.transaction() as connection:
-        row = connection.execute(
-            "SELECT * FROM lexicon_blacklist WHERE blacklist_id=?", (blacklist_id,)
-        ).fetchone()
-        if row is None:
-            raise IntegrityError(f"unknown Blacklist item: {blacklist_id}")
+        _expire_temporary_blacklist(connection)
+        row = _blacklist(connection, blacklist_id)
+        if int(row["revision"]) != expected_revision:
+            raise ContractError("Project Blacklist revision conflict")
+        if row["kind"] != "temporary":
+            raise ContractError("Permanent Project Blacklist items can only be unblocked")
+        expires_at = _blacklist_expiration(kind, days)
+        connection.execute(
+            "UPDATE lexicon_blacklist SET kind=?, expires_at=?, revision=revision+1, "
+            "updated_at=? WHERE blacklist_id=?",
+            (kind, expires_at, utc_now(), blacklist_id),
+        )
+        candidate_id = _candidate_id_for_normalized(
+            connection, str(row["normalized_surface_form"])
+        )
+        decision_id = _record_decision(
+            connection,
+            candidate_id,
+            "blacklist_update_" + kind,
+            {
+                "blacklist_id": blacklist_id,
+                "expected_revision": expected_revision,
+                "days": days,
+            },
+        )
+        updated = _blacklist(connection, blacklist_id)
+        return {
+            "status": "updated",
+            "blacklist_id": blacklist_id,
+            "kind": updated["kind"],
+            "expires_at": updated["expires_at"],
+            "revision": updated["revision"],
+            "decision_id": decision_id,
+        }
+
+
+def unblock_blacklist(
+    context: ProjectContext, blacklist_id: str, *, expected_revision: int
+) -> dict[str, Any]:
+    with context.registry.transaction() as connection:
+        _expire_temporary_blacklist(connection)
+        row = _blacklist(connection, blacklist_id)
+        if int(row["revision"]) != expected_revision:
+            raise ContractError("Project Blacklist revision conflict")
+        candidate_id = _candidate_id_for_normalized(
+            connection, str(row["normalized_surface_form"])
+        )
+        decision_id = _record_decision(
+            connection,
+            candidate_id,
+            "blacklist_unblock",
+            {
+                "blacklist_id": blacklist_id,
+                "expected_revision": expected_revision,
+                "surface_form": row["surface_form"],
+            },
+        )
         connection.execute(
             "DELETE FROM lexicon_blacklist WHERE blacklist_id=?", (blacklist_id,)
         )
-        _record_decision(
-            connection,
-            None,
-            "blacklist_remove",
-            {"blacklist_id": blacklist_id, "surface_form": row["surface_form"]},
-        )
-    return {"status": "removed", "blacklist_id": blacklist_id}
+        return {
+            "status": "unblocked",
+            "blacklist_id": blacklist_id,
+            "decision_id": decision_id,
+        }
 
 
-def list_blacklist(context: ProjectContext) -> list[dict[str, Any]]:
-    rows = context.registry._connection.execute(  # noqa: SLF001 - Registry owns this schema
-        "SELECT * FROM lexicon_blacklist ORDER BY normalized_surface_form COLLATE BINARY"
-    ).fetchall()
+def list_blacklist(
+    context: ProjectContext, *, kind: Literal["all", "temporary", "permanent"] = "all"
+) -> list[dict[str, Any]]:
+    if kind not in {"all", "temporary", "permanent"}:
+        raise ContractError("invalid Project Blacklist kind")
+    with context.registry.transaction() as connection:
+        _expire_temporary_blacklist(connection)
+        clause = "" if kind == "all" else " WHERE kind=?"
+        parameters: tuple[str, ...] = () if kind == "all" else (kind,)
+        rows = connection.execute(
+            "SELECT * FROM lexicon_blacklist"
+            + clause
+            + " ORDER BY kind DESC, normalized_surface_form COLLATE BINARY",
+            parameters,
+        ).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -567,7 +645,7 @@ def _upsert_candidate(
         subtype,
     )
     status = str(row["status"])
-    if status in {"rejected", "blacklisted", "edited_accepted"}:
+    if status in {"accepted", "dismissed", "blacklisted", "edited_accepted"}:
         status = "pending"
     connection.execute(
         """
@@ -670,7 +748,7 @@ def _entry(connection: sqlite3.Connection, entry_id: str) -> sqlite3.Row:
 
 def _require_active_entry_revision(entry: sqlite3.Row, expected_revision: int) -> None:
     if entry["status"] != "active":
-        raise ContractError("Project Lexicon entry is deleted")
+        raise ContractError("Project Lexicon entry is removed")
     if int(entry["revision"]) != expected_revision:
         raise ContractError("Project Lexicon entry revision conflict")
 
@@ -751,99 +829,63 @@ def _record_decision(
     return decision_id
 
 
-def _retention_days(connection: sqlite3.Connection) -> int | None:
-    row = connection.execute(
-        "SELECT trash_retention_days FROM lexicon_settings WHERE singleton=1"
-    ).fetchone()
-    if row is None:
-        connection.execute(
-            "INSERT INTO lexicon_settings VALUES (1, 30, ?)", (utc_now(),)
-        )
-        return 30
-    return cast(int | None, row[0])
-
-
-def _insert_trash(
-    connection: sqlite3.Connection,
-    *,
-    object_kind: str,
-    object_id: str,
-    normalized: str,
-    restore_payload: Mapping[str, Any],
-) -> str:
-    now = datetime.now(timezone.utc)
-    days = _retention_days(connection)
-    expires_at = (
-        None
-        if days is None
-        else (now + timedelta(days=days)).isoformat().replace("+00:00", "Z")
-    )
-    trash_id = "trash_" + uuid.uuid4().hex
-    connection.execute(
-        """
-        INSERT INTO lexicon_trash
-        (trash_id, object_kind, object_id, normalization_version,
-         normalized_surface_form, restore_payload_json, deleted_at, expires_at,
-         status, restored_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL)
-        """,
-        (
-            trash_id,
-            object_kind,
-            object_id,
-            LEXICON_NORMALIZATION_VERSION,
-            normalized,
-            json.dumps(restore_payload, ensure_ascii=False, sort_keys=True),
-            now.isoformat().replace("+00:00", "Z"),
-            expires_at,
-        ),
-    )
-    return trash_id
-
-
 def _insert_blacklist(
-    connection: sqlite3.Connection, surface_form: str, normalized: str
+    connection: sqlite3.Connection,
+    surface_form: str,
+    normalized: str,
+    *,
+    kind: BlacklistKind,
+    days: int | None,
 ) -> str:
+    _validate_blacklist_duration(kind, days)
     existing = connection.execute(
         "SELECT blacklist_id FROM lexicon_blacklist WHERE normalization_version=? "
         "AND normalized_surface_form=?",
         (LEXICON_NORMALIZATION_VERSION, normalized),
     ).fetchone()
     if existing is not None:
-        return str(existing["blacklist_id"])
+        raise ContractError("Project Blacklist already contains the exact term")
     blacklist_id = "black_" + uuid.uuid4().hex
+    now = utc_now()
     connection.execute(
         """
         INSERT INTO lexicon_blacklist
         (blacklist_id, normalization_version, normalized_surface_form,
-         surface_form, created_at)
-        VALUES (?, ?, ?, ?, ?)
+         surface_form, kind, expires_at, revision, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
         """,
         (
             blacklist_id,
             LEXICON_NORMALIZATION_VERSION,
             normalized,
             surface_form,
-            utc_now(),
+            kind,
+            _blacklist_expiration(kind, days),
+            now,
+            now,
         ),
     )
     return blacklist_id
 
 
-def _suppression_kinds(connection: sqlite3.Connection, normalized: str) -> tuple[str, ...]:
-    result: list[str] = []
-    if _has_blacklist(connection, normalized):
-        result.append("blacklist")
-    if connection.execute(
-        """
-        SELECT 1 FROM lexicon_trash
-        WHERE normalization_version=? AND normalized_surface_form=? AND status='active'
-        LIMIT 1
-        """,
+def _blacklist(connection: sqlite3.Connection, blacklist_id: str) -> sqlite3.Row:
+    row = connection.execute(
+        "SELECT * FROM lexicon_blacklist WHERE blacklist_id=?", (blacklist_id,)
+    ).fetchone()
+    if row is None:
+        raise IntegrityError(f"unknown active Project Blacklist item: {blacklist_id}")
+    return cast(sqlite3.Row, row)
+
+
+def _candidate_id_for_normalized(
+    connection: sqlite3.Connection, normalized: str
+) -> str | None:
+    row = connection.execute(
+        "SELECT candidate_id FROM term_candidates WHERE normalization_version=? "
+        "AND normalized_surface_form=?",
         (LEXICON_NORMALIZATION_VERSION, normalized),
-    ).fetchone() is not None:
-        result.append("trash")
-    return tuple(result)
+    ).fetchone()
+    return None if row is None else str(row["candidate_id"])
 
 
 def _has_blacklist(connection: sqlite3.Connection, normalized: str) -> bool:
@@ -857,50 +899,101 @@ def _has_blacklist(connection: sqlite3.Connection, normalized: str) -> bool:
     )
 
 
-def _resolve_suppression_conflict(
+def _resolve_blacklist_conflict(
     connection: sqlite3.Connection,
     normalized: str,
-    policy: SuppressionPolicy,
+    policy: BlacklistPolicy,
 ) -> bool:
-    if policy not in {"prompt", "remove_and_add", "keep_and_add", "cancel"}:
-        raise ContractError("invalid suppression conflict policy")
-    conflicts = _suppression_kinds(connection, normalized)
-    if not conflicts:
+    if policy not in {"prompt", "unblock_and_add", "cancel"}:
+        raise ContractError("invalid Project Blacklist conflict policy")
+    row = connection.execute(
+        "SELECT * FROM lexicon_blacklist WHERE normalization_version=? "
+        "AND normalized_surface_form=?",
+        (LEXICON_NORMALIZATION_VERSION, normalized),
+    ).fetchone()
+    if row is None:
         return True
     if policy == "prompt":
-        raise SuppressionConflictError(normalized, conflicts)
+        raise SuppressionConflictError(normalized, ("blacklist",))
     if policy == "cancel":
         return False
-    if policy == "remove_and_add":
-        connection.execute(
-            "DELETE FROM lexicon_blacklist WHERE normalization_version=? "
-            "AND normalized_surface_form=?",
-            (LEXICON_NORMALIZATION_VERSION, normalized),
-        )
-        connection.execute(
-            "UPDATE lexicon_trash SET status='restored', restored_at=? "
-            "WHERE normalization_version=? AND normalized_surface_form=? "
-            "AND status='active'",
-            (utc_now(), LEXICON_NORMALIZATION_VERSION, normalized),
-        )
+    candidate_id = _candidate_id_for_normalized(connection, normalized)
+    _record_decision(
+        connection,
+        candidate_id,
+        "blacklist_unblock_for_add",
+        {
+            "blacklist_id": row["blacklist_id"],
+            "surface_form": row["surface_form"],
+        },
+    )
+    connection.execute(
+        "DELETE FROM lexicon_blacklist WHERE blacklist_id=?",
+        (row["blacklist_id"],),
+    )
     return True
 
 
-def _purge_expired_trash(connection: sqlite3.Connection) -> int:
+def _candidate_block_kind(action: CandidateAction) -> BlacklistKind | None:
+    if action == "block_temporary":
+        return "temporary"
+    if action == "block_permanent":
+        return "permanent"
+    return None
+
+
+def _validate_blacklist_duration(kind: BlacklistKind | None, days: int | None) -> None:
+    if kind is None:
+        if days is not None:
+            raise ContractError("blacklist days are only valid for a temporary block")
+        return
+    if kind == "temporary":
+        if days not in BLACKLIST_DURATION_DAYS:
+            allowed = ", ".join(str(value) for value in BLACKLIST_DURATION_DAYS)
+            raise ContractError(f"temporary Project Blacklist days must be one of {allowed}")
+        return
+    if kind == "permanent":
+        if days is not None:
+            raise ContractError("permanent Project Blacklist items cannot have days")
+        return
+    raise ContractError("invalid Project Blacklist kind")
+
+
+def _blacklist_expiration(kind: BlacklistKind, days: int | None) -> str | None:
+    _validate_blacklist_duration(kind, days)
+    if kind == "permanent":
+        return None
+    assert days is not None
+    return (
+        datetime.now(timezone.utc) + timedelta(days=days)
+    ).isoformat().replace("+00:00", "Z")
+
+
+def _expire_temporary_blacklist(connection: sqlite3.Connection) -> int:
     now = utc_now()
-    row = connection.execute(
-        "SELECT COUNT(*) FROM lexicon_trash WHERE status='active' "
-        "AND expires_at IS NOT NULL AND expires_at<=?",
+    rows = connection.execute(
+        "SELECT * FROM lexicon_blacklist WHERE kind='temporary' AND expires_at<=?",
         (now,),
-    ).fetchone()
-    assert row is not None
-    count = int(row[0])
+    ).fetchall()
+    for row in rows:
+        candidate_id = _candidate_id_for_normalized(
+            connection, str(row["normalized_surface_form"])
+        )
+        _record_decision(
+            connection,
+            candidate_id,
+            "blacklist_expire",
+            {
+                "blacklist_id": row["blacklist_id"],
+                "surface_form": row["surface_form"],
+                "expires_at": row["expires_at"],
+            },
+        )
     connection.execute(
-        "DELETE FROM lexicon_trash WHERE status='active' "
-        "AND expires_at IS NOT NULL AND expires_at<=?",
+        "DELETE FROM lexicon_blacklist WHERE kind='temporary' AND expires_at<=?",
         (now,),
     )
-    return count
+    return len(rows)
 
 
 def _publish_project_lexicon_revision(

@@ -186,6 +186,11 @@ def test_lexicon_artifact_payloads_validate_provenance_and_exact_identity() -> N
         ],
     }
     validate_term_candidate_set_payload(candidate_payload)
+    candidate_payload["candidates"][0]["candidate_id"] = None
+    candidate_payload["candidates"][0]["disposition"] = "suppressed_trash"
+    validate_term_candidate_set_payload(candidate_payload)
+    candidate_payload["candidates"][0]["candidate_id"] = "cand_1"
+    candidate_payload["candidates"][0]["disposition"] = "suggested"
     candidate_payload["candidates"][0]["occurrences"][0]["end_offset"] = 4
     with pytest.raises(ContractError, match="interval"):
         validate_term_candidate_set_payload(candidate_payload)

@@ -13,19 +13,20 @@ from cueflow.errors import (
     SuppressionConflictError,
 )
 from cueflow.lexicon import (
+    BLACKLIST_DURATION_DAYS,
+    BlacklistKind,
     add_blacklist,
     add_entry,
-    delete_entry,
+    block_entry,
     edit_entry,
     list_blacklist,
     list_entries,
     list_suggestions,
-    list_trash,
-    remove_blacklist,
-    restore_trash,
+    remove_entry,
     review_candidate,
     set_entry_enabled,
-    set_trash_retention,
+    unblock_blacklist,
+    update_blacklist,
 )
 from cueflow.lexicon_orchestrator import retry_suggestion_work_item, suggestion_status
 from cueflow.lexicon_packs import OfficialPackStore
@@ -43,6 +44,7 @@ from cueflow.reference_orchestrator import (
     reference_status,
     retry_reference_work_item,
 )
+from cueflow.registry import migrate_registry
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,6 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
     init = commands.add_parser("init", help="create a CueFlow project")
     init.add_argument("project_dir", type=Path)
     init.add_argument("--name", required=True)
+
+    migrate = commands.add_parser("migrate", help="explicitly migrate a CueFlow project")
+    migrate.add_argument("project_dir", type=Path)
 
     glossary = commands.add_parser("glossary", help="manage the project glossary")
     glossary_commands = glossary.add_subparsers(dest="glossary_command", required=True)
@@ -130,12 +135,20 @@ def build_parser() -> argparse.ArgumentParser:
     suggestions_retry.add_argument("project_dir", type=Path)
     suggestions_retry.add_argument("work_item_id")
     suggestions_review = suggestion_commands.add_parser(
-        "review", help="accept, edit, reject, or blacklist a Suggested Term"
+        "review", help="accept, edit, dismiss, or block a Suggested Term"
     )
     suggestions_review.add_argument("project_dir", type=Path)
     suggestions_review.add_argument("candidate_id")
     suggestions_review.add_argument(
-        "--action", required=True, choices=("accept", "edit_accept", "reject", "blacklist")
+        "--action",
+        required=True,
+        choices=(
+            "accept",
+            "edit_accept",
+            "dismiss",
+            "block_temporary",
+            "block_permanent",
+        ),
     )
     suggestions_review.add_argument("--expected-revision", required=True, type=int)
     suggestions_review.add_argument("--term", dest="edited_term")
@@ -143,13 +156,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--category", choices=("proper_noun", "noun_or_term", "verb", "other")
     )
     suggestions_review.add_argument("--proper-noun-subtype")
-    _add_suppression_policy(suggestions_review)
+    suggestions_review.add_argument("--days", type=int, choices=BLACKLIST_DURATION_DAYS)
+    _add_blacklist_policy(suggestions_review)
 
     entry = lexicon_commands.add_parser("entry", help="manage the Project Lexicon")
     entry_commands = entry.add_subparsers(dest="entry_command", required=True)
     entry_list = entry_commands.add_parser("list", help="list Project Lexicon entries")
     entry_list.add_argument("project_dir", type=Path)
-    entry_list.add_argument("--include-deleted", action="store_true")
+    entry_list.add_argument("--include-removed", action="store_true")
     entry_add = entry_commands.add_parser("add", help="add a Project Lexicon entry")
     entry_add.add_argument("project_dir", type=Path)
     entry_add.add_argument("term")
@@ -157,7 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--category", required=True, choices=("proper_noun", "noun_or_term", "verb", "other")
     )
     entry_add.add_argument("--proper-noun-subtype")
-    _add_suppression_policy(entry_add)
+    _add_blacklist_policy(entry_add)
     entry_edit = entry_commands.add_parser("edit", help="edit a Project Lexicon entry")
     entry_edit.add_argument("project_dir", type=Path)
     entry_edit.add_argument("entry_id")
@@ -167,23 +181,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     entry_edit.add_argument("--proper-noun-subtype")
     entry_edit.add_argument("--expected-revision", required=True, type=int)
-    _add_suppression_policy(entry_edit)
-    for command_name in ("enable", "disable", "delete"):
+    _add_blacklist_policy(entry_edit)
+    for command_name in ("enable", "disable", "remove"):
         command = entry_commands.add_parser(command_name)
         command.add_argument("project_dir", type=Path)
         command.add_argument("entry_id")
         command.add_argument("--expected-revision", required=True, type=int)
 
-    trash = lexicon_commands.add_parser("trash", help="manage Project Lexicon Trash")
-    trash_commands = trash.add_subparsers(dest="trash_command", required=True)
-    trash_list = trash_commands.add_parser("list")
-    trash_list.add_argument("project_dir", type=Path)
-    trash_restore = trash_commands.add_parser("restore")
-    trash_restore.add_argument("project_dir", type=Path)
-    trash_restore.add_argument("trash_id")
-    trash_retention = trash_commands.add_parser("retention")
-    trash_retention.add_argument("project_dir", type=Path)
-    trash_retention.add_argument("days", choices=("15", "30", "60", "120", "never"))
+    entry_block = entry_commands.add_parser(
+        "block", help="remove and block a Project Lexicon entry atomically"
+    )
+    entry_block.add_argument("project_dir", type=Path)
+    entry_block.add_argument("entry_id")
+    entry_block.add_argument("--expected-revision", required=True, type=int)
+    _add_blacklist_kind(entry_block)
 
     blacklist = lexicon_commands.add_parser(
         "blacklist", help="suppress exact Reference suggestions"
@@ -191,12 +202,22 @@ def build_parser() -> argparse.ArgumentParser:
     blacklist_commands = blacklist.add_subparsers(dest="blacklist_command", required=True)
     blacklist_list = blacklist_commands.add_parser("list")
     blacklist_list.add_argument("project_dir", type=Path)
+    blacklist_list.add_argument(
+        "--kind", choices=("all", "temporary", "permanent"), default="all"
+    )
     blacklist_add = blacklist_commands.add_parser("add")
     blacklist_add.add_argument("project_dir", type=Path)
     blacklist_add.add_argument("term")
-    blacklist_remove = blacklist_commands.add_parser("remove")
-    blacklist_remove.add_argument("project_dir", type=Path)
-    blacklist_remove.add_argument("blacklist_id")
+    _add_blacklist_kind(blacklist_add)
+    blacklist_update = blacklist_commands.add_parser("update")
+    blacklist_update.add_argument("project_dir", type=Path)
+    blacklist_update.add_argument("blacklist_id")
+    blacklist_update.add_argument("--expected-revision", required=True, type=int)
+    _add_blacklist_kind(blacklist_update)
+    blacklist_unblock = blacklist_commands.add_parser("unblock")
+    blacklist_unblock.add_argument("project_dir", type=Path)
+    blacklist_unblock.add_argument("blacklist_id")
+    blacklist_unblock.add_argument("--expected-revision", required=True, type=int)
 
     pack = lexicon_commands.add_parser("pack", help="manage shared Official Lexicon Packs")
     pack_commands = pack.add_subparsers(dest="pack_command", required=True)
@@ -219,12 +240,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_suppression_policy(parser: argparse.ArgumentParser) -> None:
+def _add_blacklist_policy(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--suppression-policy",
+        "--blacklist-policy",
         default="prompt",
-        choices=("prompt", "remove_and_add", "keep_and_add", "cancel"),
+        choices=("prompt", "unblock_and_add", "cancel"),
     )
+
+
+def _add_blacklist_kind(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--temporary", type=int, choices=BLACKLIST_DURATION_DAYS)
+    group.add_argument("--permanent", action="store_true")
+
+
+def _blacklist_kind(args: argparse.Namespace) -> tuple[BlacklistKind, int | None]:
+    if args.permanent:
+        return "permanent", None
+    return "temporary", int(args.temporary)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -256,6 +289,9 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             }
         finally:
             context.close()
+    if args.command == "migrate":
+        result = migrate_registry(args.project_dir / ".cueflow" / "registry.sqlite3")
+        return {**result, "project_dir": str(args.project_dir.resolve())}
     if args.command == "lexicon" and args.lexicon_command == "pack":
         return _dispatch_pack(args, OfficialPackStore())
     context = ProjectContext.open(args.project_dir)
@@ -327,13 +363,14 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                         edited_category=args.category,
                         edited_subtype=args.proper_noun_subtype,
                         expected_revision=args.expected_revision,
-                        suppression_policy=args.suppression_policy,
+                        blacklist_days=args.days,
+                        blacklist_policy=args.blacklist_policy,
                     )
             if args.lexicon_command == "entry":
                 if args.entry_command == "list":
                     return {
                         "entries": list_entries(
-                            context, include_deleted=args.include_deleted
+                            context, include_removed=args.include_removed
                         )
                     }
                 if args.entry_command == "add":
@@ -342,7 +379,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                         args.term,
                         category=args.category,
                         proper_noun_subtype=args.proper_noun_subtype,
-                        suppression_policy=args.suppression_policy,
+                        blacklist_policy=args.blacklist_policy,
                     )
                 if args.entry_command == "edit":
                     return edit_entry(
@@ -352,7 +389,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                         category=args.category,
                         proper_noun_subtype=args.proper_noun_subtype,
                         expected_revision=args.expected_revision,
-                        suppression_policy=args.suppression_policy,
+                        blacklist_policy=args.blacklist_policy,
                     )
                 if args.entry_command in {"enable", "disable"}:
                     return set_entry_enabled(
@@ -361,27 +398,42 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                         enabled=args.entry_command == "enable",
                         expected_revision=args.expected_revision,
                     )
-                if args.entry_command == "delete":
-                    return delete_entry(
+                if args.entry_command == "remove":
+                    return remove_entry(
                         context,
                         args.entry_id,
                         expected_revision=args.expected_revision,
                     )
-            if args.lexicon_command == "trash":
-                if args.trash_command == "list":
-                    return {"trash": list_trash(context)}
-                if args.trash_command == "restore":
-                    return restore_trash(context, args.trash_id)
-                if args.trash_command == "retention":
-                    days = None if args.days == "never" else int(args.days)
-                    return set_trash_retention(context, days)
+                if args.entry_command == "block":
+                    kind, days = _blacklist_kind(args)
+                    return block_entry(
+                        context,
+                        args.entry_id,
+                        kind=kind,
+                        days=days,
+                        expected_revision=args.expected_revision,
+                    )
             if args.lexicon_command == "blacklist":
                 if args.blacklist_command == "list":
-                    return {"blacklist": list_blacklist(context)}
+                    return {"blacklist": list_blacklist(context, kind=args.kind)}
                 if args.blacklist_command == "add":
-                    return add_blacklist(context, args.term)
-                if args.blacklist_command == "remove":
-                    return remove_blacklist(context, args.blacklist_id)
+                    kind, days = _blacklist_kind(args)
+                    return add_blacklist(context, args.term, kind=kind, days=days)
+                if args.blacklist_command == "update":
+                    kind, days = _blacklist_kind(args)
+                    return update_blacklist(
+                        context,
+                        args.blacklist_id,
+                        kind=kind,
+                        days=days,
+                        expected_revision=args.expected_revision,
+                    )
+                if args.blacklist_command == "unblock":
+                    return unblock_blacklist(
+                        context,
+                        args.blacklist_id,
+                        expected_revision=args.expected_revision,
+                    )
         raise CueFlowError("unsupported CLI command")
     except KeyboardInterrupt as exc:
         raise _CliFailure(
@@ -577,7 +629,7 @@ def _generic_failure_payload(exc: BaseException) -> MappingLike:
     if isinstance(exc, SuppressionConflictError):
         payload["normalized_surface_form"] = exc.normalized_surface_form
         payload["conflicts"] = list(exc.conflicts)
-        payload["choices"] = ["remove_and_add", "keep_and_add", "cancel"]
+        payload["choices"] = ["unblock_and_add", "cancel"]
     return payload
 
 

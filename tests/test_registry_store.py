@@ -14,7 +14,12 @@ from cueflow.glossary import glossary_payload
 from cueflow.orchestrator import initialize_project, project_status, set_project_glossary
 from cueflow.project import ProjectContext
 from cueflow.providers import AlignmentToken
-from cueflow.registry import REGISTRY_SCHEMA_VERSION, Registry
+from cueflow.registry import (
+    LEGACY_REGISTRY_SCHEMA_VERSION,
+    REGISTRY_SCHEMA_VERSION,
+    Registry,
+    migrate_registry,
+)
 from cueflow.schema import ArtifactEnvelope, InputRef, Producer
 
 
@@ -39,6 +44,149 @@ def publish_glossary(project: ProjectContext, terms: list[str]) -> ArtifactEnvel
     return project.publisher.publish(envelope)
 
 
+def _v4_registry_fixture(project_root: Path) -> Path:
+    context = ProjectContext.create(project_root, "Legacy Lexicon")
+    database = context.registry.path
+    context.close()
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute("DROP TABLE lexicon_blacklist")
+        connection.execute(
+            """
+            CREATE TABLE lexicon_blacklist (
+                blacklist_id TEXT PRIMARY KEY,
+                normalization_version TEXT NOT NULL,
+                normalized_surface_form TEXT NOT NULL COLLATE BINARY,
+                surface_form TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (normalization_version, normalized_surface_form)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE lexicon_trash (
+                trash_id TEXT PRIMARY KEY,
+                object_kind TEXT NOT NULL CHECK (object_kind IN ('candidate','entry')),
+                object_id TEXT NOT NULL,
+                normalization_version TEXT NOT NULL,
+                normalized_surface_form TEXT NOT NULL COLLATE BINARY,
+                restore_payload_json TEXT NOT NULL,
+                deleted_at TEXT NOT NULL,
+                expires_at TEXT,
+                status TEXT NOT NULL CHECK (status IN ('active','restored','expired')),
+                restored_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX lexicon_trash_active_term "
+            "ON lexicon_trash(normalization_version, normalized_surface_form, status)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE lexicon_settings (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                trash_retention_days INTEGER
+                    CHECK (trash_retention_days IS NULL
+                           OR trash_retention_days IN (15,30,60,120)),
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        now = "2026-08-28T00:00:00Z"
+        candidates = (
+            ("cand_active", "Active", "Active", "blacklisted"),
+            ("cand_temp", "CandidateTemp", "CandidateTemp", "rejected"),
+            ("cand_latest", "CandidateLatest", "CandidateLatest", "rejected"),
+            ("cand_expired", "CandidateExpired", "CandidateExpired", "rejected"),
+        )
+        connection.executemany(
+            """
+            INSERT INTO term_candidates
+            (candidate_id, normalization_version, normalized_surface_form,
+             display_term, display_category, proper_noun_subtype, status,
+             revision, created_at, updated_at)
+            VALUES (?, '0.1.0', ?, ?, 'noun_or_term', NULL, ?, 1, ?, ?)
+            """,
+            [(*row, now, now) for row in candidates],
+        )
+        connection.executemany(
+            """
+            INSERT INTO project_lexicon_entries
+            (entry_id, term, normalization_version, normalized_surface_form,
+             category, proper_noun_subtype, source_candidate_id, enabled,
+             status, revision, created_at, updated_at)
+            VALUES (?, ?, '0.1.0', ?, 'noun_or_term', NULL, ?, 1, ?, 1, ?, ?)
+            """,
+            (
+                ("lex_active", "Active", "Active", "cand_active", "active", now, now),
+                ("lex_never", "EntryNever", "EntryNever", None, "deleted", now, now),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO lexicon_blacklist VALUES "
+            "('black_active', '0.1.0', 'Active', 'Active', ?)",
+            (now,),
+        )
+        connection.executemany(
+            """
+            INSERT INTO lexicon_trash
+            (trash_id, object_kind, object_id, normalization_version,
+             normalized_surface_form, restore_payload_json, deleted_at,
+             expires_at, status, restored_at)
+            VALUES (?, ?, ?, '0.1.0', ?, '{}', ?, ?, 'active', NULL)
+            """,
+            (
+                (
+                    "trash_temp",
+                    "candidate",
+                    "cand_temp",
+                    "CandidateTemp",
+                    now,
+                    "2099-01-01T00:00:00Z",
+                ),
+                ("trash_never", "entry", "lex_never", "EntryNever", now, None),
+                (
+                    "trash_temp_never",
+                    "candidate",
+                    "cand_temp",
+                    "CandidateTemp",
+                    now,
+                    None,
+                ),
+                (
+                    "trash_latest_early",
+                    "candidate",
+                    "cand_latest",
+                    "CandidateLatest",
+                    now,
+                    "2040-01-01T00:00:00Z",
+                ),
+                (
+                    "trash_latest_late",
+                    "candidate",
+                    "cand_latest",
+                    "CandidateLatest",
+                    now,
+                    "2050-01-01T00:00:00Z",
+                ),
+                (
+                    "trash_expired",
+                    "candidate",
+                    "cand_expired",
+                    "CandidateExpired",
+                    now,
+                    "2000-01-01T00:00:00Z",
+                ),
+            ),
+        )
+        connection.execute("INSERT INTO lexicon_settings VALUES (1, 30, ?)", (now,))
+        connection.execute(f"PRAGMA user_version = {LEGACY_REGISTRY_SCHEMA_VERSION}")
+    return database
+
+
 @pytest.mark.parametrize("version", [0, 1, 2, 99])
 def test_incompatible_registry_is_rejected_without_writes(tmp_path: Path, version: int) -> None:
     database = tmp_path / "incompatible.sqlite3"
@@ -50,6 +198,104 @@ def test_incompatible_registry_is_rejected_without_writes(tmp_path: Path, versio
     with pytest.raises(IntegrityError, match="incompatible CueFlow registry schema version"):
         Registry(database)
     assert database.read_bytes() == before
+
+
+def test_explicit_v4_to_v5_migration_preserves_suppression_and_exclusivity(
+    tmp_path: Path,
+) -> None:
+    database = _v4_registry_fixture(tmp_path / "project")
+    with pytest.raises(IntegrityError, match="cueflow migrate"):
+        ProjectContext.open(tmp_path / "project")
+
+    result = migrate_registry(database)
+    assert result == {
+        "status": "migrated",
+        "from_version": 4,
+        "to_version": 5,
+        "blacklist_rules": 3,
+        "glossary_conflicts_resolved": 1,
+    }
+    assert migrate_registry(database)["status"] == "already_current"
+
+    context = ProjectContext.open(tmp_path / "project")
+    try:
+        connection = context.registry._connection
+        version = connection.execute("PRAGMA user_version").fetchone()
+        assert version is not None and version[0] == REGISTRY_SCHEMA_VERSION
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "lexicon_trash" not in tables
+        assert "lexicon_settings" not in tables
+        rules = connection.execute(
+            "SELECT normalized_surface_form, kind, expires_at "
+            "FROM lexicon_blacklist ORDER BY normalized_surface_form"
+        ).fetchall()
+        assert [tuple(row) for row in rules] == [
+            ("CandidateLatest", "temporary", "2050-01-01T00:00:00Z"),
+            ("CandidateTemp", "permanent", None),
+            ("EntryNever", "permanent", None),
+        ]
+        statuses = {
+            row["normalized_surface_form"]: row["status"]
+            for row in connection.execute("SELECT * FROM term_candidates").fetchall()
+        }
+        assert statuses == {
+            "Active": "accepted",
+            "CandidateExpired": "dismissed",
+            "CandidateLatest": "blacklisted",
+            "CandidateTemp": "blacklisted",
+        }
+        entries = {
+            row["normalized_surface_form"]: row["status"]
+            for row in connection.execute("SELECT * FROM project_lexicon_entries").fetchall()
+        }
+        assert entries == {"Active": "active", "EntryNever": "removed"}
+        audit = connection.execute(
+            "SELECT action FROM candidate_decisions "
+            "WHERE action='migration_suppression_removed_for_active_entry'"
+        ).fetchall()
+        assert len(audit) == 1
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        context.close()
+
+
+def test_v4_to_v5_migration_rolls_back_on_foreign_key_failure(tmp_path: Path) -> None:
+    database = _v4_registry_fixture(tmp_path / "project")
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute(
+            """
+            INSERT INTO term_occurrences
+            (occurrence_id, candidate_id, evidence_artifact_id, reference_role,
+             raw_surface_form, suggested_surface_form, proposed_category,
+             proper_noun_subtype, risk_tags_json, field_path_json, start_offset,
+             end_offset, context_before, context_after, coordinates_json, created_at)
+            VALUES ('occ_bad', 'missing', 'evidence', 'document_text', 'bad', NULL,
+                    'noun_or_term', NULL, '[]', '["content"]', 0, 3, '', '', NULL,
+                    '2026-08-28T00:00:00Z')
+            """
+        )
+
+    with pytest.raises(IntegrityError, match="foreign-key validation"):
+        migrate_registry(database)
+
+    with sqlite3.connect(database) as connection:
+        version = connection.execute("PRAGMA user_version").fetchone()
+        assert version == (LEGACY_REGISTRY_SCHEMA_VERSION,)
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "lexicon_trash" in tables
+        assert "lexicon_settings" in tables
+        assert not any(name.endswith("_v5") for name in tables)
 
 
 @pytest.mark.parametrize("table", ["projects", "source_assets", "reference_assets"])
