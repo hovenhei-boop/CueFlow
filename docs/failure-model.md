@@ -1,4 +1,4 @@
-# CueFlow v0.5.0 Failure Model
+# CueFlow v0.5.1 Failure Model
 
 ## 1. 原则
 

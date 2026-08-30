@@ -1,4 +1,4 @@
-# CueFlow v0.5.0 Schema Contracts
+# CueFlow v0.5.1 Schema Contracts
 
 ## 1. Envelope 与哈希
 

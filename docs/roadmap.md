@@ -1,6 +1,6 @@
 # CueFlow Roadmap
 
-## v0.5.0 当前能力
+## v0.5.1 当前能力
 
 Source 主链提供本地媒体准备、远端语义转写与纠错、本地 Forced Alignment、字幕切分、QA 和 SRT 导出。
 
@@ -8,7 +8,7 @@ Reference 旁路提供登记/relocate、确定性文档和字幕提取、远端 
 
 ## 待独立设计
 
-Project Lexicon/Official Packs 对 Source 的实际消费、相关性检索与容量预算、不可变 Effective Glossary Snapshot、证据融合、PPT/板书/屏幕画面补充抽取和 UI 均不在当前实现内。v0.5.0 不允许新词库状态改变现有 Effective Glossary、Source stale 状态或 SRT。
+Project Lexicon/Official Packs 对 Source 的实际消费、相关性检索与容量预算、不可变 Effective Glossary Snapshot、证据融合、PPT/板书/屏幕画面补充抽取和 UI 均不在当前实现内。v0.5.1 不允许新词库状态改变现有 Effective Glossary、Source stale 状态或 SRT。
 
 Forced Aligner 的部署与依赖策略需另行实验和批准；当前使用本地实现。
 

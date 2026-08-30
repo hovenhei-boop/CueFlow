@@ -192,6 +192,7 @@ class CloudOmniSemanticTranscriber:
                 stream=True,
                 stream_options={"include_usage": True},
                 temperature=0,
+                response_format={"type": "json_object"},
             )
             response_text, response_id = collect_cloud_text_stream(response)
         except Exception as exc:

@@ -1,6 +1,6 @@
 # CueFlow
 
-CueFlow v0.5.0 是面向已剪辑完成媒体的项目式字幕生成与检查引擎。Source 主链为 Media Prep → 远端语义转写与纠错 → 本地 Forced Alignment → Subtitle → QA → SRT。独立的 Reference 旁路通过确定性提取或远端 ASR、Vision、Document Parse 生成带 provenance 的 Evidence，并自动生成等待人工处理的 Suggested Terms。Project Lexicon 与全局 Official Packs 在本版不进入 Source Transcript、Effective Glossary、Alignment 或 SRT。
+CueFlow v0.5.1 是面向已剪辑完成媒体的项目式字幕生成与检查引擎。Source 主链为 Media Prep → 远端语义转写与纠错 → 本地 Forced Alignment → Subtitle → QA → SRT。独立的 Reference 旁路通过确定性提取或远端 ASR、Vision、Document Parse 生成带 provenance 的 Evidence，并自动生成等待人工处理的 Suggested Terms。Project Lexicon 与全局 Official Packs 在本版不进入 Source Transcript、Effective Glossary、Alignment 或 SRT。
 
 ## 安装
 

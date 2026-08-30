@@ -7,9 +7,9 @@ from typing import Any
 import pytest
 
 from cueflow.config import CLOUD_MODEL
-from cueflow.errors import ProviderUnavailableError
+from cueflow.errors import ContractError, ProviderUnavailableError
 from cueflow.orchestrator import _default_semantic_factory
-from cueflow.providers import CloudOmniSemanticTranscriber
+from cueflow.providers import CloudOmniSemanticTranscriber, parse_cloud_semantic_response
 
 
 class FakeCompletions:
@@ -66,6 +66,7 @@ def test_cloud_semantic_uses_streaming_audio_data_url_and_glossary(
     assert completions.kwargs["model"] == CLOUD_MODEL
     assert completions.kwargs["stream"] is True
     assert completions.kwargs["modalities"] == ["text"]
+    assert completions.kwargs["response_format"] == {"type": "json_object"}
     content = completions.kwargs["messages"][0]["content"]
     assert content[0]["input_audio"]["data"].startswith("data:audio/wav;base64,")
     assert "顾华玺" in content[1]["text"]
@@ -83,3 +84,28 @@ def test_cloud_semantic_requires_environment_before_send(
         CloudOmniSemanticTranscriber(_factory(FakeCompletions(["unused"]))).transcribe(
             audio, []
         )
+
+
+@pytest.mark.parametrize(
+    ("response_text", "error_match"),
+    [
+        (
+            '```json\n{"source_text":"完整逐字","language":"Chinese"}\n```',
+            "strict JSON",
+        ),
+        (
+            '{"source_text":"完整逐字","language":"Chinese","extra":true}',
+            "may only contain source_text and language",
+        ),
+        ('{"source_text":"  ","language":"Chinese"}', "empty transcript text"),
+        (
+            '{"source_text":"完整逐字","language":"Esperanto"}',
+            "unsupported alignment language",
+        ),
+    ],
+)
+def test_cloud_semantic_response_keeps_strict_contract(
+    response_text: str, error_match: str
+) -> None:
+    with pytest.raises(ContractError, match=error_match):
+        parse_cloud_semantic_response(response_text)

@@ -1,4 +1,4 @@
-# CueFlow v0.5.0 Architecture
+# CueFlow v0.5.1 Architecture
 
 ## 1. 产品边界
 
@@ -17,7 +17,7 @@ Source Media
 → output/subtitles.srt
 ```
 
-目标是忠实转写、精确时间轴、纠错和导出。独立的 Reference 路径为 `Reference Material → deterministic extraction / optional Reference ASR, Vision, Cloud Document Parse → Reference Evidence → automatic terminology discovery → Suggested Terms → human review → Project Lexicon`。该旁路不创建或修改 Source Transcript、Effective Glossary、Alignment、Subtitle、QA 或 SRT；v0.5.0 不增加 UI。
+目标是忠实转写、精确时间轴、纠错和导出。独立的 Reference 路径为 `Reference Material → deterministic extraction / optional Reference ASR, Vision, Cloud Document Parse → Reference Evidence → automatic terminology discovery → Suggested Terms → human review → Project Lexicon`。该旁路不创建或修改 Source Transcript、Effective Glossary、Alignment、Subtitle、QA 或 SRT；v0.5.1 不增加 UI。
 
 ## 2. 核心不变量
 
@@ -67,7 +67,7 @@ ChunkPlan 使用版本化 Chunker Config。默认目标为 180 秒、硬上限 2
 
 ## 4. Semantic Transcription
 
-Semantic Provider 使用 `qwen3.5-omni-plus-2026-03-15` 的 OpenAI-compatible API，凭据和地域 endpoint 从环境变量读取。Transcription Stage 创建一个 Semantic Provider，顺序处理所有需要工作的 Chunk 及其全部 Attempt，最后关闭一次。阶段无工作时不得创建 Provider。
+Semantic Provider 使用 `qwen3.5-omni-plus-2026-03-15` 的 OpenAI-compatible API，凭据和地域 endpoint 从环境变量读取。请求使用 `response_format={"type": "json_object"}` 约束返回合法 JSON；`parse_cloud_semantic_response` 继续严格校验字段集合、正文与 Alignment language，非法契约仍明确失败。Transcription Stage 创建一个 Semantic Provider，顺序处理所有需要工作的 Chunk 及其全部 Attempt，最后关闭一次。阶段无工作时不得创建 Provider。
 
 一个新 Run 中，每 Chunk 初始最多 4 个 Semantic Attempt；该上限属于版本化 QA Ruleset 的运行规则。每个成功 Attempt 创建 Transcript Artifact、Invocation 和 exact input bindings。每产生一个返工 Attempt，都对该 Attempt 的完整 Chunk 文本重新执行 conflict scan，下一轮只以当前实际 conflict 驱动局部返工。Glossary 稳定闭环只使用冻结规则：
 
