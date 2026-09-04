@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import csv
 import json
-import math
 import os
 import subprocess
-import sys
 import tempfile
 import wave
-from array import array
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
@@ -17,7 +14,13 @@ from pathlib import Path
 from typing import Any, cast
 
 from cueflow.canonical import hash_json
-from cueflow.config import COMPONENT_VERSION, ChunkerConfig, MediaPrepConfig, RuntimeConfig
+from cueflow.config import (
+    COMPONENT_VERSION,
+    MAX_SOURCE_BYTES,
+    MAX_SOURCE_DURATION_MS,
+    MediaPrepConfig,
+    RuntimeConfig,
+)
 from cueflow.errors import ContractError, ProviderUnavailableError
 from cueflow.project import ProjectContext
 from cueflow.schema import ArtifactEnvelope, InputRef, Producer
@@ -35,8 +38,6 @@ class ProbeResult:
 class MediaBundle:
     probe: ArtifactEnvelope
     timeline_audio: ArtifactEnvelope
-    chunk_plan: ArtifactEnvelope
-    media_chunks: tuple[ArtifactEnvelope, ...]
 
 
 def probe_source(path: Path, runtime: RuntimeConfig) -> ProbeResult:
@@ -115,15 +116,13 @@ def analyze_presentation_timeline(
     duration_ms = _sample_count_to_ms(total_samples, chosen.sample_rate_hz)
 
     frames_value = opening.get("frames")
-    frames = [
-        cast(dict[str, Any], item)
-        for item in frames_value
-        if isinstance(item, dict)
-    ] if isinstance(frames_value, list) else []
-    audio_evidence = _first_audio_sample(frames, audio)
-    media_evidence = (
-        _first_frame(frames, video) if video is not None else audio_evidence
+    frames = (
+        [cast(dict[str, Any], item) for item in frames_value if isinstance(item, dict)]
+        if isinstance(frames_value, list)
+        else []
     )
+    audio_evidence = _first_audio_sample(frames, audio)
+    media_evidence = _first_frame(frames, video) if video is not None else audio_evidence
     issues: list[str] = []
     exact_offset: Fraction | None = None
     if audio_evidence is not None and media_evidence is not None:
@@ -333,10 +332,12 @@ def prepare_media(
     if not runtime.ffmpeg:
         raise ProviderUnavailableError("ffmpeg is required for Media Prep")
     source_path = context.verify_external_asset(str(source_asset["source_asset_id"]))
+    if source_path.stat().st_size >= MAX_SOURCE_BYTES:
+        raise ContractError("source media must be smaller than 512 MB")
+    if probe.duration_ms >= MAX_SOURCE_DURATION_MS:
+        raise ContractError("source media must be shorter than 5 hours")
     media_config = MediaPrepConfig()
-    chunk_config = ChunkerConfig()
     media_producer = _producer("media", asdict(media_config))
-    chunk_producer = _producer("chunker", asdict(chunk_config))
     source_input = InputRef(
         role="source_media", source_asset_id=str(source_asset["source_asset_id"])
     )
@@ -348,7 +349,6 @@ def prepare_media(
         payload=probe.payload,
     )
     timeline_temp = _temp_path(context, ".wav")
-    chunk_temps: list[Path] = []
     try:
         render_timeline_audio(source_path, probe, timeline_temp, runtime)
         audio_hash, audio_length, _ = context.store.publish_blob(timeline_temp)
@@ -373,83 +373,43 @@ def prepare_media(
             ],
             payload=timeline_payload,
         )
-        silences = detect_silence_spans(timeline_temp, chunk_config)
-        chunks = build_chunk_plan(probe.duration_ms, silences, chunk_config)
-        chunk_plan_payload = {
-            "duration_ms": probe.duration_ms,
-            "timeline_audio_artifact_id": timeline_envelope.artifact_id,
-            "config": asdict(chunk_config),
-            "detected_silences": [
-                {"global_start_ms": start, "global_end_ms": end} for start, end in silences
-            ],
-            "chunks": chunks,
-        }
-        chunk_plan_envelope = ArtifactEnvelope.create(
-            artifact_kind="chunk_plan",
-            scope_key="global",
-            producer=chunk_producer,
-            inputs=[InputRef(role="timeline_audio", artifact_id=timeline_envelope.artifact_id)],
-            payload=chunk_plan_payload,
-        )
-        media_chunks: list[ArtifactEnvelope] = []
-        for chunk in chunks:
-            temp = _temp_path(context, ".wav")
-            chunk_temps.append(temp)
-            slice_wave(
-                timeline_temp,
-                temp,
-                int(chunk["global_start_ms"]),
-                int(chunk["global_end_ms"]),
-            )
-            chunk_hash, chunk_length, _ = context.store.publish_blob(temp)
-            payload = {
-                **chunk,
-                "timeline_audio_artifact_id": timeline_envelope.artifact_id,
-                "audio_blob": _blob(chunk_hash, chunk_length, "audio/wav"),
-            }
-            media_chunks.append(
-                ArtifactEnvelope.create(
-                    artifact_kind="media_chunk",
-                    scope_key=str(chunk["chunk_id"]),
-                    producer=chunk_producer,
-                    inputs=[
-                        InputRef(
-                            role="timeline_audio",
-                            artifact_id=timeline_envelope.artifact_id,
-                            coordinate_range={
-                                "global_start_ms": chunk["global_start_ms"],
-                                "global_end_ms": chunk["global_end_ms"],
-                            },
-                        ),
-                        InputRef(role="chunk_plan", artifact_id=chunk_plan_envelope.artifact_id),
-                    ],
-                    payload=payload,
-                )
-            )
-        complete = [probe_envelope, timeline_envelope, chunk_plan_envelope, *media_chunks]
+        complete = [probe_envelope, timeline_envelope]
         for envelope in complete:
             context.publisher.publish(envelope, make_current=False)
         context.registry.activate_artifacts(
             context.project_id,
             [item.artifact_id for item in complete],
             stale_targets=[
-                ("media_chunk", None),
                 *[
                     (kind, None)
-                    for kind in ("transcript", "alignment", "subtitle", "qa", "srt_render")
+                    for kind in (
+                        "media_object",
+                        "base_asr",
+                        "peer_asr",
+                        "asr_comparison",
+                        "acoustic_window_plan",
+                        "acoustic_window",
+                        "glm_adjudication_evidence",
+                        "acoustic_resolution",
+                        "agreement_resolution",
+                        "qwen_edit_proposal",
+                        "kimi_edit_proposal",
+                        "edit_proposal",
+                        "edit_resolution",
+                        "review_queue",
+                        "review_resolution",
+                        "transcript",
+                        "alignment",
+                        "subtitle",
+                        "qa",
+                        "srt_render",
+                    )
                 ],
             ],
         )
-        return MediaBundle(
-            probe=probe_envelope,
-            timeline_audio=timeline_envelope,
-            chunk_plan=chunk_plan_envelope,
-            media_chunks=tuple(media_chunks),
-        )
+        return MediaBundle(probe=probe_envelope, timeline_audio=timeline_envelope)
     finally:
         timeline_temp.unlink(missing_ok=True)
-        for temp in chunk_temps:
-            temp.unlink(missing_ok=True)
 
 
 def render_timeline_audio(
@@ -482,74 +442,6 @@ def render_timeline_audio(
             raise ContractError("Timeline Audio is not 16kHz mono PCM s16le")
         if wav.getnframes() != probe.total_sample_count:
             raise ContractError("Timeline Audio sample length does not match presentation duration")
-
-
-def detect_silence_spans(path: Path, config: ChunkerConfig) -> list[tuple[int, int]]:
-    window_ms = 20
-    threshold = 32767 * 10 ** (config.silence_threshold_db / 20)
-    spans: list[tuple[int, int]] = []
-    with wave.open(str(path), "rb") as wav:
-        if wav.getnchannels() != 1 or wav.getsampwidth() != 2:
-            raise ContractError("silence detection requires mono PCM s16le")
-        rate = wav.getframerate()
-        window_frames = max(1, rate * window_ms // 1000)
-        silent_start: int | None = None
-        frame_start = 0
-        while data := wav.readframes(window_frames):
-            samples = array("h")
-            samples.frombytes(data)
-            if sys.byteorder != "little":
-                samples.byteswap()
-            rms = math.sqrt(sum(sample * sample for sample in samples) / max(1, len(samples)))
-            start_ms = round(frame_start * 1000 / rate)
-            frame_start += len(samples)
-            if rms <= threshold and silent_start is None:
-                silent_start = start_ms
-            elif rms > threshold and silent_start is not None:
-                if start_ms - silent_start >= config.silence_min_duration_ms:
-                    spans.append((silent_start, start_ms))
-                silent_start = None
-        if silent_start is not None:
-            end_ms = round(frame_start * 1000 / rate)
-            if end_ms - silent_start >= config.silence_min_duration_ms:
-                spans.append((silent_start, end_ms))
-    return spans
-
-
-def build_chunk_plan(
-    duration_ms: int,
-    silence_spans: Sequence[tuple[int, int]],
-    config: ChunkerConfig | None = None,
-) -> list[dict[str, Any]]:
-    chosen = config or ChunkerConfig()
-    boundaries = [0]
-    while duration_ms - boundaries[-1] > chosen.hard_limit_ms:
-        start = boundaries[-1]
-        target = start + chosen.target_duration_ms
-        hard = min(duration_ms, start + chosen.hard_limit_ms)
-        candidates = [
-            (left + right) // 2
-            for left, right in silence_spans
-            if start < (left + right) // 2 <= hard
-        ]
-        boundary = (
-            min(candidates, key=lambda item: (abs(item - target), item))
-            if candidates
-            else hard
-        )
-        if boundary <= start:
-            raise ContractError("Chunker failed to make forward progress")
-        boundaries.append(boundary)
-    boundaries.append(duration_ms)
-    return [
-        {
-            "chunk_id": f"chunk_{index + 1:04d}",
-            "ordinal": index,
-            "global_start_ms": start,
-            "global_end_ms": end,
-        }
-        for index, (start, end) in enumerate(zip(boundaries, boundaries[1:], strict=False))
-    ]
 
 
 def slice_wave(source: Path, destination: Path, start_ms: int, end_ms: int) -> None:
@@ -612,9 +504,7 @@ def _first_audio_sample(
         if nb_samples is not None and skip_samples >= nb_samples:
             continue
         start = pts * time_base + Fraction(skip_samples, sample_rate)
-        candidates.append(
-            (start, _frame_evidence(frame, stream, pts, start, skip_samples))
-        )
+        candidates.append((start, _frame_evidence(frame, stream, pts, start, skip_samples)))
     return min(candidates, key=lambda item: item[0]) if candidates else None
 
 

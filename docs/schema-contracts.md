@@ -1,113 +1,89 @@
-# CueFlow v0.5.1 Schema Contracts
+# CueFlow v0.5.2 Schema Contracts
 
-## 1. Envelope 与哈希
+## Artifact Envelope
 
-Artifact Envelope 包含 `schema_version`、`artifact_id`、kind、scope、content hash、created time、Producer、ordered inputs 和 payload。内容哈希使用 RFC 8785 JCS UTF-8 bytes 后计算 SHA-256，覆盖 kind、scope、Schema major/minor、Producer、inputs 与 payload；不覆盖 Artifact ID、created_at 或路径。只接受当前 Schema 版本，其他版本的 payload 不得解释。Producer 恰好包含 `component`、`component_version`、`provider`、`model`、`config_hash`；缺字段或额外字段均拒绝。
+当前 `schema_version = 7.0.0`。Envelope 包含 kind、scope、Producer、ordered inputs、payload、
+RFC 8785 + SHA-256 content identity 和创建时间。哈希不包含创建时间或路径。只解释当前精确
+Schema；旧版本 fail closed。
 
-合法 Artifact kinds：`media_probe`、`timeline_audio`、`chunk_plan`、`media_chunk`、`system_glossary`、`project_glossary`、`effective_glossary`、`transcript`、`alignment`、`subtitle`、`qa`、`srt_render`、`reference_input`、`reference_evidence`、`reference_bundle`、`lexicon_input`、`term_candidate_set`、`project_lexicon`。当前 Artifact Schema 为 `4.0.0`。
+合法 Artifact kind：
 
-## 2. SourceAsset
-
-SourceAsset 必须包含 `source_asset_id`、精确 filename、asset/media kind、format、`storage_mode = external_reference`、绝对 storage locator 和 registration time。`(project_id, filename)` 唯一，Source identity 只取 filename；Source 不包含内容 hash 或 byte length。Media Prep 前 locator 必须存在、是普通文件且可读取，但不比较外部内容。
-
-## 3. 时间与 MediaProbe
-
-Transcript、Alignment、Subtitle 和 Chunk 的 Core 时间使用整数毫秒半开区间 `[start_ms, end_ms)`。MediaProbe 原始 evidence 使用 integer PTS 与 rational time base，不在决策前转换为 float 或整数毫秒。
-
-Frame evidence 至少可以表达：
-
-```json
-{
-  "stream_index": 1,
-  "pts": -1024,
-  "time_base_num": 1,
-  "time_base_den": 48000,
-  "skip_samples": 1024,
-  "sample_rate_hz": 48000
-}
+```text
+job_input media_probe timeline_audio media_object
+base_asr peer_asr asr_comparison
+acoustic_window_plan acoustic_window glm_adjudication_evidence acoustic_resolution
+qwen_edit_proposal kimi_edit_proposal edit_proposal
+agreement_resolution edit_resolution review_queue review_resolution transcript
+alignment subtitle qa srt_render
 ```
 
-MediaProbe payload 至少包含 media kind、presentation duration/total samples、opening scan limit、timeline status、stream facts、presentation evidence、continuity summary、issues 和 actions。
+`acoustic_window` 与 `glm_adjudication_evidence` 使用 `window_id` scope；
+`acoustic_resolution` 使用 `disagreement_id` scope；其他全部是 `global`。没有
+whole-file `chunk_plan`、`media_chunk`、`base_asr_chunk` 或 `chunk_id`。
 
-已持久化的 stream/frame evidence 必须保持生产器结构：PTS、stream index、duration ticks 和 packet ordinal 为 integer 或契约声明的 null；time base 与 fraction 使用 integer `numerator` 和正 integer `denominator`；skip/sample/count 字段不得为负。`presentation_evidence` 固定包含 nullable `media_origin`、`audio_start`、`exact_offset`。
+## 关键 payload
 
-`continuity_check` 必须包含 `status`、非负 `packets_scanned` 和 `first_anomaly`。status 只允许 `continuous`、`discontinuous`、`unavailable`；continuous 的 anomaly 必须为 null，其他状态的 anomaly 至少包含非空 code，若存在 packet ordinal 或 expected/observed fraction，则分别遵守非负 integer 与上述 fraction 结构。Schema 只验证数据结构和基本合法性，不重新执行 offset 或 discontinuity 算法。
+`JobInput` 保存 SourceAsset ID、ordered References 和 ordered `user_keywords`。Keyword 最多
+100 个，非空且 exact unique；`pdf_url`/`image_url` 必须是 HTTPS mutable locator，`text`
+必须是 TXT/MD/CSV/JSON UTF-8 正文快照。
 
-Origin action 必须恰好一个：
+`MediaObject` 保存稳定 TOS object identity 和内容 hash；`get_url` 字段被 schema 明确拒绝。
 
-- `timeline_origin_unchanged`，不得带 sample count；
-- `pad_silence_before`，`sample_count > 0`；
-- `trim_before_timeline`，`sample_count > 0`；
-- `timeline_origin_unverified`，不得带 sample count。
+`BaseAsr`/`PeerAsr` 保存完整 text、timed units、UserKeywords 和 Provider metadata。
+`AsrComparison` 保存两份 ASR ID 和机械 hunks，不携带触发 GLM 的字段。
+`AcousticWindowPlan` 绑定 agreement、Base 和 TimelineAudio，windows/unavailable 必须恰好
+覆盖每个 disagreement 一次。`AcousticWindow`/`GlmAdjudicationEvidence` 绑定同一 window ID；
+窗口 `end-start <= 30000`、blob `byte_length <= 25000000`。第三路证据仅绑定窗口和 JobInput，
+不把任何纠错候选送进 GLM。
 
-`fit_presentation_duration` 必须恰好一个且 `total_sample_count > 0`。未知、重复或矛盾 action 无效。
+每个 correction arm 保存严格三字段 edits，inputs 绑定 JobInput、完整 Base、完整 Peer 和
+机械差异。`AgreementResolution` 保存 accepted edits、lexical disagreements、ignored
+prosody 与 contract review。Projection 的支持证据由 schema 重新计算，不能伪造新文字。
 
-`timeline_status` 只允许 `normal`、`corrected`、`unverified`。只有 evidence 可靠、offset 为零且 continuity 未发现无法解释问题时才是 normal。
+`AcousticResolution` 保存 disagreement ID、match policy、resolved/review、原因及证据 ID。
+resolved 必须引用 `glm_adjudication_evidence`；所选文本来自既有 Base/Qwen/Kimi 候选，
+不造第四个答案。
 
-## 4. Timeline Audio 与 ChunkPlan
+`EditResolution` 保存 run ID、Base ID、exact patches、review items、pending_acoustic、
+sealed 和 corrected_preview。preview 必须可由 Base + 非重叠 patches 完整重建；sealed
+不允许存在 review 或 pending acoustic。`Transcript` 只消费 sealed final，mode 为
+`post_correction_adjudication`，不可绕开最终 gate。
 
-TimelineAudio payload 必须包含正 `duration_ms`、正 `total_sample_count`、`sample_rate_hz = 16000`、`channels = 1`、`sample_format = s16le`、`timeline_origin_sample = 0` 和 WAV blob identity。
+`ReviewQueue` 绑定 run ID 和 exact final resolution ID，每项使用稳定 review ID，不能用数组
+下标。提交要求 `run_id + expected_review_queue_artifact_id + decisions[]`，队列过期即拒绝。
+`ReviewResolution` 保存每项人工决定，包括显式 keep；人工 replace 仍提交 exact 三字段 edit，
+不接受用户或模型提供的数字 offset。人工结果、final 和 clear queue 同事务发布。
 
-ChunkPlan payload 必须保存 `duration_ms`、精确 TimelineAudio ID、实际 versioned config、silence evidence 和 ordered chunks。Schema 必须读取 payload config 的 `hard_limit_ms` 校验；config 数值为正、target 不大于 hard limit，Chunk ordinal 连续、区间连续覆盖 timeline，且每块不超过实际 hard limit。
+`Alignment` 保存精确 MediaObject/Transcript IDs、duration 和全局毫秒 assignments；
+Assignment atom IDs 必须与 Transcript 完全同序同集。
 
-MediaChunk 的 `scope_key == chunk_id`，并引用精确 TimelineAudio 与 ChunkPlan；payload 保存对应 interval 和 WAV blob。
+## Registry
 
-## 5. Glossary 与 Transcript
+当前 `PRAGMA user_version = 9`。表只有：
 
-Glossary payload 为确定性排序的唯一非空 `terms[]`，并保存 `normalization_version = 0.1.0`。
+```text
+projects source_assets
+artifacts artifact_dependencies current_pointers
+runs invocations invocation_inputs run_checkpoints
+```
 
-Transcript payload 必须保存 `chunk_id`、完整 `source_text`、leading Decoration、Atomizer version、language、Semantic confidence evidence、Provider uncertainty 和 ordered atoms。Atom ID 唯一、position 从 0 连续、class 属于冻结集合，Decoration 重建精确等于 source_text。
+空库初始化当前 Schema。非空旧库或缺表库明确拒绝并保持不修改；没有 migration、Trash 或
+Legacy wrapper。
 
-## 6. Alignment
+`invocations` 不含 `chunk_id`。它分列保存 requested/resolved model、idempotency key、remote
+job/status、可选 response ID、elapsed/reasoning time、usage、prompt provenance 和 retry
+ancestry。`invocation_inputs` 按 ordinal 保存精确 Artifact ID，是 targeted retry 的输入事实。
 
-Alignment payload 必须包含 `chunk_id`、精确 MediaChunk/Transcript IDs、Provider coordinate system、一次全局 offset 记录和按 Transcript Atom 顺序排列的 assignments。
+`run_checkpoints` 键为 `(run_id, stage, scope_key)`，保存 input_digest、artifact_id 和 revision。
+input_digest 绑定 run/config/prompt 身份，实际有序上游依赖保存在 envelope inputs 与 invocation
+inputs。恢复只读该 run 的 checkpoint，不从最新 current pointer 推断曾执行的输入。
+Provider 成功结果、invocation success 和 checkpoint 同一 SQLite transaction 发布；final
+resolution 与 review queue 也成组提交。文件先以内容地址原子发布，崩溃留下的未引用 blob
+不代表已完成的调用，也不授权自动重发。
 
-每个实音 Atom 恰好一个 Assignment。Aligned interval 必须完全位于 MediaChunk 内并按序不重叠；超界、缺失、重复或引用不匹配都是结构非法。Provider confidence 若存在，必须保存原始尺度元数据。
+## 版本升级边界
 
-## 7. Subtitle
-
-Subtitle payload 保存 Segmenter Config hash、精确 Transcript/Alignment ID arrays、duration 和 ordered cues。每个 Cue 使用合法非重叠区间；显示单位默认不超过 10；Atom refs 完整覆盖显示 Atom；Atom spans 精确引用 Transcript；text 只能由 Atom 与冻结 Decoration style 得出。
-
-## 8. QA 与 SRT
-
-QA payload 保存 `subject_artifact_ids`、`qa_ruleset_version = 0.1.1`、`result = passed | warnings | blocked` 与 issues。每个 issue 有唯一 ID、severity、code、resolution status、locations 和 evidence。
-
-SrtRender payload 保存精确 Subtitle/QA IDs、UTF-8、byte length 和 text，只依赖 current Subtitle 与非 blocked QA。SRT 不删除任何可发音 Atom。
-
-## 9. Registry
-
-SQLite 包含 Source、Reference 与 Lexicon 三组完整表。公共 Run 表的 `kind` 非空且只允许 `source`、`reference`、`lexicon`；各查询和 crash recovery 必须正向按 kind 选择，不能再以“不是 Reference”推断 Source。
-
-Registry 使用 SQLite `user_version = 6`。空库直接初始化当前完整结构；普通打开遇到非当前版本、缺表或 column 不匹配时明确拒绝且不修改已有库。Project 列恰好为 `project_id`、`display_name`、`created_at`。
-
-InvocationInput 主键为 `(invocation_id, ordinal)`，每行保存 role 与精确 `input_artifact_id`。Targeted retry 只能读取这些绑定。
-
-SemanticBudgetReset 主键包含 Run、Chunk 与 window index；window index 固定只允许 1 或 2，并绑定触发 reset 的失败 Invocation。两次上限是数据模型常量，不属于 versioned runtime config；唯一约束保证同一 Run/Chunk 最多两次。
-
-Artifact 文件必须按 temp → fsync → atomic replace → read-back validation 顺序完成落盘，再在同一 SQLite 写事务中登记 Artifact/dependency 与切换 pointer。Invocation、reset、crash recovery 和 Run reopen 必须可审计且持久化。
-
-## 10. Reference schema
-
-`reference_assets` columns 恰好为 `reference_asset_id`、`filename`、`locator`、`detected_format`、`media_category`、`registered_at`。没有外部文件 hash/size/mtime，也没有 `reference_asset_locations`。
-
-Reference Artifact input 可以使用 `reference_asset_id`，并与 `artifact_id`、`source_asset_id` 满足三选一。Reference Artifact 的 `scope_key` 必须等于 payload 的 `reference_asset_id`。
-
-`reference_input` 至少保存 reference/run/work-item id、input kind、branch、detected format、nullable `local_measured_duration` 和 manifest。`reference_evidence` 还必须保存冻结 evidence role、content、provenance、nullable `provider_usage_duration`、nullable provider usage/cost。`reference_bundle` 保存 run/outcome、非空 ordered Evidence IDs 和 failures；只有 complete/partial 才存在 bundle。
-
-### usage 双时长不变量
-
-`local_measured_duration` 与 `provider_usage_duration` 是两个语义不同、分别持久化且均允许 null 的字段。前者只来自本地媒体测量，用于源时间轴、provenance、分段和媒体事实；后者只来自 Provider usage，用于成本观测和账单解释。禁止定义或赋值 `media_duration = usage.duration`，禁止用 Provider usage 重建时间轴。Provider 未报告的 usage/cost 字段为 null，不得伪造成 0。
-
-`reference_invocation_details` 必须保存 work item/branch、provider/model、当次实际 config、ordered input Artifact、response id、上述双时长、raw usage、nullable provider cost、retry parent/reason、failure details，以及 Cloud document remote file id/cleanup status。`reference_runs` 只扩展 runs；`reference_work_items` 的成功 Evidence 和失败详情可审计。
-
-## 11. Lexicon schema
-
-`lexicon_runs` 绑定触发它的 Reference Run、Reference Bundle、唯一 `lexicon_input` manifest 和聚合 outcome。`lexicon_work_items` 绑定 exact Evidence Artifact ID、batch ordinal、冻结 batch manifest、状态、candidate-set Artifact 或失败详情；`lexicon_evidence_coverage` 以 Evidence Artifact ID 为主键实现增量处理。`lexicon_invocation_details` 保存 provider/model、实际配置、usage/cost、retry parent/reason 和失败详情。
-
-`lexicon_input.scope_key == payload.run_id`，payload 保存触发 Reference Run/Bundle、normalization version 与非空 batches。每个 unit 必须保存非空 field path、完整 Evidence 中的半开 source offset、切片 text hash 与来源坐标；manifest 不持久化发送正文。
-
-`term_candidate_set.scope_key == payload.work_item_id`，绑定 run/work-item/Evidence，并保存候选 observation。当前生产的 disposition 只允许 `suggested`、`already_in_project_lexicon`、`suppressed_blacklist`。每个 observation 保留 normalized/display term、显示分类、disposition 与至少一个 exact occurrence；空模型结果用空 candidate array 表示成功。
-
-`term_candidates` 对 `(normalization_version, normalized_surface_form COLLATE BINARY)` 唯一；`term_occurrences` 保存 Evidence/role、raw 与 suggested surface、分类、risk tags、field path、offset、context 和 coordinates。`project_lexicon_entries` 只对活动 exact normalized term 唯一，带 enabled/status/revision；`project_lexicon_revisions` 形成 ordinal/parent 不可变链。`lexicon_blacklist` 对 exact normalized term 唯一，保存 temporary/permanent kind、nullable `expires_at`、revision 与时间戳；Temporary 必须有到期时间，Permanent 必须没有到期时间。
-
-`project_lexicon` 使用 global scope，保存 revision/parent/decision 与当次全部活动 entries。发布它不得 stale 或改写 `effective_glossary`、Transcript、Alignment、Subtitle、QA 或 SRT pointer。
+此变更不是兼容性加字段：6.0.0 的 pre-correction GLM 证据与本版 post-correction
+adjudication 语义、DAG、resume 契约均不同，因此升 major 到 7.0.0，而不是 6.1.0。
+Registry 8 无 run checkpoints，本版升 9。旧库/旧 artifacts fail closed、保持字节不变；
+不自动导入、不迁移、不重新解释旧证据。用户应创建新项目，旧项目保留给对应旧版本读取。

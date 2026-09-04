@@ -2,21 +2,24 @@ from __future__ import annotations
 
 import os
 import tempfile
-from collections.abc import Mapping, Sequence
-from dataclasses import asdict
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
 from cueflow.canonical import hash_json
-from cueflow.config import COMPONENT_VERSION, SegmenterConfig
+from cueflow.config import COMPONENT_VERSION
 from cueflow.errors import ExportBlockedError
 from cueflow.project import ProjectContext
 from cueflow.schema import ArtifactEnvelope, InputRef, Producer
 
 
-def render_srt(subtitle: Mapping[str, Any]) -> str:
+def render_srt(subtitle: Mapping[str, object]) -> str:
     blocks: list[str] = []
-    for index, cue in enumerate(subtitle.get("cues", []), start=1):
+    cues = subtitle.get("cues", [])
+    if not isinstance(cues, list):
+        raise ExportBlockedError("Subtitle cues are invalid")
+    for index, cue in enumerate(cues, start=1):
+        if not isinstance(cue, Mapping):
+            raise ExportBlockedError("Subtitle contains an invalid Cue")
         text = str(cue.get("text", ""))
         if not text:
             raise ExportBlockedError("Subtitle contains an empty Cue")
@@ -30,45 +33,42 @@ def render_srt(subtitle: Mapping[str, Any]) -> str:
 def publish_srt(
     context: ProjectContext,
     *,
-    chunk_plan: ArtifactEnvelope,
-    transcripts: Sequence[ArtifactEnvelope],
-    alignments: Sequence[ArtifactEnvelope],
+    timeline_audio: ArtifactEnvelope,
+    transcript: ArtifactEnvelope,
+    alignment: ArtifactEnvelope,
     subtitle: ArtifactEnvelope,
     qa: ArtifactEnvelope,
 ) -> tuple[ArtifactEnvelope, Path]:
     validate_export_gate(
         context,
-        chunk_plan=chunk_plan,
-        transcripts=transcripts,
-        alignments=alignments,
+        timeline_audio=timeline_audio,
+        transcript=transcript,
+        alignment=alignment,
         subtitle=subtitle,
         qa=qa,
     )
     text = render_srt(subtitle.payload)
-    config = SegmenterConfig()
-    producer = Producer(
-        component="srt_render",
-        component_version=COMPONENT_VERSION,
-        provider=None,
-        model=None,
-        config_hash=hash_json(asdict(config)),
-    )
-    payload = {
-        "subtitle_artifact_id": subtitle.artifact_id,
-        "qa_artifact_id": qa.artifact_id,
-        "encoding": "utf-8",
-        "byte_length": len(text.encode("utf-8")),
-        "text": text,
-    }
     envelope = ArtifactEnvelope.create(
         artifact_kind="srt_render",
         scope_key="global",
-        producer=producer,
+        producer=Producer(
+            component="srt_render",
+            component_version=COMPONENT_VERSION,
+            provider=None,
+            model=None,
+            config_hash=hash_json({"encoding": "utf-8", "format": "srt"}),
+        ),
         inputs=[
             InputRef(role="subtitle", artifact_id=subtitle.artifact_id),
             InputRef(role="qa", artifact_id=qa.artifact_id),
         ],
-        payload=payload,
+        payload={
+            "subtitle_artifact_id": subtitle.artifact_id,
+            "qa_artifact_id": qa.artifact_id,
+            "encoding": "utf-8",
+            "byte_length": len(text.encode("utf-8")),
+            "text": text,
+        },
     )
     context.publisher.publish(envelope)
     destination = context.root / "output" / "subtitles.srt"
@@ -79,52 +79,36 @@ def publish_srt(
 def validate_export_gate(
     context: ProjectContext,
     *,
-    chunk_plan: ArtifactEnvelope,
-    transcripts: Sequence[ArtifactEnvelope],
-    alignments: Sequence[ArtifactEnvelope],
+    timeline_audio: ArtifactEnvelope,
+    transcript: ArtifactEnvelope,
+    alignment: ArtifactEnvelope,
     subtitle: ArtifactEnvelope,
     qa: ArtifactEnvelope,
 ) -> None:
-    _require_current(context, chunk_plan)
-    _require_current(context, subtitle)
-    _require_current(context, qa)
+    for envelope in (timeline_audio, transcript, alignment, subtitle, qa):
+        _require_current(context, envelope)
+    resolution = context.artifact(str(transcript.payload["edit_resolution_artifact_id"]))
+    _require_current(context, resolution)
+    if (
+        not resolution.payload.get("sealed")
+        or resolution.payload.get("pending_acoustic")
+        or resolution.payload.get("review_items")
+        or resolution.payload.get("corrected_preview") != transcript.payload["source_text"]
+    ):
+        raise ExportBlockedError("Transcript requires its sealed, fully resolved source")
     if qa.payload.get("result") == "blocked":
         raise ExportBlockedError("QA contains unresolved structural blocking errors")
-    chunks = chunk_plan.payload.get("chunks")
-    if not isinstance(chunks, list):
-        raise ExportBlockedError("current ChunkPlan has no chunks")
-    transcript_by_chunk = {str(item.payload.get("chunk_id")): item for item in transcripts}
-    alignment_by_chunk = {str(item.payload.get("chunk_id")): item for item in alignments}
-    expected_ids = {str(item["chunk_id"]) for item in chunks}
-    if set(transcript_by_chunk) != expected_ids or set(alignment_by_chunk) != expected_ids:
-        raise ExportBlockedError("current ChunkPlan is not covered by current Chunk Artifacts")
-    for chunk_id in expected_ids:
-        transcript = transcript_by_chunk[chunk_id]
-        alignment = alignment_by_chunk[chunk_id]
-        _require_current(context, transcript)
-        _require_current(context, alignment)
-        media_pointer = context.registry.current_pointer(
-            context.project_id, "media_chunk", chunk_id
-        )
-        if media_pointer is None or bool(media_pointer["is_stale"]):
-            raise ExportBlockedError(f"MediaChunk is missing or stale: {chunk_id}")
-        if alignment.payload.get("transcript_artifact_id") != transcript.artifact_id:
-            raise ExportBlockedError(f"Alignment references a non-current Transcript: {chunk_id}")
-        if alignment.payload.get("media_chunk_artifact_id") != media_pointer["artifact_id"]:
-            raise ExportBlockedError(f"Alignment references a non-current MediaChunk: {chunk_id}")
-    expected_subtitle_inputs = {item.artifact_id for item in [*transcripts, *alignments]}
-    actual_subtitle_inputs = {
-        item.artifact_id
-        for item in subtitle.inputs
-        if item.role in {"transcript", "alignment"} and item.artifact_id is not None
-    }
-    if actual_subtitle_inputs != expected_subtitle_inputs:
-        raise ExportBlockedError("Subtitle dependency identity is not current")
-    if not any(item.artifact_id == subtitle.artifact_id for item in qa.inputs):
-        raise ExportBlockedError("QA does not depend on the current Subtitle")
-    qa_input_ids = [item.artifact_id for item in qa.inputs if item.artifact_id is not None]
-    if qa.payload.get("subject_artifact_ids") != qa_input_ids:
-        raise ExportBlockedError("QA subject identities differ from its dependency edges")
+    if alignment.payload.get("timeline_audio_artifact_id") != timeline_audio.artifact_id:
+        raise ExportBlockedError("Alignment references a non-current TimelineAudio")
+    if alignment.payload.get("transcript_artifact_id") != transcript.artifact_id:
+        raise ExportBlockedError("Alignment references a non-current Transcript")
+    if subtitle.payload.get("transcript_artifact_id") != transcript.artifact_id:
+        raise ExportBlockedError("Subtitle references a non-current Transcript")
+    if subtitle.payload.get("alignment_artifact_id") != alignment.artifact_id:
+        raise ExportBlockedError("Subtitle references a non-current Alignment")
+    qa_inputs = [item.artifact_id for item in qa.inputs if item.artifact_id is not None]
+    if qa.payload.get("subject_artifact_ids") != qa_inputs:
+        raise ExportBlockedError("QA subjects differ from exact dependency edges")
 
 
 def _require_current(context: ProjectContext, envelope: ArtifactEnvelope) -> None:

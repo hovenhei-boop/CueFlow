@@ -1,50 +1,117 @@
 # CueFlow
 
-CueFlow v0.5.1 是面向已剪辑完成媒体的项目式字幕生成与检查引擎。Source 主链为 Media Prep → 远端语义转写与纠错 → 本地 Forced Alignment → Subtitle → QA → SRT。独立的 Reference 旁路通过确定性提取或远端 ASR、Vision、Document Parse 生成带 provenance 的 Evidence，并自动生成等待人工处理的 Suggested Terms。Project Lexicon 与全局 Official Packs 在本版不进入 Source Transcript、Effective Glossary、Alignment 或 SRT。
+CueFlow v0.5.2 是面向已剪辑媒体的字幕核心。它以 Qwen 全文件转写为冻结的
+`BaseTranscript`，与豆包完整 Peer 一起提供给 Qwen Max 和 Kimi K3。两个纠错模型结合原始
+辅助材料、用户关键词和实时互联网分别提交 `edits[]`。同区间的完全共识或共同 lexical
+projection 自动应用，纯标点分歧保持 Base 格式。只有剩余 lexical 分歧才调用 GLM 局部复听；
+唯一匹配既有候选则自动消解，否则交给人工 review。封存后的最终文本由火山 ATA 保留标点
+打轴，再确定性生成字幕、QA 和 SRT。
+
+```text
+Media URL + UserKeywords
+  ├─ Qwen whole-file ASR ───────────────→ Frozen BaseTranscript
+  └─ Doubao whole-file ASR ─────────────→ FULL PeerTranscript
+
+FULL Base + FULL Peer + References + UserKeywords + diagnostic differences + live Internet
+  ├─ Qwen Max → edits[]
+  └─ Kimi K3  → edits[]
+                    ↓
+       exact resolver + lexical projection
+         ├─ agreement → patch; keep / pure prosody disagreement → Base
+         ├─ invalid / contract issue → review
+         └─ lexical disagreement → GLM window → unique candidate / review
+                    ↓
+       acoustic complete + review clear + sealed final
+                    ↓
+       ATA URL alignment → Subtitle → QA → SRT
+```
+
+whole-file Base/Peer ASR 不再切 Chunk；GLM 的 `AcousticWindow` 是独立概念，仍受每窗
+`≤30s`、`≤25MB` 的硬限制。
 
 ## 安装
 
-Python 3.10 或更高版本：
+需要 Python 3.10+、`ffmpeg` 和 `ffprobe`：
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\python -m pip install -e ".[alignment,cloud,dev]"
+.venv\Scripts\python -m pip install -e ".[cloud,dev]"
 ```
 
-运行媒体链需要可执行的 `ffmpeg` 与 `ffprobe`。可通过 PATH，或使用
-`CUEFLOW_FFMPEG`、`CUEFLOW_FFPROBE` 指定绝对路径。远端 Provider 从
-`DASHSCOPE_API_KEY` 与 `DASHSCOPE_BASE_URL` 读取凭据和地域 endpoint。
-`alignment` extra 提供本地 Forced Aligner 所需的 `qwen-asr`；设备与 dtype 由运行时检测，
-模型缓存可由 `CUEFLOW_MODEL_CACHE` 指定。完整 Source 主链需要 `alignment` 和 `cloud`，确定性 Reference 提取不加载模型。
+运行时凭据：
+
+- Qwen ASR / Qwen Max：`DASHSCOPE_API_KEY`，Correction 另需 `DASHSCOPE_BASE_URL`；
+- 豆包 ASR：`DOUBAO_API_KEY`，或 `DOUBAO_APP_KEY` + `DOUBAO_ACCESS_KEY`；
+- GLM ASR：`ZHIPU_API_KEY`；
+- Kimi K3：`MOONSHOT_API_KEY` + `MOONSHOT_BASE_URL`；
+- 火山 ATA：`VOLCENGINE_ATA_APPID` + `VOLCENGINE_ATA_ACCESS_TOKEN`；
+- 火山 TOS：`TOS_ENDPOINT`、`TOS_REGION`、`TOS_BUCKET`、`TOS_ACCESS_KEY`、
+  `TOS_SECRET_KEY`。
+
+`CUEFLOW_FFMPEG` 与 `CUEFLOW_FFPROBE` 可以覆盖可执行文件路径。客户端不安装 PyTorch、
+CUDA、本地 ASR 或本地 Forced Aligner。
 
 ## CLI
 
-```text
-cueflow init PROJECT_DIR --name NAME
-cueflow glossary set PROJECT_DIR GLOSSARY.json
-cueflow asset add PROJECT_DIR FILE --kind auxiliary
-cueflow run PROJECT_DIR MEDIA
-cueflow status PROJECT_DIR
-cueflow retry PROJECT_DIR INVOCATION_ID
-cueflow reference add PROJECT_DIR FILE
-cueflow reference extract PROJECT_DIR REF_ID [--pixel-subtitle-mode burned|none]
-cueflow reference relocate PROJECT_DIR FOLDER
-cueflow reference status PROJECT_DIR [REF_ID]
-cueflow reference retry PROJECT_DIR WORK_ITEM_ID
-cueflow lexicon suggestions list|status|retry|review ...
-cueflow lexicon entry list|add|edit|enable|disable|remove|block ...
-cueflow lexicon blacklist list|add|update|unblock ...
-cueflow lexicon pack list|setup|install|uninstall|update|status|repair ...
+```powershell
+cueflow init PROJECT --name NAME
+
+cueflow run PROJECT MEDIA `
+  --pdf-url https://example.com/report.pdf `
+  --image-url https://example.com/slide.png `
+  --text-file notes.md `
+  --keyword "Qwen3.8" `
+  --keyword "C++"
+
+cueflow status PROJECT
+cueflow resume PROJECT RUN_ID
+cueflow retry PROJECT INVOCATION_ID
 ```
 
-Registry 只接受当前精确契约。全新空库初始化当前结构；版本、表或列不符合当前契约时明确拒绝且不修改已有数据。
+若结果为 `needs_review`，创建一个 UTF-8 JSON 文件，并一次覆盖队列中的所有项目：
 
-`run` 与每次被接受的 `reference extract` 都在 Project 下创建全新 Run；Source `retry` 与 `reference retry` 都只在原 Run 内最小重放。Reference retry 以 work-item 为粒度，成功项永不重跑。项目内部状态位于 `PROJECT_DIR/.cueflow/`，Source 主链的唯一正常用户输出仍为 `PROJECT_DIR/output/subtitles.srt`。
+```json
+{
+  "run_id": "run_...",
+  "expected_review_queue_artifact_id": "art_...",
+  "decisions": [
+    {"review_id": "dis_...a", "action": "keep"},
+    {"review_id": "dis_...b", "action": "qwen"},
+    {"review_id": "rev_...c", "action": "replace", "edit": {
+      "source_sentence": "Our partner is Grok.",
+      "original": "Grok", "replacement": "Groq"
+    }}
+  ]
+}
+```
 
-CueFlow 分别以 `Path.name` 精确字符串作为 Source 与 Reference identity；二者都不保存或校验外部文件内容 hash、size 或 mtime。Reference 同名重复登记返回原对象且不更新 locator。Reference 缺失时不自动搜索；用户只能显式执行 `reference relocate`，它只检查指定文件夹的直接子项并按 filename 精确匹配。项目内 Artifact 继续保持内容寻址、不可变和 hash 校验。
+然后执行 `cueflow review PROJECT decisions.json`。`action` 可为 `keep`、`qwen`、`kimi` 或
+`replace`；ID 必须来自该 run 当前的真实队列，不能使用下标或本示例占位值。定位/contract
+问题可 keep 或提供重新 exact 定位的 edit，不强行选择不可定位的模型输出。显式 keep 也会
+持久化；过期队列拒绝提交。review 未清零前不会调用 ATA。
 
-CLI 执行失败时以结构化 JSON 报告可用的 `run_id`，并在存在失败 Invocation 时报告 `invocation_id`、当前状态和合法 `next_actions`。`delivery_ambiguous` 从不自动 retry；Source 使用显式 `cueflow retry`，Reference 使用显式 work-item `cueflow reference retry`。
+`resume` 继续指定 run 从未提交的步骤，复用已完成 checkpoint，不重发失败或交付不明的
+付费请求。`retry` 仅针对指定失败 invocation，可能重复计费，必须由用户明确执行；已成功
+的纠错臂/GLM 窗口不重跑。GLM 单窗失败不阻塞其他窗口，相关 interval 转人工 review。
 
-执行 `run` 会将音频 Chunk 发送到远端语义 Provider；`reference extract` 按输入格式使用确定性提取或上传指定 Reference 的文档、音频段和图像。Reference Evidence 生成后会自动触发术语发现，因此即使 Reference 内容由本地确定性提取得到，其 Evidence 文本仍可能发送到词库云端 Provider。`reference add`、状态查看、词库人工管理和词包本地读取不触发该上传。
+`cueflow correct` 可以在不重跑 ASR 的情况下替换整组 References，但必须传入与原
+`run` 完全相同、同序的 UserKeywords。新 `correct` 会重新调用两个 Correction 模型，而不是
+复用旧 proposals。若要改变关键词，必须重新 `run`，以保证三路 ASR
+收到同一组先验。
 
-Reference 的详细格式、视频路由、云端上传范围、模型常量、usage 双时长和限制见 [Reference Extraction](docs/reference-extraction.md)；候选审核、Project Lexicon、Project Blacklist 与 Official Packs 见 [Lexicon](docs/lexicon.md)；后续范围见 [Roadmap](docs/roadmap.md)。
+关键词最多 100 个，只执行首尾空白裁剪、空串拒绝和 exact 去重，并保持首次出现顺序、
+Unicode、大小写及标点。`.NET`、`C++`、`GPT-5.6` 等不会被词法归一化。没有用户关键词时，
+ASR 不接收任何领域 lexical prior；References 只进入 Correction。
+
+PDF/Image URL 必须由 CLI 显式声明类型。CueFlow 不下载 URL 猜 MIME；本地文本在命令开始
+时以 UTF-8 读取并把正文冻结进 `JobInput`。v0.5.2 不接受本地 PDF/图片，也不转换 Office
+文件。
+
+当前 Artifact Schema 为 **7.0.0**，Registry 为 **9**。不迁移或重写旧项目，也不把 6.0.0 的
+前置 GLM artifact 当作后置裁判证据；请创建新项目。正常输出是
+`PROJECT/output/subtitles.srt`，内容寻址 Artifact、blob 和 SQLite 状态位于
+`PROJECT/.cueflow/`。
+
+详细契约见 [Architecture](docs/architecture.md)、
+[Reference Inputs](docs/reference-inputs.md)、[Schema Contracts](docs/schema-contracts.md)、
+[Failure Model](docs/failure-model.md) 与 [Roadmap](docs/roadmap.md)。

@@ -1,155 +1,195 @@
-# CueFlow v0.5.1 Architecture
+# CueFlow v0.5.2 Architecture
 
-## 1. 产品边界
+## 1. 版本目标
 
-CueFlow 处理已剪辑完成的视频或音频，Source 主链为：
+v0.5.2 只完成字幕核心的大架构迁移和阻塞性清理，不做仓库级美化。它删除会形成第二条
+运行路径的 whole-file Chunk ASR、全文 `corrected_text` Correction、passthrough Correction
+和默认 VocaSync Alignment；不可达的旧 helper、目录重组和命名统一留到 v0.5.3。
 
 ```text
 Source Media
-→ Media Probe / Presentation Timeline Analysis
-→ Timeline Normalization
-→ Timeline Audio
-→ Chunk Plan / Audio Chunks
-→ Semantic Transcription
-→ Forced Alignment
-→ Subtitle Segmentation
-→ QA
-→ output/subtitles.srt
+  → MediaProbe → TimelineAudio → TOS MediaObject → presigned HTTPS URL
+      ├─ Qwen Audio 3.0 whole-file ASR → Base ASR / Frozen BaseTranscript
+      └─ Doubao whole-file ASR         → Peer ASR
+                 ↓
+        character-level mechanical comparison (diagnostic only)
+
+FULL Frozen BaseTranscript + FULL PeerTranscript + raw References + UserKeywords
+  + mechanical differences + each model's live Internet
+      ├─ Qwen Max → edits[]
+      └─ Kimi K3  → edits[]
+                 ↓
+        exact resolver + separable lexical projection
+          ├─ agreement / lexical agreement → accept
+          ├─ keep / pure prosodic disagreement → Base
+          ├─ invalid locator / contradictory arm overlap → human review
+          └─ lexical disagreement → local GLM WAV transcription
+                                      ├─ unique exact candidate → accept / keep
+                                      └─ failure / ambiguity → human review
+                 ↓
+        all acoustic work terminal + review clear → sealed Corrected Transcript
+                 ↓
+        Volcengine ATA → Alignment → Subtitle → QA → SRT
 ```
 
-目标是忠实转写、精确时间轴、纠错和导出。独立的 Reference 路径为 `Reference Material → deterministic extraction / optional Reference ASR, Vision, Cloud Document Parse → Reference Evidence → automatic terminology discovery → Suggested Terms → human review → Project Lexicon`。该旁路不创建或修改 Source Transcript、Effective Glossary、Alignment、Subtitle、QA 或 SRT；v0.5.1 不增加 UI。
+Qwen 是唯一 Base，豆包是完整 Peer，GLM 只转写疑点音频窗。删除的是 whole-file Provider
+chunking / fallback chunking，不是 GLM `EvidenceWindow`。
 
 ## 2. 核心不变量
 
-1. SourceAsset 身份只由 `Path.name` 精确字符串确定；外部内容可在原 locator 覆盖，locator 不参与身份，不提供 Source relink，项目内 Artifact 仍然内容寻址且不可变。
-2. Media Prep、Timeline normalization 和 Chunking 在本地确定性执行；语义转写由远端 Provider 完成，Forced Alignment 使用本地模型。
-3. Timeline Audio 固定为 16kHz、mono、PCM s16le，且其 sample 0 对应源媒体 presentation timeline 0。
-4. Timeline Audio 是 Chunker、Semantic Transcriber 和 Forced Aligner 的唯一音频权威。
-5. Transcript 完整保留 Provider `source_text`、全部可发音 Atom 和 Decoration；不得摘要、改写或按字幕风格删词。
-6. Glossary 只能提示核对，不能覆盖 Transcript。
-7. Alignment 只绑定一个精确 MediaChunk 和一个最终 accepted Transcript；不存在 Global Alignment。
-8. Subtitle 只切分和渲染 Decoration；SRT 忠实显示全部 Transcript Atom。
-9. Structural blocking error 修复失败时禁止导出；warning 不阻塞。
-10. Artifact 不可变；当前状态由 Registry 中的 exact dependency 与 current/stale pointer 决定。
-11. `cueflow run` 总是新建 Run 并执行新的处理链；不同 Run 之间不自动沿用处理结果。
-12. `cueflow retry` 只在原 Run 内按失败 Invocation 的精确输入做最小重放。
+1. TimelineAudio 是 16kHz mono PCM s16le，sample 0 对应 presentation timeline 0。
+2. 原媒体在付费 ASR 前必须满足 `duration < 5h` 且 `byte_length < 512,000,000`；不提供
+   Chunk fallback。
+3. UserKeywords 是唯一允许进入 ASR 的 lexical/semantic prior。每路 ASR 的输入只能是
+   音频、T0 时刻冻结的同一组 UserKeywords，以及必要的非语义 Provider 控制参数。
+4. References、内置领域包、Reference 提取词、其他 ASR 输出、机械候选、Correction 输出、
+   联网发现词和自动术语都不得进入任何 ASR。
+5. UserKeywords 最多 100 个；只 trim 首尾空白、拒绝空串、exact 去重、保留首次顺序，
+   不改 Unicode、大小写或标点。
+6. Qwen/豆包全文结果按原 Unicode code point 机械比较，不做 canonicalization、ITN 等价或
+   本地语义判断；原始 ASR diff 不生成 GLM 窗口，也不要求时间映射成功。
+7. 只有独立句法标点和空白变化可标记为 `prosodic_format_only`。处于字母/数字 lexical
+   token 内部或连接 lexical token 的 `. - / + # &` 等符号不得跳过 GLM。
+8. 合并后的每个 GLM 窗口必须再次满足 `duration ≤ 30s`；落盘 WAV 必须再次满足
+   `byte_length ≤ 25MB`，否则不合并或 fail closed。
+9. Correction 两臂看到相同的静态 CueFlow 输入，但各自积极使用实时互联网；搜索路径、
+   结果和 retry 结果允许不同，不建立搜索快照或可重放证据层。
+10. 每个 edit 只有 `source_sentence`、`original`、`replacement`。`source_sentence` 必须是
+    Frozen Base 中唯一子串，`original` 必须在该句中唯一出现；offset 只由本地 exact resolver
+    计算。
+11. 同一 Base 区间、相同 replacement 直接接受；同区间但仅句法标点不同，可按下节的
+    lexical projection 接受共同文字修改。不同区间不提取局部共识；应用时从右向左。
+12. 只有纠错后的 lexical singleton/conflict 才调用 GLM。GLM 不是最终兜底，失败或不确定
+    进入对应 interval 的人工 review。全部声学工作终结、review 清零且 final sealed 后才允许 ATA。
+13. Artifact 不可变且内容寻址；Registry current pointer 表示当前投影。旧 Schema 不迁移。
+14. Presigned URL 只在调用时生成，不写 Artifact、Registry 或日志；MediaObject 只保存稳定
+    bucket/key/hash/version 身份。
 
-## 3. Media Prep
+## 3. Provider 请求闭集
 
-### 3.1 Source Media
+### Qwen Base ASR
 
-`project` 登记文件名、格式、媒体类型和外部绝对 locator，不读取 Source 内容来建立身份，也不保存或比较 Source hash/长度。原 locator 上的同名文件可直接覆盖并用于新 Run。路径缺失、不是普通文件或不可读取时抛 `SourceMissingError`；系统不搜索其他同名文件，也不提供 relink。
+- 模型固定为 `qwen-audio-3.0-asr-flash-filetrans`；
+- `input.file_urls=[media_url]`，不发送 `input.context`；
+- `parameters.channel_id=[0]`；
+- UserKeywords 映射为 inline `parameters.vocabulary`，每项 weight=5；
+- 不发送 `vocabulary_id`、`language_hints`；
+- 显式发送
+  `parameters.special_word_filter.system_reserved_filter=false`，防止服务商把命中内容替换为
+  `*`。当前 HTTP JSON 路径按 object 序列化，真实请求测试负责封印接口表现。
 
-### 3.2 Presentation timeline analysis
+### Doubao Peer ASR
 
-`media` 直接读取原始媒体，不通过转码结果判断 presentation timing。
+- URL whole-file submit，`model_name=bigmodel`；
+- `show_utterances=true`，`enable_ddc=false`；
+- UserKeywords 只映射到 `request.corpus.context.hotwords`；
+- 不发送 `context_type/context_data`、boosting/correct/regex table、POI/Music FC、
+  `sensitive_words_filter` 等字段。
 
-Opening analysis 最多读取开头 50 秒的 frame/packet evidence，并在证据充分后停止。它寻找首个有效 audio presentation sample，而不是首次非静音或首次人声。整数 PTS、time base numerator/denominator、skip-sample 等原始证据保存在 MediaProbe 中。
+### GLM acoustic evidence
 
-全文件 packet continuity check 与 opening analysis 独立执行。它使用流式、O(1) 内存扫描检测 gap、backward jump 和 discontinuity，只保存上一 packet end 与异常摘要。无法确定性解释的异常使 `timeline_status = unverified`，不猜测补偿。
+- 模型固定为 `glm-asr-2512`；
+- 只以 multipart `file` 上传本地窗口 WAV，不使用 URL 或 `file_base64`；
+- 发送与另两路相同的 UserKeywords 作为 `hotwords`；不发送自然语言 `prompt`；
+- 每个最终窗口 `≤30s` 且 `≤25MB`。
 
-### 3.3 Timeline correction actions
+### Correction
 
-所有 offset 决策使用整数与有理数。精确 offset 只在 16kHz 输出边界量化一次，量化结果是带符号 integer sample count：绝对值恰好半个采样时向远离零方向取整。
+- Qwen 固定 `qwen3.8-max-2026-09-02`，不静默改用浮动别名；
+- Qwen Max 强制搜索并使用最大搜索强度；Kimi K3 开启自动搜索；
+- 两臂分别提交严格 `{"edits":[...]}`，禁止全文 `corrected_text`；
+- Prompt 以人类可读 `prompt_version` 和 SHA-256 记录；
+- 不保存 search query/result snapshot/citation。Provider 天然返回的 response ID 或引用可以
+  顺手记录，但不是正确性契约。
 
-MediaProbe 必须记录一个 origin action：
+### ATA
 
-- `timeline_origin_unchanged`：可靠 offset 为 0，记录性 no-op；
-- `pad_silence_before`：可靠正 offset，携带正 `sample_count`；
-- `trim_before_timeline`：可靠负 offset，携带正 `sample_count`；
-- `timeline_origin_unverified`：无法可靠确定，记录 intentional no-op 并保持 unverified。
+- 只使用 URL 音频；submit/query 固定为 `/api/v1/vc/ata/submit` 与
+  `/api/v1/vc/ata/query`；
+- query：`appid`、`caption_type=speech`、`sta_punc_mode=3`；
+- payload：`url`、`audio_text`；
+- 不发送已废弃的 `caption_category`、`cluster` 或空的过滤字段；
+- 不在本地硬编码未由当前文档给出的 200MB 上限。
 
-还必须记录 `fit_presentation_duration`，携带 Timeline Audio 的 `total_sample_count`。Render 先归一化到 16kHz，再严格按 action 映射为 filter；不得重新从 stream metadata 推导 offset。未知 action fail-closed。
+## 4. Correction 输入边界
 
-### 3.4 Chunking
+每个模型一次读取完整 Frozen BaseTranscript、完整 PeerTranscript、原始 References、
+UserKeywords 和机械疑点。`CorrectionRequest` 不含 GLM evidence；Peer 只是有噪声的第二份
+证据，所有三字段 edit 都必须锚定 Base，而不是 Peer。缺少 References 也执行双 Correction。
 
-ChunkPlan 使用版本化 Chunker Config。默认目标为 180 秒、硬上限 225 秒，优先选择目标附近持续至少 500ms 且低于 -40dB 的静音中点，否则在实际 config 的硬上限切分。Chunk 连续覆盖完整 Timeline Audio，无重叠、无间隙。
+生效 Prompt 为 `transcript-recovery-edits-zh-v2`，保留完整恢复口播规则和三字段输出契约，
+补充全文 Peer 的角色。禁止全文 `corrected_text` 输出，也不把纠错 Prompt 发送给 ASR。
+两个模型允许提出必要的局部标点修正；完全一致的标点修改可以应用，标点分歧不参与声学裁决。
 
-## 4. Semantic Transcription
+`correct` 可以替换 References，但不能改变 ASR 时冻结的 UserKeywords；要改变关键词必须新建
+`run`，使 Qwen、豆包和 GLM 都接收同一集合。
 
-Semantic Provider 使用 `qwen3.5-omni-plus-2026-03-15` 的 OpenAI-compatible API，凭据和地域 endpoint 从环境变量读取。请求使用 `response_format={"type": "json_object"}` 约束返回合法 JSON；`parse_cloud_semantic_response` 继续严格校验字段集合、正文与 Alignment language，非法契约仍明确失败。Transcription Stage 创建一个 Semantic Provider，顺序处理所有需要工作的 Chunk 及其全部 Attempt，最后关闭一次。阶段无工作时不得创建 Provider。
-
-一个新 Run 中，每 Chunk 初始最多 4 个 Semantic Attempt；该上限属于版本化 QA Ruleset 的运行规则。每个成功 Attempt 创建 Transcript Artifact、Invocation 和 exact input bindings。每产生一个返工 Attempt，都对该 Attempt 的完整 Chunk 文本重新执行 conflict scan，下一轮只以当前实际 conflict 驱动局部返工。Glossary 稳定闭环只使用冻结规则：
-
-- 单 Atom Glossary term 不触发冲突；
-- term 至少 2 个 Atom；
-- 候选与 term 的 Atom 数量和 class 序列完全相同；
-- NFC/casefold 后恰好一个 Atom 不同才触发；
-- 不使用编辑距离、拼音/音素、NER 或 confidence threshold。
-
-连续两次候选序列相同且与 term 一致时 resolved；连续两次相同但当前仍冲突时接受实际转写并产生非阻塞 `stable_glossary_conflict`；当前 conflict 未稳定且尚有预算时继续返工该 Chunk，4 次内无法连续稳定时产生非阻塞 `unstable_glossary_conflict`。QA 只报告，不修改文字，也不额外扫描整篇 Transcript。
-
-只有显式 targeted retry 可以为目标 Chunk 重置 4-Attempt budget；同一原 Run、同一 Chunk 固定最多重置 2 次，因此绝对上限为 12 次。两次 reset 是 SQLite window 数据模型约束，不是运行时可配置项。进入 `sending` 的 Attempt 计入预算；`definitely_not_sent` 不计。reset count 持久化并可审计。
-
-## 5. Forced Alignment
-
-Transcription Stage 完成后关闭 Semantic Provider。Alignment Stage 只读取每个 Chunk 的 accepted Transcript；rejected Attempt 不创建 Alignment。
-
-Alignment 使用 pinned revision 的本地 `Qwen3-ForcedAligner-0.6B`，provider identity 为 `qwen-local`。设备、dtype 和模型缓存由运行时配置决定；资源不足时明确失败，不量化、不换模型。Alignment Stage 创建一个本地 Aligner，批量处理全部需要工作的 Chunk，最后关闭一次。阶段无工作时不创建 Aligner。每个 accepted Transcript 首次 Alignment 产生结构非法结果时，最多执行 1 次 execution structural repair；仍失败则本阶段失败。
-
-## 6. Subtitle 与 QA
-
-Segmenter 将全部 current Transcript/Alignment 按全局时间顺序组合。每个 Cue 默认最多 10 个显示单位；CJK 每字一个单位，完整 word、number 和 pronounceable-symbol Atom 不从内部拆开。优先语义完整边界；保护单元超过 10 时保留完整单元并产生 warning。标点样式只影响 Subtitle/SRT，不修改 Transcript。
-
-QA 检查时间戳、Cue 重叠/越界、未对齐 Atom、Chunk/Transcript/Alignment 引用以及 Artifact dependency identity。QA 不改文字。
-
-若 QA 发现 alignment-related blocking issues，Orchestrator 最多执行一个独立 QA Alignment Repair Wave：一次加载 Aligner，批量处理本轮 workset，更新 Alignment，重建 Subtitle，重跑 QA，再进入 Export。该预算与 Alignment execution repair 独立。第二轮仍有 structural blocking error 时 Run 失败。
-
-## 7. Artifact 与依赖图
-
-```text
-SourceAsset → MediaProbe → TimelineAudio → ChunkPlan → MediaChunk[n]
-EffectiveGlossary + MediaChunk[n] → Transcript Attempt[n]
-accepted Transcript[n] + MediaChunk[n] → Alignment[n]
-all accepted Transcript/Alignment + EffectiveGlossary → Subtitle
-ChunkPlan + Subtitle + all accepted Transcript/Alignment → QA
-passing QA + Subtitle → SrtRender → output/subtitles.srt
-```
-
-Artifact publish 顺序为：写临时文件、flush/fsync、原子替换到内容路径、read-back validation、SQLite 事务登记 Artifact/dependency、切换 current/stale pointer、commit。
-
-## 8. Run、Invocation 与 Retry
-
-Invocation 保存 operation、provider/model、attempt number、状态、输出 Artifact，以及按顺序绑定的上游 Artifact IDs。失败或 delivery ambiguous 的 Invocation 不被自动重放。
-
-只有真正开始 Source `run/retry`、Reference `extract/retry` 或内部 Lexicon 执行/retry 时才执行对应类别的单 Orchestrator crash recovery：遗留 `created` Invocation 收口为 `definitely_not_sent`，遗留 `sending` 收口为 `delivery_ambiguous`，对应 `running` Run 收口为 `interrupted`。三类入口互不恢复其他 Run kind。本次 Ctrl+C 同样使 Run 进入 `interrupted`；其他未预期异常使 Run 进入 `failed`。Run 与 in-flight Invocation 在一个 SQLite 事务中收口。打开项目、`status`、glossary、asset、Reference add/relocate/status 和词库人工管理不触发恢复。
-
-显式 retry 可以把同一个 `failed` 或 `interrupted` Run 重新置为 `running`。Retry 从绑定输入读取项目内 Artifact，不重新访问源媒体，不依据当前 pointer 猜测输入，不重跑其他已成功 Chunk；目标完成后只重建真正必要的下游。
-
-Run 状态转换：
+## 5. 产物链与导出 Gate
 
 ```text
-created → running → succeeded
-                  → failed
-                  → interrupted
-failed/interrupted --explicit targeted retry→ running
+SourceAsset → MediaProbe → TimelineAudio → MediaObject
+                                      ├→ BaseAsr
+                                      └→ PeerAsr
+BaseAsr + PeerAsr → AsrComparison (diagnostic)
+both full texts + references + keywords → QwenEditProposal + KimiEditProposal
+proposals → AgreementResolution → AcousticWindowPlan
+lexical disputes → AcousticWindow[n] → GlmAdjudicationEvidence[n] → AcousticResolution[n]
+agreements + acoustic outcomes → EditResolution + ReviewQueue
+human decisions if needed → ReviewResolution → sealed EditResolution
+sealed EditResolution → Transcript → Alignment → Subtitle → QA → SrtRender
 ```
 
-## 9. CLI 与输出
+SRT Export 要求 Transcript、Alignment、Subtitle、QA 全部 current 且非 stale，身份链一致，
+QA 不为 blocked；Transcript 必须精确绑定已封存的最终 resolution。
 
-CLI 提供 `init`、`glossary set`、`asset add`、`run`、`status`、`retry`、Reference 管理以及 Suggested Terms、Project Lexicon、Project Blacklist 和 Official Pack 管理。不提供用户主动创建或 rebuild Lexicon Run 的命令，也不提供 Project→Pack select。失败 JSON 在可用时包含 Run/Invocation/work-item identity、当前状态和合法下一步；它只描述显式操作，不自动 retry。
+## 6. Lexical projection：粗 diff 只是起点
 
-唯一正常用户输出是 `output/subtitles.srt`。内部 Artifact、SQLite、blob 和临时文件位于 `.cueflow/`；临时文件完成后清理。
+`separable-runs-v1` 在每个 edit 内计算字符 diff；不把 opcode 整块二选一。每个非 equal
+块进一步划分为可判定的 lexical 与 prosodic runs，使用完整 Base/proposal 邻接字符判断
+token 内部符号（包括 `.NET` 的前导点）。两边只按相同类别的有序 runs 配对；仅允许边界
+prosody 与空边界配对。
+内部结构无法可靠配对就返回 `projection_unresolved`，进入 lexical disagreement → GLM。
 
-## 10. Reference 旁路架构
+每个可分离变化独立判定：lexical 使用 proposal，prosodic 使用 Base。白名单仅为
+`，,。.！!？?；;：:` 和空白，且连接非汉字的字母/数字/组合字符时仍属 lexical；其他符号
+保守保留为 lexical。不 strip 标点、不统一大小写/Unicode、不做语义等价。
 
-ReferenceAsset 与 SourceAsset 是两个独立领域对象；二者都使用 filename 精确 identity，但 Reference 不挂为 auxiliary Source。顶层仍是 Project → Run；Reference Run 与 Source Run 都是 Project 任务实例，`reference_runs` 只是 runs 扩展，不形成 ReferenceAsset → Run 层级。
+| Base | Qwen | Kimi | 结果 |
+| --- | --- | --- | --- |
+| 英为达， | 英伟达， | 英伟达。 | 英伟达， |
+| 英为达 | 英伟达， | 英伟达。 | 英伟达 |
+| 今天很好， | 今天很好。 | 今天很好！ | 保持 Base，不调用 GLM |
+| H264 | H.264 | keep | lexical disagreement → GLM |
+| Black well | Blackwell, | Blackwell. | Blackwell |
 
-每次 `reference extract` 新建 Run，先确定性识别当前文件，再生成 ordered work items。确定性 TXT/MD、cue、OOXML 和完整 text-layer PDF 分支不创建 Invocation。真实 Reference ASR、Vision 或 Cloud document work item 才创建 Invocation；各 evidence role 独立，bundle 只收集引用，不融合。Retry 在原 Run 内只追加失败 work item 的 attempt，成功项及其 Evidence 保持不变。
+同 span 指同一个冻结 Base artifact 上的同一 `[start,end)`，不是两个 source_sentence
+字面相等。两臂 span 不同，即使共享部分文字，也不得拆出“共同答案”；只为复听建立重叠
+区间并集和各臂原候选。单臂自相矛盾的重叠 edit 则直接进入 contract review。
 
-Reference Artifact 图：
+`lexical_agreement_ignore_prosody` 保存原 span、两臂原 edit、两个 projection、被忽略的
+prosodic changes 与 policy。Schema 会重算支持关系，禁止本地创造新的 lexical 内容。
 
-```text
-ReferenceAsset → ReferenceInput → ReferenceEvidence[role]
-all succeeded ReferenceEvidence in one Run → ReferenceBundle
-```
+## 7. 后置 GLM 和人工兜底
 
-显式 `run` 上传 Source 音频 Chunk 到语义 Provider。显式 `reference extract` 按路由上传文档、位图 cue、full-frame window、独立图片或 PCM/WAV 音频段。full-frame 只保留 manifest/hash/timestamp/执行参数，图像请求正文不持久化；Cloud document file_id 在 finally 删除。完整 Reference 格式与路由见 [Reference Extraction](reference-extraction.md)。
+Planner 只消费 `AgreementResolution.lexical_disagreements`，包含 lexical singleton、
+replacement conflict、有效的不同 span 及不可分离的 mixed diff。依据冻结 Qwen timed units
+顺序 exact 映射；失败或核心区间超长只生成该项 review，不反查全文猜位置。
 
-## 11. Lexicon 构建旁路
+默认前后各 3s padding，间隔 ≤2s 可合并，但 union 必须 ≤30s；必要时缩减 padding，
+不拆分超过上限的核心争议。窗口落盘后再验证 ≤25MB。GLM 只看窗口音频和冻结的用户关键词。
 
-Reference bundle 发布后自动触发内部 `kind=lexicon` Run。系统只处理尚无 coverage 记录的 exact Evidence Artifact ID；Reference retry 的旧 Evidence 不重跑，新 Evidence 独立进入有界 batch。一个 Run 只发布一个 `lexicon_input` manifest，每个 batch 可发布一个 `term_candidate_set`。Candidate 必须逐字引用所发送 Evidence unit 的 field path 和半开 offset；客户端重新绑定完整 Evidence 并校验，非法位置使该 work item 失败。
+`ascii-case-insensitive-v1` 只折叠 ASCII A–Z 大小写，匹配 Base/Qwen/Kimi 的原始局部候选，
+加上 Base 两侧至多各 32 字符的 exact context。只有唯一候选在 GLM 文本中唯一命中才自动
+选取；不去标点/空白、不做拼音、编辑距离、语义评分，也不调用第四个 LLM。上下文超出窗口、
+第三路标点不同、同音异写或新答案都会保守转 review，不能误报为已消解。
 
-Suggested Term 经过 Accept、Edit & Accept、Dismiss 或 Temporary/Permanent Block 后更新项目状态。Project Lexicon 的 Add、Edit、Disable、Remove 与原子 Block 每次发布不可变 `project_lexicon` revision。Dismiss/Remove 进入逻辑 Neutral；Block 建立仅作用于当前 Project 的规则。Temporary 在到期时解除，Permanent 只由用户 Unblock；两者都只阻止同一精确词面再次作为 Reference suggestion 出现，不禁止 Source/SRT 输出该词。同一 exact term 不能同时存在于 Active Project Lexicon 与有效 Project Blacklist。
+单窗 timeout、5xx、无效返回、证据不足不会终止其他窗；存储损坏/输入 hash 不匹配等
+完整性错误仍然硬失败。人工可 keep、选某臂，或提交一个重新 exact 定位的三字段 edit。
 
-Official Packs 位于应用级数据目录，由全部项目共享。用户在显式 setup/install 时按领域选择，setup 未指定领域时默认全选；不存在项目分类或项目绑定。Pack version 不可变，安装校验 catalog manifest hash、Pack schema、terms hash/count 与 license，并使用目录锁、临时目录、原子 rename 和 current pointer。详见 [Lexicon](lexicon.md)。
+## 8. 生命周期与版本
+
+Artifact Schema 7.0.0 / Registry 9：GLM 改为后置裁判，不能把旧 6.0.0 证据重新解释成新
+语义；旧库只拒绝，不迁移或改写。新 `correct` 复用匹配的 Base/Peer，但重新调用两臂。
+同 run 使用持久 checkpoint 恢复；成功 paid result、invocation 状态和 checkpoint 原子发布。
+最终 resolution 和 review queue 同事务发布，单项目写锁防止多个命令同时写入。
+详细 resume/retry 和 review 乐观并发契约见 Failure Model 与 Schema Contracts。

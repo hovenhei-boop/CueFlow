@@ -3,47 +3,23 @@ from __future__ import annotations
 import os
 import shutil
 from dataclasses import asdict, dataclass
-from importlib import import_module
 from typing import Any
 
-SCHEMA_VERSION = "4.0.0"
-COMPONENT_VERSION = "0.5.1"
-ATOMIZER_VERSION = "0.1.0"
-GLOSSARY_NORMALIZATION_VERSION = "0.1.0"
-SEMANTIC_RETRY_RESET_LIMIT = 2
+SCHEMA_VERSION = "7.0.0"
+COMPONENT_VERSION = "0.5.2"
+ATOMIZER_VERSION = "0.2.0"
 
-LOCAL_ALIGNER_REPO = "Qwen/Qwen3-ForcedAligner-0.6B"
-LOCAL_ALIGNER_REVISION = "ff5efe6a75df02f6d1d05ac939a673f7909b1849"
-CLOUD_MODEL = "qwen3.5-omni-plus-2026-03-15"
-REFERENCE_VISION_MODEL = "qwen3.7-plus"
-REFERENCE_VISION_HEIGHT = 480
-REFERENCE_VISION_FPS = 4
-REFERENCE_VISION_JPEG_QV = 8
-REFERENCE_VISION_WINDOW_MS = 30_000
-CLOUD_REFERENCE_ASR_MODEL = "qwen-audio-3.0-asr-flash"
-CLOUD_DOCUMENT_MODEL = "qwen-doc-turbo"
-LEXICON_MODEL = REFERENCE_VISION_MODEL
-LEXICON_BATCH_MAX_CHARACTERS = 60_000
-LEXICON_MODEL_SENT_ATTEMPT_LIMIT = 2
-REFERENCE_ASR_SEGMENT_MAX_MS = 225_000
-REFERENCE_MODEL_SENT_ATTEMPT_LIMIT = 2
-REFERENCE_AUDIO_SAMPLE_RATE_HZ = 16_000
-REFERENCE_AUDIO_CHANNELS = 1
-REFERENCE_DOCUMENT_POLL_INTERVAL_SECONDS = 2.0
-REFERENCE_DOCUMENT_POLL_TIMEOUT_SECONDS = 300.0
-ALIGNER_LANGUAGES = (
-    "Chinese",
-    "English",
-    "Cantonese",
-    "French",
-    "German",
-    "Italian",
-    "Japanese",
-    "Korean",
-    "Portuguese",
-    "Russian",
-    "Spanish",
-)
+QWEN_ASR_MODEL = "qwen-audio-3.0-asr-flash-filetrans"
+DOUBAO_ASR_MODEL = "bigmodel"
+GLM_ASR_MODEL = "glm-asr-2512"
+QWEN_CORRECTION_MODEL = "qwen3.8-max-2026-09-02"
+KIMI_CORRECTION_MODEL = "kimi-k3"
+ATA_PROVIDER = "volcengine-ata"
+
+MAX_USER_KEYWORDS = 100
+MAX_SOURCE_DURATION_MS = 5 * 60 * 60 * 1000
+MAX_SOURCE_BYTES = 512_000_000
+QWEN_HOTWORD_WEIGHT = 5
 
 
 @dataclass(frozen=True)
@@ -56,24 +32,18 @@ class MediaPrepConfig:
 
 
 @dataclass(frozen=True)
-class ChunkerConfig:
+class EvidenceWindowConfig:
     version: str = "0.1.0"
-    target_duration_ms: int = 180_000
-    hard_limit_ms: int = 225_000
-    silence_min_duration_ms: int = 500
-    silence_threshold_db: int = -40
+    padding_ms: int = 3_000
+    merge_gap_ms: int = 2_000
+    max_duration_ms: int = 30_000
+    max_bytes: int = 25_000_000
 
 
 @dataclass(frozen=True)
 class SegmenterConfig:
-    version: str = "0.1.0"
+    version: str = "0.2.0"
     max_display_units: int = 10
-    display_units: tuple[tuple[str, int], ...] = (
-        ("cjk_character", 1),
-        ("word", 1),
-        ("number", 1),
-        ("pronounceable_symbol", 1),
-    )
     removable_punctuation: str = "。；;？?！!—–."
     comma_punctuation: str = "，,"
     english_clause_starters: tuple[str, ...] = (
@@ -91,58 +61,50 @@ class SegmenterConfig:
 
 @dataclass(frozen=True)
 class QaRulesetConfig:
-    version: str = "0.1.1"
-    semantic_attempt_limit: int = 4
-    alignment_structural_repair_limit: int = 1
-    qa_alignment_repair_wave_limit: int = 1
-    rework_rule_codes: tuple[str, ...] = (
-        "glossary_single_atom_conflict",
-        "provider_marked_uncertain",
-    )
+    version: str = "0.2.0"
 
 
 @dataclass(frozen=True)
-class RuntimeDeviceConfig:
-    device: str
-    dtype: str
+class CloudJobConfig:
+    poll_interval_seconds: float = 2.0
+    poll_timeout_seconds: float = 900.0
+    request_timeout_seconds: float = 60.0
 
-    @classmethod
-    def detect(cls) -> RuntimeDeviceConfig:
-        try:
-            torch = import_module("torch")
-        except ImportError:
-            return cls(device="cpu", dtype="float32")
-        if torch.cuda.is_available():
-            dtype = "bfloat16" if torch.cuda.is_bf16_supported() else "float16"
-            return cls(device="cuda:0", dtype=dtype)
-        return cls(device="cpu", dtype="float32")
+
+@dataclass(frozen=True)
+class TosConfig:
+    url_ttl_seconds: int = 7 * 24 * 60 * 60
+    object_prefix: str = "cueflow/media"
 
 
 @dataclass(frozen=True)
 class RuntimeConfig:
     ffmpeg: str
     ffprobe: str
-    model_cache: str | None
-    device: RuntimeDeviceConfig
 
     @classmethod
     def detect(cls) -> RuntimeConfig:
-        ffmpeg = os.getenv("CUEFLOW_FFMPEG") or shutil.which("ffmpeg") or ""
-        ffprobe = os.getenv("CUEFLOW_FFPROBE") or shutil.which("ffprobe") or ""
         return cls(
-            ffmpeg=ffmpeg,
-            ffprobe=ffprobe,
-            model_cache=os.getenv("CUEFLOW_MODEL_CACHE"),
-            device=RuntimeDeviceConfig.detect(),
+            ffmpeg=os.getenv("CUEFLOW_FFMPEG") or shutil.which("ffmpeg") or "",
+            ffprobe=os.getenv("CUEFLOW_FFPROBE") or shutil.which("ffprobe") or "",
         )
 
 
 def result_config(runtime: RuntimeConfig | None = None) -> dict[str, Any]:
-    chosen_runtime = runtime or RuntimeConfig.detect()
+    chosen = runtime or RuntimeConfig.detect()
     return {
         "media": asdict(MediaPrepConfig()),
-        "chunker": asdict(ChunkerConfig()),
+        "evidence_windows": asdict(EvidenceWindowConfig()),
         "segmenter": asdict(SegmenterConfig()),
         "qa": asdict(QaRulesetConfig()),
-        "runtime_device": asdict(chosen_runtime.device),
+        "qwen_asr_model": QWEN_ASR_MODEL,
+        "doubao_asr_model": DOUBAO_ASR_MODEL,
+        "glm_asr_model": GLM_ASR_MODEL,
+        "qwen_correction_model": QWEN_CORRECTION_MODEL,
+        "kimi_correction_model": KIMI_CORRECTION_MODEL,
+        "alignment_provider": ATA_PROVIDER,
+        "max_user_keywords": MAX_USER_KEYWORDS,
+        "max_source_duration_ms_exclusive": MAX_SOURCE_DURATION_MS,
+        "max_source_bytes_exclusive": MAX_SOURCE_BYTES,
+        "runtime": {"ffmpeg": bool(chosen.ffmpeg), "ffprobe": bool(chosen.ffprobe)},
     }

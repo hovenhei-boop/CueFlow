@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unicodedata
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from cueflow.config import ATOMIZER_VERSION
@@ -107,22 +107,20 @@ def atomize(source_text: str) -> tuple[str, list[dict[str, Any]]]:
 
 def build_transcript_payload(
     *,
-    chunk_id: str,
     source_text: str,
-    language: str | None,
-    semantic_confidence: Mapping[str, Any] | None = None,
-    provider_uncertain_spans: Sequence[Mapping[str, Any]] = (),
+    base_asr_artifact_id: str,
+    edit_resolution_artifact_id: str,
+    correction_mode: str,
 ) -> dict[str, Any]:
     leading, atoms = atomize(source_text)
     payload: dict[str, Any] = {
-        "chunk_id": chunk_id,
         "source_text": source_text,
         "leading_decoration": leading,
         "atomizer_version": ATOMIZER_VERSION,
         "atoms": atoms,
-        "language": language,
-        "semantic_confidence": dict(semantic_confidence) if semantic_confidence else None,
-        "provider_uncertain_spans": [dict(span) for span in provider_uncertain_spans],
+        "base_asr_artifact_id": base_asr_artifact_id,
+        "edit_resolution_artifact_id": edit_resolution_artifact_id,
+        "correction_mode": correction_mode,
     }
     validate_transcript_payload(payload)
     return payload

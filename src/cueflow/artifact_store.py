@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from cueflow.canonical import canonical_bytes
 from cueflow.errors import IntegrityError
@@ -121,6 +122,9 @@ class ArtifactPublisher:
         *,
         make_current: bool = True,
         stale_targets: Sequence[tuple[str, str | None]] = (),
+        checkpoint: tuple[str, str, str, str] | None = None,
+        invocation_id: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> ArtifactEnvelope:
         path = self.store.write_envelope(envelope)
         self.registry.publish_artifact(
@@ -129,6 +133,9 @@ class ArtifactPublisher:
             storage_locator=str(path.resolve()),
             make_current=make_current,
             stale_targets=stale_targets,
+            checkpoint=checkpoint,
+            invocation_id=invocation_id,
+            metadata=metadata,
         )
         return envelope
 

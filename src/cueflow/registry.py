@@ -8,13 +8,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 
-from cueflow.config import SEMANTIC_RETRY_RESET_LIMIT
 from cueflow.errors import ContractError, IntegrityError
 from cueflow.schema import ArtifactEnvelope, utc_now
 
-REGISTRY_SCHEMA_VERSION = 6
-RUN_KINDS = frozenset({"source", "reference", "lexicon"})
-SOURCE_TABLES = frozenset(
+REGISTRY_SCHEMA_VERSION = 9
+REQUIRED_TABLES = frozenset(
     {
         "projects",
         "source_assets",
@@ -24,48 +22,23 @@ SOURCE_TABLES = frozenset(
         "runs",
         "invocations",
         "invocation_inputs",
-        "semantic_budget_resets",
+        "run_checkpoints",
     }
 )
-REFERENCE_TABLES = frozenset(
-    {
-        "reference_assets",
-        "reference_runs",
-        "reference_work_items",
-        "reference_invocation_details",
-        "artifact_reference_dependencies",
-    }
-)
-LEXICON_TABLES = frozenset(
-    {
-        "lexicon_runs",
-        "lexicon_work_items",
-        "lexicon_invocation_details",
-        "lexicon_evidence_coverage",
-        "term_candidates",
-        "term_occurrences",
-        "candidate_decisions",
-        "project_lexicon_entries",
-        "project_lexicon_revisions",
-        "lexicon_blacklist",
-    }
-)
-REQUIRED_TABLES = SOURCE_TABLES | REFERENCE_TABLES | LEXICON_TABLES
-SOURCE_ASSET_COLUMNS = (
-    "project_id",
-    "source_asset_id",
-    "filename",
-    "asset_kind",
-    "media_kind",
-    "format",
-    "storage_mode",
-    "storage_locator",
-    "registered_at",
-)
-
-SOURCE_TABLE_COLUMNS = {
+REQUIRED_TABLE_COLUMNS = {
+    "run_checkpoints": ("run_id", "stage", "scope_key", "input_digest", "artifact_id", "revision"),
     "projects": ("project_id", "display_name", "created_at"),
-    "source_assets": SOURCE_ASSET_COLUMNS,
+    "source_assets": (
+        "project_id",
+        "source_asset_id",
+        "filename",
+        "asset_kind",
+        "media_kind",
+        "format",
+        "storage_mode",
+        "storage_locator",
+        "registered_at",
+    ),
     "artifacts": (
         "project_id",
         "artifact_id",
@@ -90,35 +63,45 @@ SOURCE_TABLE_COLUMNS = {
         "artifact_kind",
         "scope_key",
         "artifact_id",
+        "storage_locator",
         "is_stale",
         "updated_at",
     ),
     "runs": (
         "run_id",
         "project_id",
-        "kind",
+        "operation_kind",
         "status",
-        "input_identity_json",
+        "source_asset_id",
+        "job_input_artifact_id",
         "config_hash",
+        "error_message",
         "created_at",
         "updated_at",
-        "error_message",
     ),
     "invocations": (
         "invocation_id",
         "run_id",
         "project_id",
-        "chunk_id",
         "operation",
         "logical_operation_key",
-        "attempt_number",
-        "semantic_budget_window",
         "status",
         "provider",
-        "model",
+        "requested_model",
+        "resolved_model",
+        "idempotency_key",
+        "remote_job_id",
+        "remote_status",
+        "remote_artifact_refs_json",
         "response_id",
+        "elapsed_ms",
+        "reasoning_ms",
+        "usage_json",
+        "prompt_version",
+        "prompt_sha256",
         "artifact_id",
         "error_message",
+        "retry_of_invocation_id",
         "created_at",
         "updated_at",
     ),
@@ -129,452 +112,23 @@ SOURCE_TABLE_COLUMNS = {
         "role",
         "input_artifact_id",
     ),
-    "semantic_budget_resets": (
-        "run_id",
-        "project_id",
-        "chunk_id",
-        "window_index",
-        "trigger_invocation_id",
-        "created_at",
-    ),
 }
 
-REFERENCE_ASSET_COLUMNS = (
-    "reference_asset_id",
-    "filename",
-    "locator",
-    "detected_format",
-    "media_category",
-    "registered_at",
-)
-
-REFERENCE_TABLE_COLUMNS = {
-    "reference_assets": REFERENCE_ASSET_COLUMNS,
-    "reference_runs": (
-        "run_id",
-        "reference_asset_id",
-        "outcome",
-        "current_bundle_artifact_id",
-    ),
-    "reference_work_items": (
-        "work_item_id",
-        "run_id",
-        "ordinal",
-        "branch",
-        "evidence_role",
-        "status",
-        "work_spec_json",
-        "evidence_artifact_id",
-        "failure_code",
-        "failure_details_json",
-        "created_at",
-        "updated_at",
-    ),
-    "reference_invocation_details": (
-        "invocation_id",
-        "work_item_id",
-        "branch",
-        "provider",
-        "model",
-        "actual_config_json",
-        "ordered_input_artifacts_json",
-        "response_id",
-        "local_measured_duration",
-        "provider_usage_duration",
-        "provider_usage_json",
-        "provider_cost",
-        "retry_parent_invocation_id",
-        "retry_reason",
-        "failure_code",
-        "failure_details_json",
-        "remote_file_id",
-        "cleanup_status",
-    ),
-    "artifact_reference_dependencies": (
-        "project_id",
-        "artifact_id",
-        "ordinal",
-        "role",
-        "input_reference_asset_id",
-        "coordinate_range_json",
-    ),
-}
-
-LEXICON_TABLE_COLUMNS = {
-    "lexicon_runs": (
-        "run_id",
-        "trigger_reference_run_id",
-        "reference_bundle_artifact_id",
-        "input_manifest_artifact_id",
-        "outcome",
-    ),
-    "lexicon_work_items": (
-        "work_item_id",
-        "run_id",
-        "ordinal",
-        "evidence_artifact_id",
-        "batch_ordinal",
-        "batch_manifest_json",
-        "status",
-        "candidate_set_artifact_id",
-        "failure_code",
-        "failure_details_json",
-        "created_at",
-        "updated_at",
-    ),
-    "lexicon_invocation_details": (
-        "invocation_id",
-        "work_item_id",
-        "provider",
-        "model",
-        "actual_config_json",
-        "response_id",
-        "provider_usage_json",
-        "provider_cost",
-        "retry_parent_invocation_id",
-        "retry_reason",
-        "failure_code",
-        "failure_details_json",
-    ),
-    "lexicon_evidence_coverage": (
-        "evidence_artifact_id",
-        "run_id",
-        "status",
-        "created_at",
-        "updated_at",
-    ),
-    "term_candidates": (
-        "candidate_id",
-        "normalization_version",
-        "normalized_surface_form",
-        "display_term",
-        "display_category",
-        "proper_noun_subtype",
-        "status",
-        "revision",
-        "created_at",
-        "updated_at",
-    ),
-    "term_occurrences": (
-        "occurrence_id",
-        "candidate_id",
-        "evidence_artifact_id",
-        "reference_role",
-        "raw_surface_form",
-        "suggested_surface_form",
-        "proposed_category",
-        "proper_noun_subtype",
-        "risk_tags_json",
-        "field_path_json",
-        "start_offset",
-        "end_offset",
-        "context_before",
-        "context_after",
-        "coordinates_json",
-        "created_at",
-    ),
-    "candidate_decisions": (
-        "decision_id",
-        "candidate_id",
-        "action",
-        "payload_json",
-        "created_at",
-    ),
-    "project_lexicon_entries": (
-        "entry_id",
-        "term",
-        "normalization_version",
-        "normalized_surface_form",
-        "category",
-        "proper_noun_subtype",
-        "source_candidate_id",
-        "enabled",
-        "status",
-        "revision",
-        "created_at",
-        "updated_at",
-    ),
-    "project_lexicon_revisions": (
-        "revision_id",
-        "ordinal",
-        "parent_revision_id",
-        "artifact_id",
-        "decision_id",
-        "created_at",
-    ),
-    "lexicon_blacklist": (
-        "blacklist_id",
-        "normalization_version",
-        "normalized_surface_form",
-        "surface_form",
-        "kind",
-        "expires_at",
-        "revision",
-        "created_at",
-        "updated_at",
-    ),
-}
-
-REFERENCE_DDL_STATEMENTS = (
-    """
-    CREATE TABLE reference_assets (
-        reference_asset_id TEXT PRIMARY KEY,
-        filename TEXT NOT NULL COLLATE BINARY UNIQUE,
-        locator TEXT NOT NULL,
-        detected_format TEXT NOT NULL,
-        media_category TEXT NOT NULL
-            CHECK (media_category IN ('document','image','audio','video')),
-        registered_at TEXT NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE reference_runs (
-        run_id TEXT PRIMARY KEY,
-        reference_asset_id TEXT NOT NULL,
-        outcome TEXT CHECK (outcome IS NULL OR outcome IN ('complete','partial','failed')),
-        current_bundle_artifact_id TEXT,
-        FOREIGN KEY (run_id) REFERENCES runs(run_id),
-        FOREIGN KEY (reference_asset_id) REFERENCES reference_assets(reference_asset_id)
-    )
-    """,
-    """
-    CREATE TABLE reference_work_items (
-        work_item_id TEXT PRIMARY KEY,
-        run_id TEXT NOT NULL,
-        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-        branch TEXT NOT NULL,
-        evidence_role TEXT NOT NULL,
-        status TEXT NOT NULL
-            CHECK (status IN ('pending','running','succeeded','failed','interrupted')),
-        work_spec_json TEXT NOT NULL,
-        evidence_artifact_id TEXT,
-        failure_code TEXT,
-        failure_details_json TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        UNIQUE (run_id, ordinal),
-        FOREIGN KEY (run_id) REFERENCES reference_runs(run_id)
-    )
-    """,
-    """
-    CREATE TABLE reference_invocation_details (
-        invocation_id TEXT PRIMARY KEY,
-        work_item_id TEXT NOT NULL,
-        branch TEXT NOT NULL,
-        provider TEXT NOT NULL,
-        model TEXT NOT NULL,
-        actual_config_json TEXT NOT NULL,
-        ordered_input_artifacts_json TEXT NOT NULL,
-        response_id TEXT,
-        local_measured_duration REAL,
-        provider_usage_duration REAL,
-        provider_usage_json TEXT,
-        provider_cost REAL,
-        retry_parent_invocation_id TEXT,
-        retry_reason TEXT,
-        failure_code TEXT,
-        failure_details_json TEXT,
-        remote_file_id TEXT,
-        cleanup_status TEXT
-            CHECK (cleanup_status IS NULL OR cleanup_status IN
-                   ('not_applicable','pending','deleted','delete_failed')),
-        FOREIGN KEY (invocation_id) REFERENCES invocations(invocation_id),
-        FOREIGN KEY (work_item_id) REFERENCES reference_work_items(work_item_id),
-        FOREIGN KEY (retry_parent_invocation_id) REFERENCES invocations(invocation_id)
-    )
-    """,
-    """
-    CREATE TABLE artifact_reference_dependencies (
-        project_id TEXT NOT NULL,
-        artifact_id TEXT NOT NULL,
-        ordinal INTEGER NOT NULL,
-        role TEXT NOT NULL,
-        input_reference_asset_id TEXT NOT NULL,
-        coordinate_range_json TEXT,
-        PRIMARY KEY (project_id, artifact_id, ordinal),
-        FOREIGN KEY (project_id, artifact_id) REFERENCES artifacts(project_id, artifact_id),
-        FOREIGN KEY (input_reference_asset_id)
-            REFERENCES reference_assets(reference_asset_id)
-    )
-    """,
-)
-
-REFERENCE_DDL = ";\n\n".join(statement.strip() for statement in REFERENCE_DDL_STATEMENTS) + ";"
-
-LEXICON_DDL = """
-CREATE TABLE IF NOT EXISTS lexicon_runs (
-    run_id TEXT PRIMARY KEY,
-    trigger_reference_run_id TEXT NOT NULL,
-    reference_bundle_artifact_id TEXT NOT NULL,
-    input_manifest_artifact_id TEXT,
-    outcome TEXT CHECK (outcome IS NULL OR outcome IN ('complete','partial','failed')),
-    FOREIGN KEY (run_id) REFERENCES runs(run_id),
-    FOREIGN KEY (trigger_reference_run_id) REFERENCES reference_runs(run_id)
-);
-
-CREATE TABLE IF NOT EXISTS lexicon_work_items (
-    work_item_id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL,
-    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-    evidence_artifact_id TEXT NOT NULL,
-    batch_ordinal INTEGER NOT NULL CHECK (batch_ordinal >= 0),
-    batch_manifest_json TEXT NOT NULL,
-    status TEXT NOT NULL
-        CHECK (status IN ('pending','running','succeeded','failed','interrupted')),
-    candidate_set_artifact_id TEXT,
-    failure_code TEXT,
-    failure_details_json TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE (run_id, ordinal),
-    UNIQUE (evidence_artifact_id, batch_ordinal),
-    FOREIGN KEY (run_id) REFERENCES lexicon_runs(run_id)
-);
-
-CREATE TABLE IF NOT EXISTS lexicon_invocation_details (
-    invocation_id TEXT PRIMARY KEY,
-    work_item_id TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    model TEXT NOT NULL,
-    actual_config_json TEXT NOT NULL,
-    response_id TEXT,
-    provider_usage_json TEXT,
-    provider_cost REAL,
-    retry_parent_invocation_id TEXT,
-    retry_reason TEXT,
-    failure_code TEXT,
-    failure_details_json TEXT,
-    FOREIGN KEY (invocation_id) REFERENCES invocations(invocation_id),
-    FOREIGN KEY (work_item_id) REFERENCES lexicon_work_items(work_item_id),
-    FOREIGN KEY (retry_parent_invocation_id) REFERENCES invocations(invocation_id)
-);
-
-CREATE TABLE IF NOT EXISTS lexicon_evidence_coverage (
-    evidence_artifact_id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL,
-    status TEXT NOT NULL
-        CHECK (status IN ('pending','running','succeeded','failed','interrupted')),
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (run_id) REFERENCES lexicon_runs(run_id)
-);
-
-CREATE TABLE IF NOT EXISTS term_candidates (
-    candidate_id TEXT PRIMARY KEY,
-    normalization_version TEXT NOT NULL,
-    normalized_surface_form TEXT NOT NULL COLLATE BINARY,
-    display_term TEXT NOT NULL,
-    display_category TEXT NOT NULL
-        CHECK (display_category IN ('proper_noun','noun_or_term','verb','other')),
-    proper_noun_subtype TEXT,
-    status TEXT NOT NULL
-        CHECK (status IN ('pending','accepted','edited_accepted','dismissed','blacklisted')),
-    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE (normalization_version, normalized_surface_form)
-);
-
-CREATE TABLE IF NOT EXISTS term_occurrences (
-    occurrence_id TEXT PRIMARY KEY,
-    candidate_id TEXT NOT NULL,
-    evidence_artifact_id TEXT NOT NULL,
-    reference_role TEXT NOT NULL,
-    raw_surface_form TEXT NOT NULL,
-    suggested_surface_form TEXT,
-    proposed_category TEXT NOT NULL
-        CHECK (proposed_category IN ('proper_noun','noun_or_term','verb','other')),
-    proper_noun_subtype TEXT,
-    risk_tags_json TEXT NOT NULL,
-    field_path_json TEXT NOT NULL,
-    start_offset INTEGER NOT NULL CHECK (start_offset >= 0),
-    end_offset INTEGER NOT NULL CHECK (end_offset > start_offset),
-    context_before TEXT NOT NULL,
-    context_after TEXT NOT NULL,
-    coordinates_json TEXT,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (candidate_id) REFERENCES term_candidates(candidate_id),
-    UNIQUE (candidate_id, evidence_artifact_id, field_path_json,
-            start_offset, end_offset, raw_surface_form)
-);
-
-CREATE TABLE IF NOT EXISTS candidate_decisions (
-    decision_id TEXT PRIMARY KEY,
-    candidate_id TEXT,
-    action TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (candidate_id) REFERENCES term_candidates(candidate_id)
-);
-
-CREATE TABLE IF NOT EXISTS project_lexicon_entries (
-    entry_id TEXT PRIMARY KEY,
-    term TEXT NOT NULL,
-    normalization_version TEXT NOT NULL,
-    normalized_surface_form TEXT NOT NULL COLLATE BINARY,
-    category TEXT NOT NULL
-        CHECK (category IN ('proper_noun','noun_or_term','verb','other')),
-    proper_noun_subtype TEXT,
-    source_candidate_id TEXT,
-    enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),
-    status TEXT NOT NULL CHECK (status IN ('active','removed')),
-    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (source_candidate_id) REFERENCES term_candidates(candidate_id)
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS project_lexicon_active_term
-ON project_lexicon_entries(normalization_version, normalized_surface_form)
-WHERE status='active';
-
-CREATE TABLE IF NOT EXISTS project_lexicon_revisions (
-    revision_id TEXT PRIMARY KEY,
-    ordinal INTEGER NOT NULL UNIQUE CHECK (ordinal >= 1),
-    parent_revision_id TEXT,
-    artifact_id TEXT NOT NULL,
-    decision_id TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (parent_revision_id) REFERENCES project_lexicon_revisions(revision_id),
-    FOREIGN KEY (decision_id) REFERENCES candidate_decisions(decision_id)
-);
-
-CREATE TABLE IF NOT EXISTS lexicon_blacklist (
-    blacklist_id TEXT PRIMARY KEY,
-    normalization_version TEXT NOT NULL,
-    normalized_surface_form TEXT NOT NULL COLLATE BINARY,
-    surface_form TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('temporary','permanent')),
-    expires_at TEXT,
-    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    CHECK (
-        (kind='temporary' AND expires_at IS NOT NULL)
-        OR (kind='permanent' AND expires_at IS NULL)
-    ),
-    UNIQUE (normalization_version, normalized_surface_form)
-);
-"""
-
-DDL = f"""
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
-
-CREATE TABLE IF NOT EXISTS projects (
+_SCHEMA = f"""
+CREATE TABLE projects (
     project_id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS source_assets (
+CREATE TABLE source_assets (
     project_id TEXT NOT NULL,
     source_asset_id TEXT NOT NULL,
     filename TEXT NOT NULL,
-    asset_kind TEXT NOT NULL CHECK (asset_kind IN ('media','auxiliary')),
+    asset_kind TEXT NOT NULL CHECK (asset_kind = 'media'),
     media_kind TEXT,
     format TEXT NOT NULL,
-    storage_mode TEXT NOT NULL,
+    storage_mode TEXT NOT NULL CHECK (storage_mode = 'external_reference'),
     storage_locator TEXT NOT NULL,
     registered_at TEXT NOT NULL,
     PRIMARY KEY (project_id, source_asset_id),
@@ -582,7 +136,7 @@ CREATE TABLE IF NOT EXISTS source_assets (
     FOREIGN KEY (project_id) REFERENCES projects(project_id)
 );
 
-CREATE TABLE IF NOT EXISTS artifacts (
+CREATE TABLE artifacts (
     project_id TEXT NOT NULL,
     artifact_id TEXT NOT NULL,
     artifact_kind TEXT NOT NULL,
@@ -592,11 +146,11 @@ CREATE TABLE IF NOT EXISTS artifacts (
     storage_locator TEXT NOT NULL,
     created_at TEXT NOT NULL,
     PRIMARY KEY (project_id, artifact_id),
-    UNIQUE (project_id, content_hash),
+    UNIQUE (project_id, artifact_kind, scope_key, content_hash),
     FOREIGN KEY (project_id) REFERENCES projects(project_id)
 );
 
-CREATE TABLE IF NOT EXISTS artifact_dependencies (
+CREATE TABLE artifact_dependencies (
     project_id TEXT NOT NULL,
     artifact_id TEXT NOT NULL,
     ordinal INTEGER NOT NULL,
@@ -605,60 +159,88 @@ CREATE TABLE IF NOT EXISTS artifact_dependencies (
     input_source_asset_id TEXT,
     coordinate_range_json TEXT,
     PRIMARY KEY (project_id, artifact_id, ordinal),
-    CHECK ((input_artifact_id IS NULL) <> (input_source_asset_id IS NULL)),
+    CHECK ((input_artifact_id IS NOT NULL) != (input_source_asset_id IS NOT NULL)),
     FOREIGN KEY (project_id, artifact_id) REFERENCES artifacts(project_id, artifact_id),
     FOREIGN KEY (project_id, input_artifact_id) REFERENCES artifacts(project_id, artifact_id),
     FOREIGN KEY (project_id, input_source_asset_id)
         REFERENCES source_assets(project_id, source_asset_id)
 );
 
-CREATE TABLE IF NOT EXISTS current_pointers (
+CREATE TABLE current_pointers (
     project_id TEXT NOT NULL,
     artifact_kind TEXT NOT NULL,
     scope_key TEXT NOT NULL,
     artifact_id TEXT NOT NULL,
-    is_stale INTEGER NOT NULL DEFAULT 0 CHECK (is_stale IN (0,1)),
+    storage_locator TEXT NOT NULL,
+    is_stale INTEGER NOT NULL CHECK (is_stale IN (0, 1)),
     updated_at TEXT NOT NULL,
     PRIMARY KEY (project_id, artifact_kind, scope_key),
     FOREIGN KEY (project_id, artifact_id) REFERENCES artifacts(project_id, artifact_id)
 );
 
-CREATE TABLE IF NOT EXISTS runs (
+CREATE TABLE runs (
     run_id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('source','reference','lexicon')),
-    status TEXT NOT NULL,
-    input_identity_json TEXT NOT NULL,
+    operation_kind TEXT NOT NULL CHECK (operation_kind IN ('run', 'correct')),
+    status TEXT NOT NULL CHECK (
+        status IN ('created', 'running', 'needs_review', 'succeeded', 'failed', 'interrupted')
+    ),
+    source_asset_id TEXT NOT NULL,
+    job_input_artifact_id TEXT NOT NULL,
     config_hash TEXT NOT NULL,
+    error_message TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    error_message TEXT,
-    FOREIGN KEY (project_id) REFERENCES projects(project_id)
+    FOREIGN KEY (project_id) REFERENCES projects(project_id),
+    FOREIGN KEY (project_id, source_asset_id)
+        REFERENCES source_assets(project_id, source_asset_id),
+    FOREIGN KEY (project_id, job_input_artifact_id)
+        REFERENCES artifacts(project_id, artifact_id)
 );
 
-CREATE TABLE IF NOT EXISTS invocations (
+CREATE TABLE invocations (
     invocation_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
-    chunk_id TEXT,
-    operation TEXT NOT NULL,
+    operation TEXT NOT NULL CHECK (
+        operation IN (
+            'media_upload', 'qwen_asr', 'doubao_asr', 'glm_asr',
+            'qwen_correction', 'kimi_correction', 'ata'
+        )
+    ),
     logical_operation_key TEXT NOT NULL,
-    attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
-    semantic_budget_window INTEGER NOT NULL DEFAULT 0
-        CHECK (semantic_budget_window BETWEEN 0 AND {SEMANTIC_RETRY_RESET_LIMIT}),
-    status TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN (
+            'created', 'sending', 'succeeded', 'definitely_not_sent',
+            'delivery_ambiguous', 'explicit_failure'
+        )
+    ),
     provider TEXT NOT NULL,
-    model TEXT NOT NULL,
+    requested_model TEXT,
+    resolved_model TEXT,
+    idempotency_key TEXT NOT NULL,
+    remote_job_id TEXT,
+    remote_status TEXT,
+    remote_artifact_refs_json TEXT,
     response_id TEXT,
+    elapsed_ms INTEGER,
+    reasoning_ms INTEGER,
+    usage_json TEXT,
+    prompt_version TEXT,
+    prompt_sha256 TEXT,
     artifact_id TEXT,
     error_message TEXT,
+    retry_of_invocation_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (run_id) REFERENCES runs(run_id),
-    FOREIGN KEY (project_id, artifact_id) REFERENCES artifacts(project_id, artifact_id)
+    FOREIGN KEY (project_id, artifact_id) REFERENCES artifacts(project_id, artifact_id),
+    FOREIGN KEY (retry_of_invocation_id) REFERENCES invocations(invocation_id)
 );
 
-CREATE TABLE IF NOT EXISTS invocation_inputs (
+CREATE INDEX invocations_run_order ON invocations(run_id, created_at, invocation_id);
+
+CREATE TABLE invocation_inputs (
     invocation_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
     ordinal INTEGER NOT NULL,
@@ -666,182 +248,107 @@ CREATE TABLE IF NOT EXISTS invocation_inputs (
     input_artifact_id TEXT NOT NULL,
     PRIMARY KEY (invocation_id, ordinal),
     FOREIGN KEY (invocation_id) REFERENCES invocations(invocation_id),
-    FOREIGN KEY (project_id, input_artifact_id) REFERENCES artifacts(project_id, artifact_id)
+    FOREIGN KEY (project_id, input_artifact_id)
+        REFERENCES artifacts(project_id, artifact_id)
 );
 
-CREATE TABLE IF NOT EXISTS semantic_budget_resets (
-    run_id TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    chunk_id TEXT NOT NULL,
-    window_index INTEGER NOT NULL
-        CHECK (window_index BETWEEN 1 AND {SEMANTIC_RETRY_RESET_LIMIT}),
-    trigger_invocation_id TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    PRIMARY KEY (run_id, chunk_id, window_index),
-    UNIQUE (trigger_invocation_id),
-    FOREIGN KEY (run_id) REFERENCES runs(run_id),
-    FOREIGN KEY (trigger_invocation_id) REFERENCES invocations(invocation_id)
+CREATE TABLE run_checkpoints (
+    run_id TEXT NOT NULL REFERENCES runs(run_id),
+    stage TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    input_digest TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    PRIMARY KEY(run_id, stage, scope_key)
 );
-
-{REFERENCE_DDL}
-
-{LEXICON_DDL}
-
 PRAGMA user_version = {REGISTRY_SCHEMA_VERSION};
 """
 
 
-def _validate_schema_connection(
-    connection: sqlite3.Connection,
-    required_tables: frozenset[str],
-    expected_table_columns: Mapping[str, tuple[str, ...]],
-) -> None:
-    tables = {
-        str(row[0])
-        for row in connection.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-        ).fetchall()
-    }
-    missing_tables = required_tables.difference(tables)
-    if missing_tables:
-        raise IntegrityError(
-            f"CueFlow registry schema is incomplete: missing tables {sorted(missing_tables)}"
-        )
-    for table, expected_columns in expected_table_columns.items():
-        actual_columns = tuple(
-            str(row[1])
-            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
-        )
-        if actual_columns != expected_columns:
-            raise IntegrityError(
-                f"CueFlow registry {table} schema does not match the expected contract"
-            )
-
-
 class Registry:
     def __init__(self, path: Path) -> None:
-        self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(path)
-        self._connection.row_factory = sqlite3.Row
-        try:
-            self._initialize_or_validate_schema()
-        except BaseException:
-            self._connection.close()
-            raise
-
-    def _initialize_or_validate_schema(self) -> None:
-        self._connection.execute("PRAGMA foreign_keys = ON")
+        self.path = path
+        self.connection = sqlite3.connect(path)
+        self.connection.row_factory = sqlite3.Row
+        self.connection.execute("PRAGMA foreign_keys = ON")
+        version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
         tables = self._table_names()
-        version_row = self._connection.execute("PRAGMA user_version").fetchone()
-        assert version_row is not None
-        version = int(version_row[0])
-        if not tables and version == 0:
-            self._connection.executescript(DDL)
-            self._validate_schema(self._table_names())
-            return
-        if version != REGISTRY_SCHEMA_VERSION:
+        if version == 0 and not tables:
+            self.connection.executescript(_SCHEMA)
+            self.connection.commit()
+        elif version != REGISTRY_SCHEMA_VERSION:
+            self.connection.close()
             raise IntegrityError(
-                "incompatible CueFlow registry schema: "
-                f"expected {REGISTRY_SCHEMA_VERSION}, found {version}. "
-                "Create a new project in an empty directory; existing data was not modified."
+                "incompatible Registry schema: "
+                f"expected {REGISTRY_SCHEMA_VERSION}, found {version}; "
+                "CueFlow v0.5.2 does not migrate older projects"
             )
-        self._validate_schema(tables)
-
-    def _table_names(self) -> set[str]:
-        return {
-            str(row[0])
-            for row in self._connection.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-            ).fetchall()
-        }
-
-    def _validate_schema(self, tables: set[str]) -> None:
-        del tables
-        _validate_schema_connection(
-            self._connection,
-            REQUIRED_TABLES,
-            SOURCE_TABLE_COLUMNS | REFERENCE_TABLE_COLUMNS | LEXICON_TABLE_COLUMNS,
-        )
-
-    def _table_columns(self, table: str) -> tuple[str, ...]:
-        return tuple(
-            str(row[1])
-            for row in self._connection.execute(f"PRAGMA table_info({table})").fetchall()
-        )
+        actual_tables = self._table_names()
+        if actual_tables != REQUIRED_TABLES:
+            self.connection.close()
+            raise IntegrityError(
+                "Registry tables do not match the current contract: "
+                f"expected {sorted(REQUIRED_TABLES)}, found {sorted(actual_tables)}"
+            )
+        for table, expected in REQUIRED_TABLE_COLUMNS.items():
+            actual = self._table_columns(table)
+            if actual != expected:
+                self.connection.close()
+                raise IntegrityError(
+                    f"Registry columns do not match for {table}: "
+                    f"expected {list(expected)}, found {list(actual)}"
+                )
 
     def close(self) -> None:
-        self._connection.close()
+        self.connection.close()
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        if self._connection.in_transaction:
-            yield self._connection
-            return
-        self._connection.execute("BEGIN IMMEDIATE")
+        nested = self.connection.in_transaction
+        savepoint = "nested_" + uuid.uuid4().hex
         try:
-            yield self._connection
+            self.connection.execute(f"SAVEPOINT {savepoint}" if nested else "BEGIN IMMEDIATE")
+            yield self.connection
         except BaseException:
-            self._connection.rollback()
+            if nested:
+                self.connection.execute(f"ROLLBACK TO {savepoint}")
+                self.connection.execute(f"RELEASE {savepoint}")
+            else:
+                self.connection.rollback()
             raise
         else:
-            self._connection.commit()
+            if nested:
+                self.connection.execute(f"RELEASE {savepoint}")
+            else:
+                self.connection.commit()
 
     def create_project(self, display_name: str) -> str:
+        if not display_name.strip():
+            raise ContractError("project display name must not be empty")
         project_id = "prj_" + uuid.uuid4().hex
-        self._connection.execute(
+        self.connection.execute(
             "INSERT INTO projects VALUES (?, ?, ?)",
             (project_id, display_name, utc_now()),
         )
-        self._connection.commit()
+        self.connection.commit()
         return project_id
 
     def project(self) -> sqlite3.Row:
-        rows = self._connection.execute("SELECT * FROM projects ORDER BY created_at").fetchall()
+        rows = self.connection.execute("SELECT * FROM projects").fetchall()
         if len(rows) != 1:
-            raise IntegrityError(f"project registry expected one project, found {len(rows)}")
+            raise IntegrityError("Registry must contain exactly one project")
         return cast(sqlite3.Row, rows[0])
 
-    def register_source_asset(
-        self, project_id: str, value: Mapping[str, Any]
-    ) -> sqlite3.Row:
-        required = {
-            "filename",
-            "asset_kind",
-            "format",
-            "storage_mode",
-            "storage_locator",
-            "registered_at",
-        }
-        missing = required.difference(value)
-        if missing:
-            raise ContractError(f"source asset missing fields: {sorted(missing)}")
-        existing = self.source_asset_by_filename(project_id, str(value["filename"]))
+    def register_source_asset(self, project_id: str, value: Mapping[str, Any]) -> sqlite3.Row:
+        existing = self.connection.execute(
+            "SELECT * FROM source_assets WHERE project_id=? AND filename=? COLLATE BINARY",
+            (project_id, str(value["filename"])),
+        ).fetchone()
         if existing is not None:
-            if existing["storage_locator"] != value["storage_locator"]:
-                raise ContractError(
-                    "source filename is already registered at a different locator; "
-                    "Source relink is not available"
-                )
-            self._connection.execute(
-                """
-                UPDATE source_assets
-                SET asset_kind=?, format=?
-                WHERE project_id=? AND source_asset_id=?
-                """,
-                (
-                    value["asset_kind"],
-                    value["format"],
-                    project_id,
-                    existing["source_asset_id"],
-                ),
-            )
-            self._connection.commit()
-            return self.source_asset(project_id, str(existing["source_asset_id"]))
+            return cast(sqlite3.Row, existing)
         source_asset_id = "src_" + uuid.uuid4().hex
-        self._connection.execute(
+        self.connection.execute(
             """
             INSERT INTO source_assets
             (project_id, source_asset_id, filename, asset_kind, media_kind, format,
@@ -860,110 +367,28 @@ class Registry:
                 value["registered_at"],
             ),
         )
-        self._connection.commit()
+        self.connection.commit()
         return self.source_asset(project_id, source_asset_id)
 
-    def source_asset_by_filename(
-        self, project_id: str, filename: str
-    ) -> sqlite3.Row | None:
-        return cast(
-            sqlite3.Row | None,
-            self._connection.execute(
-                "SELECT * FROM source_assets WHERE project_id=? AND filename=?",
-                (project_id, filename),
-            ).fetchone(),
-        )
-
     def source_asset(self, project_id: str, source_asset_id: str) -> sqlite3.Row:
-        row = self._connection.execute(
+        row = self.connection.execute(
             "SELECT * FROM source_assets WHERE project_id=? AND source_asset_id=?",
             (project_id, source_asset_id),
         ).fetchone()
         if row is None:
-            raise IntegrityError(f"unknown source asset: {source_asset_id}")
+            raise IntegrityError(f"unknown SourceAsset: {source_asset_id}")
         return cast(sqlite3.Row, row)
 
-    def set_source_media_kind(
-        self, project_id: str, source_asset_id: str, media_kind: str
-    ) -> None:
+    def set_source_media_kind(self, project_id: str, source_asset_id: str, media_kind: str) -> None:
         if media_kind not in {"audio", "video"}:
             raise ContractError("invalid source media kind")
-        self._connection.execute(
-            "UPDATE source_assets SET media_kind=? "
-            "WHERE project_id=? AND source_asset_id=?",
+        cursor = self.connection.execute(
+            "UPDATE source_assets SET media_kind=? WHERE project_id=? AND source_asset_id=?",
             (media_kind, project_id, source_asset_id),
         )
-        self._connection.commit()
-
-    def register_reference_asset(self, value: Mapping[str, Any]) -> sqlite3.Row:
-        required = {
-            "filename",
-            "locator",
-            "detected_format",
-            "media_category",
-            "registered_at",
-        }
-        missing = required.difference(value)
-        if missing:
-            raise ContractError(f"ReferenceAsset missing fields: {sorted(missing)}")
-        existing = self.reference_asset_by_filename(str(value["filename"]))
-        if existing is not None:
-            return existing
-        media_category = str(value["media_category"])
-        if media_category not in {"document", "image", "audio", "video"}:
-            raise ContractError("invalid Reference media category")
-        reference_asset_id = "ref_" + uuid.uuid4().hex
-        self._connection.execute(
-            """
-            INSERT INTO reference_assets
-            (reference_asset_id, filename, locator, detected_format, media_category,
-             registered_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                reference_asset_id,
-                value["filename"],
-                value["locator"],
-                value["detected_format"],
-                media_category,
-                value["registered_at"],
-            ),
-        )
-        self._connection.commit()
-        return self.reference_asset(reference_asset_id)
-
-    def reference_asset_by_filename(self, filename: str) -> sqlite3.Row | None:
-        return cast(
-            sqlite3.Row | None,
-            self._connection.execute(
-                "SELECT * FROM reference_assets WHERE filename=? COLLATE BINARY",
-                (filename,),
-            ).fetchone(),
-        )
-
-    def reference_asset(self, reference_asset_id: str) -> sqlite3.Row:
-        row = self._connection.execute(
-            "SELECT * FROM reference_assets WHERE reference_asset_id=?",
-            (reference_asset_id,),
-        ).fetchone()
-        if row is None:
-            raise IntegrityError(f"unknown ReferenceAsset: {reference_asset_id}")
-        return cast(sqlite3.Row, row)
-
-    def reference_assets(self) -> list[sqlite3.Row]:
-        return self._connection.execute(
-            "SELECT * FROM reference_assets ORDER BY registered_at, reference_asset_id"
-        ).fetchall()
-
-    def update_reference_locator(self, reference_asset_id: str, locator: str) -> None:
-        cursor = self._connection.execute(
-            "UPDATE reference_assets SET locator=? WHERE reference_asset_id=?",
-            (locator, reference_asset_id),
-        )
         if cursor.rowcount != 1:
-            self._connection.rollback()
-            raise IntegrityError(f"unknown ReferenceAsset: {reference_asset_id}")
-        self._connection.commit()
+            raise IntegrityError(f"unknown SourceAsset: {source_asset_id}")
+        self.connection.commit()
 
     def publish_artifact(
         self,
@@ -971,819 +396,278 @@ class Registry:
         project_id: str,
         envelope: ArtifactEnvelope,
         storage_locator: str,
-        make_current: bool = True,
-        stale_targets: Sequence[tuple[str, str | None]] = (),
+        make_current: bool,
+        stale_targets: Sequence[tuple[str, str | None]],
+        checkpoint: tuple[str, str, str, str] | None = None,
+        invocation_id: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> None:
-        if not Path(storage_locator).is_file():
-            raise IntegrityError("artifact file must exist before registry publication")
-        with self.transaction() as connection:
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO artifacts
-                (project_id, artifact_id, artifact_kind, scope_key, schema_version,
-                 content_hash, storage_locator, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    project_id,
-                    envelope.artifact_id,
-                    envelope.artifact_kind,
-                    envelope.scope_key,
-                    envelope.schema_version,
-                    envelope.content_hash,
-                    storage_locator,
-                    envelope.created_at,
-                ),
-            )
-            for ordinal, item in enumerate(envelope.inputs):
-                coordinate_range_json = (
-                    json.dumps(item.coordinate_range, ensure_ascii=False, sort_keys=True)
-                    if item.coordinate_range is not None
-                    else None
-                )
-                if item.reference_asset_id is not None:
-                    connection.execute(
-                        """
-                        INSERT OR IGNORE INTO artifact_reference_dependencies
-                        (project_id, artifact_id, ordinal, role, input_reference_asset_id,
-                         coordinate_range_json)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            project_id,
-                            envelope.artifact_id,
-                            ordinal,
-                            item.role,
-                            item.reference_asset_id,
-                            coordinate_range_json,
-                        ),
-                    )
-                else:
-                    connection.execute(
-                        """
-                        INSERT OR IGNORE INTO artifact_dependencies
-                        (project_id, artifact_id, ordinal, role, input_artifact_id,
-                         input_source_asset_id, coordinate_range_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            project_id,
-                            envelope.artifact_id,
-                            ordinal,
-                            item.role,
-                            item.artifact_id,
-                            item.source_asset_id,
-                            coordinate_range_json,
-                        ),
-                    )
-            for artifact_kind, scope_key in stale_targets:
-                if scope_key is None:
-                    connection.execute(
-                        "UPDATE current_pointers SET is_stale=1 "
-                        "WHERE project_id=? AND artifact_kind=?",
-                        (project_id, artifact_kind),
-                    )
-                else:
-                    connection.execute(
-                        """
-                        UPDATE current_pointers SET is_stale=1
-                        WHERE project_id=? AND artifact_kind=? AND scope_key=?
-                        """,
-                        (project_id, artifact_kind, scope_key),
-                    )
-            if make_current:
-                connection.execute(
-                    """
-                    INSERT INTO current_pointers
-                    (project_id, artifact_kind, scope_key, artifact_id, is_stale, updated_at)
-                    VALUES (?, ?, ?, ?, 0, ?)
-                    ON CONFLICT(project_id, artifact_kind, scope_key) DO UPDATE SET
-                      artifact_id=excluded.artifact_id,
-                      is_stale=0,
-                      updated_at=excluded.updated_at
-                    """,
+        with self.transaction() as tx:
+            existing = tx.execute(
+                "SELECT * FROM artifacts WHERE project_id=? AND artifact_id=?",
+                (project_id, envelope.artifact_id),
+            ).fetchone()
+            if existing is None:
+                tx.execute(
+                    "INSERT INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         project_id,
+                        envelope.artifact_id,
                         envelope.artifact_kind,
                         envelope.scope_key,
-                        envelope.artifact_id,
-                        utc_now(),
+                        envelope.schema_version,
+                        envelope.content_hash,
+                        storage_locator,
+                        envelope.created_at,
                     ),
                 )
+                self._insert_dependencies(tx, project_id, envelope)
+            elif (
+                existing["content_hash"] != envelope.content_hash
+                or existing["storage_locator"] != storage_locator
+            ):
+                raise IntegrityError("Artifact identity collides with different stored content")
+            self._stale(tx, project_id, stale_targets)
+            if make_current:
+                self._activate(tx, project_id, envelope.artifact_id)
+            if checkpoint is not None:
+                self._checkpoint_tx(tx, *checkpoint, envelope.artifact_id)
+            if invocation_id is not None:
+                row = self.invocation(invocation_id)
+                if row["project_id"] != project_id or checkpoint is None:
+                    raise IntegrityError("completion must bind a project and run checkpoint")
+                if row["run_id"] != checkpoint[0] or row["status"] != "sending":
+                    raise IntegrityError("invalid invocation completion")
+                details = metadata or {}
+                tx.execute(
+                    """UPDATE invocations SET status='succeeded', artifact_id=?,
+                    resolved_model=?, response_id=?, elapsed_ms=?, reasoning_ms=?,
+                    usage_json=?, error_message=NULL, updated_at=? WHERE invocation_id=?""",
+                    (
+                        envelope.artifact_id,
+                        details.get("resolved_model"),
+                        details.get("response_id"),
+                        details.get("elapsed_ms"),
+                        details.get("reasoning_ms"),
+                        json.dumps(details.get("usage"), ensure_ascii=False),
+                        utc_now(),
+                        invocation_id,
+                    ),
+                )
+
+    def _checkpoint_tx(
+        self,
+        tx: sqlite3.Connection,
+        run_id: str,
+        stage: str,
+        scope: str,
+        digest: str,
+        artifact_id: str,
+    ) -> None:
+        run = self.run(run_id)
+        artifact = self.artifact(str(run["project_id"]), artifact_id)
+        if artifact["artifact_kind"] != stage or artifact["scope_key"] != scope:
+            raise IntegrityError("checkpoint kind/scope must match its artifact")
+        prior = self.checkpoint(run_id, stage, scope)
+        if prior is not None and prior["input_digest"] != digest:
+            raise IntegrityError("checkpoint input identity changed inside a run")
+        if prior is not None and prior["artifact_id"] == artifact_id:
+            return
+        tx.execute(
+            """INSERT INTO run_checkpoints VALUES (?, ?, ?, ?, ?, 1)
+            ON CONFLICT(run_id, stage, scope_key) DO UPDATE SET
+                artifact_id=excluded.artifact_id, revision=run_checkpoints.revision+1""",
+            (run_id, stage, scope, digest, artifact_id),
+        )
+
+    def checkpoint(self, run_id: str, stage: str, scope: str = "global") -> sqlite3.Row | None:
+        return cast(
+            sqlite3.Row | None,
+            self.connection.execute(
+                "SELECT * FROM run_checkpoints WHERE run_id=? AND stage=? AND scope_key=?",
+                (run_id, stage, scope),
+            ).fetchone(),
+        )
+
+    def bind_checkpoint(
+        self,
+        run_id: str,
+        stage: str,
+        artifact_id: str,
+        digest: str,
+        scope: str = "global",
+    ) -> None:
+        with self.transaction() as tx:
+            self._checkpoint_tx(tx, run_id, stage, scope, digest, artifact_id)
+
+    def activate_artifacts(
+        self,
+        project_id: str,
+        artifact_ids: Sequence[str],
+        stale_targets: Sequence[tuple[str, str | None]] = (),
+    ) -> None:
+        with self.transaction() as tx:
+            self._stale(tx, project_id, stale_targets)
+            for artifact_id in artifact_ids:
+                self._activate(tx, project_id, artifact_id)
+
+    def artifact(self, project_id: str, artifact_id: str) -> sqlite3.Row:
+        row = self.connection.execute(
+            "SELECT * FROM artifacts WHERE project_id=? AND artifact_id=?",
+            (project_id, artifact_id),
+        ).fetchone()
+        if row is None:
+            raise IntegrityError(f"unknown Artifact: {artifact_id}")
+        return cast(sqlite3.Row, row)
 
     def current_pointer(
         self, project_id: str, artifact_kind: str, scope_key: str
     ) -> sqlite3.Row | None:
         return cast(
             sqlite3.Row | None,
-            self._connection.execute(
-            """
-            SELECT p.*, a.storage_locator, a.content_hash, a.schema_version
-            FROM current_pointers p
-            JOIN artifacts a ON a.project_id=p.project_id AND a.artifact_id=p.artifact_id
-            WHERE p.project_id=? AND p.artifact_kind=? AND p.scope_key=?
+            self.connection.execute(
+                """
+            SELECT * FROM current_pointers
+            WHERE project_id=? AND artifact_kind=? AND scope_key=?
             """,
-            (project_id, artifact_kind, scope_key),
+                (project_id, artifact_kind, scope_key),
             ).fetchone(),
         )
 
-    def artifact(self, project_id: str, artifact_id: str) -> sqlite3.Row:
-        row = self._connection.execute(
-            "SELECT * FROM artifacts WHERE project_id=? AND artifact_id=?",
-            (project_id, artifact_id),
-        ).fetchone()
-        if row is None:
-            raise IntegrityError(f"unknown artifact: {artifact_id}")
-        return cast(sqlite3.Row, row)
-
-    def reference_input_artifacts(self, project_id: str) -> list[sqlite3.Row]:
-        return self._connection.execute(
+    def current_artifacts(self, project_id: str) -> list[sqlite3.Row]:
+        return self.connection.execute(
             """
-            SELECT * FROM artifacts
-            WHERE project_id=? AND artifact_kind='reference_input'
-            ORDER BY created_at, artifact_id
+            SELECT * FROM current_pointers WHERE project_id=?
+            ORDER BY artifact_kind, scope_key
             """,
             (project_id,),
         ).fetchall()
 
-    def dependent_artifacts(
-        self, project_id: str, input_artifact_id: str, artifact_kind: str | None = None
-    ) -> list[sqlite3.Row]:
-        parameters: list[Any] = [project_id, input_artifact_id]
-        kind_clause = ""
-        if artifact_kind is not None:
-            kind_clause = " AND a.artifact_kind=?"
-            parameters.append(artifact_kind)
-        return self._connection.execute(
+    def dependencies(self, project_id: str, artifact_id: str) -> list[sqlite3.Row]:
+        return self.connection.execute(
             """
-            SELECT a.* FROM artifact_dependencies d
-            JOIN artifacts a ON a.project_id=d.project_id AND a.artifact_id=d.artifact_id
-            WHERE d.project_id=? AND d.input_artifact_id=?
-            """
-            + kind_clause
-            + " ORDER BY a.scope_key, a.created_at, a.artifact_id",
-            parameters,
+            SELECT * FROM artifact_dependencies
+            WHERE project_id=? AND artifact_id=? ORDER BY ordinal
+            """,
+            (project_id, artifact_id),
         ).fetchall()
 
-    def activate_artifacts(
-        self,
-        project_id: str,
-        artifact_ids: Sequence[str],
-        *,
-        stale_targets: Sequence[tuple[str, str | None]] = (),
-    ) -> None:
-        """Atomically switch a complete stage result set to current."""
-        with self.transaction() as connection:
-            rows = connection.execute(
-                f"SELECT artifact_id, artifact_kind, scope_key FROM artifacts "
-                f"WHERE project_id=? AND artifact_id IN ({','.join('?' for _ in artifact_ids)})",
-                (project_id, *artifact_ids),
-            ).fetchall()
-            if len(rows) != len(set(artifact_ids)):
-                raise IntegrityError("cannot activate missing artifacts")
-            for artifact_kind, scope_key in stale_targets:
-                if scope_key is None:
-                    connection.execute(
-                        "UPDATE current_pointers SET is_stale=1 "
-                        "WHERE project_id=? AND artifact_kind=?",
-                        (project_id, artifact_kind),
-                    )
-                else:
-                    connection.execute(
-                        "UPDATE current_pointers SET is_stale=1 "
-                        "WHERE project_id=? AND artifact_kind=? AND scope_key=?",
-                        (project_id, artifact_kind, scope_key),
-                    )
-            for row in rows:
-                connection.execute(
-                    """
-                    INSERT INTO current_pointers
-                    (project_id, artifact_kind, scope_key, artifact_id, is_stale, updated_at)
-                    VALUES (?, ?, ?, ?, 0, ?)
-                    ON CONFLICT(project_id, artifact_kind, scope_key) DO UPDATE SET
-                      artifact_id=excluded.artifact_id,
-                      is_stale=0,
-                      updated_at=excluded.updated_at
-                    """,
-                    (
-                        project_id,
-                        row["artifact_kind"],
-                        row["scope_key"],
-                        row["artifact_id"],
-                        utc_now(),
-                    ),
-                )
-
-    def current_pointers(
-        self, project_id: str, artifact_kind: str | None = None
+    def dependent_artifacts(
+        self, project_id: str, input_artifact_id: str, artifact_kind: str
     ) -> list[sqlite3.Row]:
-        if artifact_kind is None:
-            return self._connection.execute(
-                "SELECT * FROM current_pointers WHERE project_id=? "
-                "ORDER BY artifact_kind, scope_key",
-                (project_id,),
-            ).fetchall()
-        return self._connection.execute(
+        return self.connection.execute(
             """
-            SELECT * FROM current_pointers
-            WHERE project_id=? AND artifact_kind=? ORDER BY scope_key
+            SELECT a.* FROM artifacts a
+            JOIN artifact_dependencies d
+              ON d.project_id=a.project_id AND d.artifact_id=a.artifact_id
+            WHERE a.project_id=? AND d.input_artifact_id=? AND a.artifact_kind=?
+            ORDER BY a.created_at, a.artifact_id
             """,
-            (project_id, artifact_kind),
+            (project_id, input_artifact_id, artifact_kind),
         ).fetchall()
 
     def create_source_run(
-        self, project_id: str, input_identity: Mapping[str, Any], config_hash: str
+        self,
+        project_id: str,
+        *,
+        operation_kind: str,
+        source_asset_id: str,
+        job_input_artifact_id: str,
+        config_hash: str,
     ) -> str:
+        if operation_kind not in {"run", "correct"}:
+            raise ContractError("invalid source Run operation kind")
+        self.source_asset(project_id, source_asset_id)
+        self.artifact(project_id, job_input_artifact_id)
         run_id = "run_" + uuid.uuid4().hex
         now = utc_now()
-        self._connection.execute(
-            "INSERT INTO runs VALUES (?, ?, 'source', 'created', ?, ?, ?, ?, NULL)",
+        self.connection.execute(
+            "INSERT INTO runs VALUES (?, ?, ?, 'created', ?, ?, ?, NULL, ?, ?)",
             (
                 run_id,
                 project_id,
-                json.dumps(input_identity, ensure_ascii=False, sort_keys=True),
+                operation_kind,
+                source_asset_id,
+                job_input_artifact_id,
                 config_hash,
                 now,
                 now,
             ),
         )
-        self._connection.commit()
+        self.connection.commit()
         return run_id
 
-    def create_reference_run(
-        self,
-        project_id: str,
-        reference_asset_id: str,
-        input_identity: Mapping[str, Any],
-        config_hash: str,
-    ) -> str:
-        self.reference_asset(reference_asset_id)
-        run_id = "run_" + uuid.uuid4().hex
-        now = utc_now()
-        with self.transaction() as connection:
-            connection.execute(
-                "INSERT INTO runs VALUES (?, ?, 'reference', 'created', ?, ?, ?, ?, NULL)",
-                (
-                    run_id,
-                    project_id,
-                    json.dumps(input_identity, ensure_ascii=False, sort_keys=True),
-                    config_hash,
-                    now,
-                    now,
-                ),
-            )
-            connection.execute(
-                "INSERT INTO reference_runs VALUES (?, ?, NULL, NULL)",
-                (run_id, reference_asset_id),
-            )
-        return run_id
-
-    def create_lexicon_run(
-        self,
-        project_id: str,
-        trigger_reference_run_id: str,
-        reference_bundle_artifact_id: str,
-        input_identity: Mapping[str, Any],
-        config_hash: str,
-    ) -> str:
-        trigger = self.reference_run(trigger_reference_run_id)
-        if trigger["project_id"] != project_id:
-            raise ContractError("trigger Reference Run belongs to a different project")
-        self.artifact(project_id, reference_bundle_artifact_id)
-        run_id = "run_" + uuid.uuid4().hex
-        now = utc_now()
-        with self.transaction() as connection:
-            connection.execute(
-                """
-                INSERT INTO runs
-                (run_id, project_id, kind, status, input_identity_json, config_hash,
-                 created_at, updated_at, error_message)
-                VALUES (?, ?, 'lexicon', 'created', ?, ?, ?, ?, NULL)
-                """,
-                (
-                    run_id,
-                    project_id,
-                    json.dumps(input_identity, ensure_ascii=False, sort_keys=True),
-                    config_hash,
-                    now,
-                    now,
-                ),
-            )
-            connection.execute(
-                """
-                INSERT INTO lexicon_runs
-                (run_id, trigger_reference_run_id, reference_bundle_artifact_id,
-                 input_manifest_artifact_id, outcome)
-                VALUES (?, ?, ?, NULL, NULL)
-                """,
-                (run_id, trigger_reference_run_id, reference_bundle_artifact_id),
-            )
-        return run_id
-
-    def create_lexicon_coverage(self, *, run_id: str, evidence_artifact_id: str) -> None:
-        now = utc_now()
-        self._connection.execute(
-            """
-            INSERT INTO lexicon_evidence_coverage
-            (evidence_artifact_id, run_id, status, created_at, updated_at)
-            VALUES (?, ?, 'pending', ?, ?)
-            """,
-            (evidence_artifact_id, run_id, now, now),
-        )
-        self._connection.commit()
-
-    def create_lexicon_work_item(
-        self,
-        *,
-        run_id: str,
-        ordinal: int,
-        evidence_artifact_id: str,
-        batch_ordinal: int,
-        batch_manifest: Mapping[str, Any],
-    ) -> str:
-        if ordinal < 0:
-            raise ContractError("Lexicon work item ordinal must be non-negative")
-        if batch_ordinal < 0:
-            raise ContractError("Lexicon batch ordinal must be non-negative")
-        work_item_id = "lwi_" + uuid.uuid4().hex
-        now = utc_now()
-        self._connection.execute(
-            """
-            INSERT INTO lexicon_work_items
-            (work_item_id, run_id, ordinal, evidence_artifact_id, batch_ordinal,
-             batch_manifest_json, status, candidate_set_artifact_id, failure_code,
-             failure_details_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, ?, ?)
-            """,
-            (
-                work_item_id,
-                run_id,
-                ordinal,
-                evidence_artifact_id,
-                batch_ordinal,
-                json.dumps(batch_manifest, ensure_ascii=False, sort_keys=True),
-                now,
-                now,
-            ),
-        )
-        self._connection.commit()
-        return work_item_id
-
-    def set_lexicon_input_manifest(self, run_id: str, artifact_id: str) -> None:
-        self._connection.execute(
-            "UPDATE lexicon_runs SET input_manifest_artifact_id=? WHERE run_id=?",
-            (artifact_id, run_id),
-        )
-        self._connection.commit()
-
-    def lexicon_run(self, run_id: str) -> sqlite3.Row:
-        row = self._connection.execute(
-            """
-            SELECT r.*, lr.trigger_reference_run_id, lr.reference_bundle_artifact_id,
-                   lr.input_manifest_artifact_id, lr.outcome
-            FROM runs r JOIN lexicon_runs lr ON lr.run_id=r.run_id
-            WHERE r.run_id=? AND r.kind='lexicon'
-            """,
-            (run_id,),
-        ).fetchone()
+    def run(self, run_id: str) -> sqlite3.Row:
+        row = self.connection.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
         if row is None:
-            raise IntegrityError(f"unknown Lexicon Run: {run_id}")
+            raise IntegrityError(f"unknown Run: {run_id}")
         return cast(sqlite3.Row, row)
 
-    def lexicon_runs(self) -> list[sqlite3.Row]:
-        return self._connection.execute(
-            """
-            SELECT r.*, lr.trigger_reference_run_id, lr.reference_bundle_artifact_id,
-                   lr.input_manifest_artifact_id, lr.outcome
-            FROM runs r JOIN lexicon_runs lr ON lr.run_id=r.run_id
-            WHERE r.kind='lexicon'
-            ORDER BY r.created_at, r.run_id
-            """
+    def runs(self, project_id: str) -> list[sqlite3.Row]:
+        return self.connection.execute(
+            "SELECT * FROM runs WHERE project_id=? ORDER BY created_at, run_id",
+            (project_id,),
         ).fetchall()
 
-    def lexicon_work_item(self, work_item_id: str) -> sqlite3.Row:
-        row = self._connection.execute(
-            "SELECT * FROM lexicon_work_items WHERE work_item_id=?",
-            (work_item_id,),
-        ).fetchone()
-        if row is None:
-            raise IntegrityError(f"unknown Lexicon work item: {work_item_id}")
-        return cast(sqlite3.Row, row)
-
-    def lexicon_work_items_for_run(self, run_id: str) -> list[sqlite3.Row]:
-        return self._connection.execute(
-            "SELECT * FROM lexicon_work_items WHERE run_id=? ORDER BY ordinal",
-            (run_id,),
-        ).fetchall()
-
-    def lexicon_coverage(self, evidence_artifact_id: str) -> sqlite3.Row | None:
-        return cast(
-            sqlite3.Row | None,
-            self._connection.execute(
-                "SELECT * FROM lexicon_evidence_coverage WHERE evidence_artifact_id=?",
-                (evidence_artifact_id,),
-            ).fetchone(),
-        )
-
-    def set_lexicon_work_item_status(
-        self,
-        work_item_id: str,
-        status: str,
-        *,
-        candidate_set_artifact_id: str | None = None,
-        failure_code: str | None = None,
-        failure_details: Mapping[str, Any] | None = None,
-    ) -> None:
-        if status not in {"pending", "running", "succeeded", "failed", "interrupted"}:
-            raise ContractError("invalid Lexicon work item status")
-        now = utc_now()
-        with self.transaction() as connection:
-            connection.execute(
-                """
-                UPDATE lexicon_work_items
-                SET status=?, candidate_set_artifact_id=?, failure_code=?,
-                    failure_details_json=?, updated_at=?
-                WHERE work_item_id=?
-                """,
-                (
-                    status,
-                    candidate_set_artifact_id,
-                    failure_code,
-                    json.dumps(failure_details, ensure_ascii=False, sort_keys=True)
-                    if failure_details is not None
-                    else None,
-                    now,
-                    work_item_id,
-                ),
-            )
-
-    def refresh_lexicon_coverage(self, evidence_artifact_id: str) -> str:
-        rows = self._connection.execute(
-            "SELECT status FROM lexicon_work_items WHERE evidence_artifact_id=?",
-            (evidence_artifact_id,),
-        ).fetchall()
-        statuses = {str(row[0]) for row in rows}
-        if rows and statuses == {"succeeded"}:
-            status = "succeeded"
-        elif "running" in statuses:
-            status = "running"
-        elif "interrupted" in statuses:
-            status = "interrupted"
-        elif "failed" in statuses:
-            status = "failed"
-        else:
-            status = "pending"
-        self._connection.execute(
-            "UPDATE lexicon_evidence_coverage SET status=?, updated_at=? "
-            "WHERE evidence_artifact_id=?",
-            (status, utc_now(), evidence_artifact_id),
-        )
-        self._connection.commit()
-        return status
-
-    def set_lexicon_run_result(
-        self, run_id: str, *, status: str, outcome: str, error_message: str | None
-    ) -> None:
-        if status not in {"succeeded", "failed"}:
-            raise ContractError("Lexicon result status must be succeeded or failed")
-        if outcome not in {"complete", "partial", "failed"}:
-            raise ContractError("invalid Lexicon Run outcome")
-        if (status, outcome) not in {
-            ("succeeded", "complete"),
-            ("failed", "partial"),
-            ("failed", "failed"),
-        }:
-            raise ContractError("Lexicon Run status/outcome combination is invalid")
-        with self.transaction() as connection:
-            connection.execute(
-                "UPDATE lexicon_runs SET outcome=? WHERE run_id=?", (outcome, run_id)
-            )
-            connection.execute(
-                "UPDATE runs SET status=?, error_message=?, updated_at=? WHERE run_id=?",
-                (status, error_message, utc_now(), run_id),
-            )
-
-    def create_reference_work_item(
-        self,
-        *,
-        run_id: str,
-        ordinal: int,
-        branch: str,
-        evidence_role: str,
-        work_spec: Mapping[str, Any],
-    ) -> str:
-        if ordinal < 0:
-            raise ContractError("Reference work item ordinal must be non-negative")
-        work_item_id = "rwi_" + uuid.uuid4().hex
-        now = utc_now()
-        self._connection.execute(
-            """
-            INSERT INTO reference_work_items
-            (work_item_id, run_id, ordinal, branch, evidence_role, status,
-             work_spec_json, evidence_artifact_id, failure_code, failure_details_json,
-             created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, NULL, ?, ?)
-            """,
-            (
-                work_item_id,
-                run_id,
-                ordinal,
-                branch,
-                evidence_role,
-                json.dumps(work_spec, ensure_ascii=False, sort_keys=True),
-                now,
-                now,
-            ),
-        )
-        self._connection.commit()
-        return work_item_id
-
-    def reference_work_item(self, work_item_id: str) -> sqlite3.Row:
-        row = self._connection.execute(
-            "SELECT * FROM reference_work_items WHERE work_item_id=?",
-            (work_item_id,),
-        ).fetchone()
-        if row is None:
-            raise IntegrityError(f"unknown Reference work item: {work_item_id}")
-        return cast(sqlite3.Row, row)
-
-    def reference_work_items_for_run(self, run_id: str) -> list[sqlite3.Row]:
-        return self._connection.execute(
-            "SELECT * FROM reference_work_items WHERE run_id=? ORDER BY ordinal",
-            (run_id,),
-        ).fetchall()
-
-    def set_reference_work_item_status(
-        self,
-        work_item_id: str,
-        status: str,
-        *,
-        evidence_artifact_id: str | None = None,
-        failure_code: str | None = None,
-        failure_details: Mapping[str, Any] | None = None,
-    ) -> None:
-        if status not in {"pending", "running", "succeeded", "failed", "interrupted"}:
-            raise ContractError("invalid Reference work item status")
-        self._connection.execute(
-            """
-            UPDATE reference_work_items
-            SET status=?, evidence_artifact_id=?, failure_code=?, failure_details_json=?,
-                updated_at=?
-            WHERE work_item_id=?
-            """,
-            (
-                status,
-                evidence_artifact_id,
-                failure_code,
-                json.dumps(failure_details, ensure_ascii=False, sort_keys=True)
-                if failure_details is not None
-                else None,
-                utc_now(),
-                work_item_id,
-            ),
-        )
-        self._connection.commit()
-
-    def reference_run(self, run_id: str) -> sqlite3.Row:
-        row = self._connection.execute(
-            """
-            SELECT r.*, rr.reference_asset_id, rr.outcome, rr.current_bundle_artifact_id
-            FROM runs r JOIN reference_runs rr ON rr.run_id=r.run_id
-            WHERE r.run_id=? AND r.kind='reference'
-            """,
-            (run_id,),
-        ).fetchone()
-        if row is None:
-            raise IntegrityError(f"unknown Reference Run: {run_id}")
-        return cast(sqlite3.Row, row)
-
-    def reference_runs(
-        self, reference_asset_id: str | None = None
-    ) -> list[sqlite3.Row]:
-        clause = " WHERE r.kind='reference'"
-        parameters: tuple[str, ...] = ()
-        if reference_asset_id is not None:
-            clause += " AND rr.reference_asset_id=?"
-            parameters = (reference_asset_id,)
-        return self._connection.execute(
-            """
-            SELECT r.*, rr.reference_asset_id, rr.outcome, rr.current_bundle_artifact_id
-            FROM runs r JOIN reference_runs rr ON rr.run_id=r.run_id
-            """
-            + clause
-            + " ORDER BY r.created_at, r.run_id",
-            parameters,
-        ).fetchall()
-
-    def latest_source_run(self, project_id: str) -> sqlite3.Row | None:
-        return cast(
-            sqlite3.Row | None,
-            self._connection.execute(
-                """
-                SELECT r.* FROM runs r
-                WHERE r.project_id=? AND r.kind='source'
-                ORDER BY r.created_at DESC, r.run_id DESC LIMIT 1
-                """,
-                (project_id,),
-            ).fetchone(),
-        )
-
-    def set_reference_run_result(
-        self,
-        run_id: str,
-        *,
-        status: str,
-        outcome: str,
-        bundle_artifact_id: str | None,
-        error_message: str | None,
-    ) -> None:
-        if status not in {"succeeded", "failed"}:
-            raise ContractError("Reference result status must be succeeded or failed")
-        if outcome not in {"complete", "partial", "failed"}:
-            raise ContractError("invalid Reference Run outcome")
-        if (status, outcome) not in {
-            ("succeeded", "complete"),
-            ("failed", "partial"),
-            ("failed", "failed"),
-        }:
-            raise ContractError("Reference Run status/outcome combination is invalid")
-        with self.transaction() as connection:
-            connection.execute(
-                """
-                UPDATE reference_runs
-                SET outcome=?, current_bundle_artifact_id=? WHERE run_id=?
-                """,
-                (outcome, bundle_artifact_id, run_id),
-            )
-            connection.execute(
-                """
-                UPDATE runs SET status=?, error_message=?, updated_at=? WHERE run_id=?
-                """,
-                (status, error_message, utc_now(), run_id),
-            )
-
-    def set_run_status(self, run_id: str, status: str, error_message: str | None = None) -> None:
-        if status not in {"created", "running", "succeeded", "failed", "interrupted"}:
-            raise ContractError("invalid run status")
-        self._connection.execute(
+    def set_run_status(self, run_id: str, status: str, *, error_message: str | None = None) -> None:
+        if status not in {"running", "needs_review", "succeeded", "failed", "interrupted"}:
+            raise ContractError("invalid Run status transition target")
+        cursor = self.connection.execute(
             "UPDATE runs SET status=?, error_message=?, updated_at=? WHERE run_id=?",
             (status, error_message, utc_now(), run_id),
         )
-        self._connection.commit()
+        if cursor.rowcount != 1:
+            raise IntegrityError(f"unknown Run: {run_id}")
+        self.connection.commit()
 
     def reopen_run_for_retry(self, run_id: str) -> None:
         row = self.run(run_id)
-        if row["status"] not in {"failed", "interrupted"}:
-            raise ContractError("targeted retry requires a failed or interrupted Run")
+        if row["status"] not in {"failed", "interrupted", "needs_review"}:
+            raise ContractError("only a failed, interrupted, or review-pending Run can resume")
         self.set_run_status(run_id, "running")
 
-    def run(self, run_id: str) -> sqlite3.Row:
-        row = self._connection.execute(
-            "SELECT * FROM runs WHERE run_id=?", (run_id,)
-        ).fetchone()
-        if row is None:
-            raise IntegrityError(f"unknown run: {run_id}")
-        return cast(sqlite3.Row, row)
+    def finalize_interrupted_run(self, run_id: str, *, run_status: str, error_message: str) -> None:
+        if run_status not in {"failed", "interrupted"}:
+            raise ContractError("invalid interrupted Run terminal status")
+        self.set_run_status(run_id, run_status, error_message=error_message)
 
     def recover_running_source_runs(self) -> list[str]:
-        return self._recover_running_runs(kind="source")
-
-    def recover_running_reference_runs(self) -> list[str]:
-        return self._recover_running_runs(kind="reference")
-
-    def recover_running_lexicon_runs(self) -> list[str]:
-        return self._recover_running_runs(kind="lexicon")
-
-    def _recover_running_runs(self, *, kind: str) -> list[str]:
-        if kind not in RUN_KINDS:
-            raise ContractError("invalid Run kind")
-        run_ids = [
-            str(row[0])
-            for row in self._connection.execute(
-                "SELECT run_id FROM runs WHERE status='running' AND kind=? "
-                "ORDER BY created_at",
-                (kind,),
-            ).fetchall()
-        ]
-        if not run_ids:
+        rows = self.connection.execute(
+            "SELECT run_id FROM runs WHERE status='running' ORDER BY created_at"
+        ).fetchall()
+        recovered = [str(row["run_id"]) for row in rows]
+        if not recovered:
             return []
-        with self.transaction() as connection:
-            self._recover_inflight_invocations(
-                connection,
-                "run_id IN (SELECT run_id FROM runs WHERE status='running' AND kind=?)",
-                (kind,),
-                "previous Orchestrator stopped before Invocation completion",
-            )
-            if kind == "reference":
-                connection.execute(
+        now = utc_now()
+        with self.transaction() as tx:
+            for run_id in recovered:
+                tx.execute(
                     """
-                    UPDATE reference_work_items
-                    SET status='interrupted',
-                        failure_code='orchestrator_interrupted',
-                        failure_details_json=?,
-                        updated_at=?
-                    WHERE status='running' AND run_id IN
-                          (SELECT run_id FROM runs
-                           WHERE status='running' AND kind='reference')
+                    UPDATE invocations
+                    SET status='definitely_not_sent',
+                        error_message='recovered before provider delivery', updated_at=?
+                    WHERE run_id=? AND status='created'
                     """,
-                    (
-                        json.dumps(
-                            {"message": "previous Reference Orchestrator was interrupted"},
-                            ensure_ascii=False,
-                            sort_keys=True,
-                        ),
-                        utc_now(),
-                    ),
+                    (now, run_id),
                 )
-            elif kind == "lexicon":
-                now = utc_now()
-                connection.execute(
+                tx.execute(
                     """
-                    UPDATE lexicon_work_items
-                    SET status='interrupted',
-                        failure_code='orchestrator_interrupted',
-                        failure_details_json=?,
-                        updated_at=?
-                    WHERE status='running' AND run_id IN
-                          (SELECT run_id FROM runs
-                           WHERE status='running' AND kind='lexicon')
+                    UPDATE invocations
+                    SET status='delivery_ambiguous',
+                        error_message='recovered after provider delivery began', updated_at=?
+                    WHERE run_id=? AND status='sending'
                     """,
-                    (
-                        json.dumps(
-                            {"message": "previous Lexicon Orchestrator was interrupted"},
-                            ensure_ascii=False,
-                            sort_keys=True,
-                        ),
-                        now,
-                    ),
+                    (now, run_id),
                 )
-                connection.execute(
+                tx.execute(
                     """
-                    UPDATE lexicon_evidence_coverage
-                    SET status='interrupted', updated_at=?
-                    WHERE run_id IN
-                          (SELECT run_id FROM runs
-                           WHERE status='running' AND kind='lexicon')
+                    UPDATE runs SET status='interrupted',
+                        error_message='recovered interrupted Run', updated_at=?
+                    WHERE run_id=?
                     """,
-                    (now,),
+                    (now, run_id),
                 )
-            connection.execute(
-                """
-                UPDATE runs
-                SET status='interrupted',
-                    error_message='previous Orchestrator execution was interrupted',
-                    updated_at=?
-                WHERE status='running' AND kind=?
-                """,
-                (utc_now(), kind),
-            )
-        return run_ids
-
-    def finalize_interrupted_run(
-        self, run_id: str, *, run_status: str, error_message: str
-    ) -> None:
-        if run_status not in {"failed", "interrupted"}:
-            raise ContractError("interrupted execution must finish as failed or interrupted")
-        with self.transaction() as connection:
-            self._recover_inflight_invocations(
-                connection,
-                "run_id=?",
-                (run_id,),
-                error_message,
-            )
-            connection.execute(
-                "UPDATE runs SET status=?, error_message=?, updated_at=? WHERE run_id=?",
-                (run_status, error_message, utc_now(), run_id),
-            )
-
-    @staticmethod
-    def _recover_inflight_invocations(
-        connection: sqlite3.Connection,
-        where_clause: str,
-        parameters: Sequence[Any],
-        error_message: str,
-    ) -> None:
-        connection.execute(
-            f"""
-            UPDATE invocations
-            SET status=CASE status
-                    WHEN 'created' THEN 'definitely_not_sent'
-                    WHEN 'sending' THEN 'delivery_ambiguous'
-                END,
-                error_message=CASE status
-                    WHEN 'created' THEN ?
-                    WHEN 'sending' THEN ?
-                END,
-                updated_at=?
-            WHERE {where_clause} AND status IN ('created', 'sending')
-            """,
-            (
-                f"{error_message}; request was definitely not sent",
-                f"{error_message}; delivery outcome is ambiguous",
-                utc_now(),
-                *parameters,
-            ),
-        )
+        return recovered
 
     def create_invocation(
         self,
@@ -1792,448 +676,236 @@ class Registry:
         project_id: str,
         operation: str,
         logical_operation_key: str,
-        attempt_number: int,
         provider: str,
-        model: str,
-        chunk_id: str | None = None,
-        semantic_budget_window: int = 0,
-        inputs: Sequence[tuple[str, str]] = (),
+        requested_model: str | None,
+        idempotency_key: str,
+        inputs: Sequence[tuple[str, str]],
+        prompt_version: str | None = None,
+        prompt_sha256: str | None = None,
+        retry_of_invocation_id: str | None = None,
     ) -> str:
-        if not 0 <= semantic_budget_window <= SEMANTIC_RETRY_RESET_LIMIT:
-            raise ContractError("invalid semantic budget window")
+        self.run(run_id)
         invocation_id = "inv_" + uuid.uuid4().hex
         now = utc_now()
-        with self.transaction() as connection:
-            connection.execute(
+        with self.transaction() as tx:
+            tx.execute(
                 """
                 INSERT INTO invocations
-                (invocation_id, run_id, project_id, chunk_id, operation, logical_operation_key,
-                 attempt_number, semantic_budget_window, status, provider, model, response_id,
-                 artifact_id, error_message, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?, NULL, NULL, NULL, ?, ?)
+                (invocation_id, run_id, project_id, operation, logical_operation_key,
+                 status, provider, requested_model, resolved_model, idempotency_key,
+                 remote_job_id, remote_status, remote_artifact_refs_json, response_id,
+                 elapsed_ms, reasoning_ms, usage_json, prompt_version, prompt_sha256,
+                 artifact_id, error_message, retry_of_invocation_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'created', ?, ?, NULL, ?, NULL, NULL, NULL, NULL,
+                        NULL, NULL, NULL, ?, ?, NULL, NULL, ?, ?, ?)
                 """,
                 (
                     invocation_id,
                     run_id,
                     project_id,
-                    chunk_id,
                     operation,
                     logical_operation_key,
-                    attempt_number,
-                    semantic_budget_window,
                     provider,
-                    model,
+                    requested_model,
+                    idempotency_key,
+                    prompt_version,
+                    prompt_sha256,
+                    retry_of_invocation_id,
                     now,
                     now,
                 ),
             )
             for ordinal, (role, artifact_id) in enumerate(inputs):
-                connection.execute(
-                    """
-                    INSERT INTO invocation_inputs
-                    (invocation_id, project_id, ordinal, role, input_artifact_id)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
+                self.artifact(project_id, artifact_id)
+                tx.execute(
+                    "INSERT INTO invocation_inputs VALUES (?, ?, ?, ?, ?)",
                     (invocation_id, project_id, ordinal, role, artifact_id),
                 )
         return invocation_id
 
-    def create_reference_invocation(
-        self,
-        *,
-        work_item_id: str,
-        run_id: str,
-        project_id: str,
-        operation: str,
-        logical_operation_key: str,
-        attempt_number: int,
-        branch: str,
-        provider: str,
-        model: str,
-        actual_config: Mapping[str, Any],
-        inputs: Sequence[tuple[str, str]],
-        local_measured_duration: float | None,
-        retry_parent_invocation_id: str | None = None,
-        retry_reason: str | None = None,
-        cleanup_status: str | None = "not_applicable",
-    ) -> str:
-        self.reference_work_item(work_item_id)
-        with self.transaction() as connection:
-            invocation_id = self.create_invocation(
-                run_id=run_id,
-                project_id=project_id,
-                operation=operation,
-                logical_operation_key=logical_operation_key,
-                attempt_number=attempt_number,
-                provider=provider,
-                model=model,
-                inputs=inputs,
-            )
-            connection.execute(
-                """
-                INSERT INTO reference_invocation_details
-                (invocation_id, work_item_id, branch, provider, model, actual_config_json,
-                 ordered_input_artifacts_json, response_id, local_measured_duration,
-                 provider_usage_duration, provider_usage_json, provider_cost,
-                 retry_parent_invocation_id, retry_reason, failure_code,
-                 failure_details_json, remote_file_id, cleanup_status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?, NULL,
-                        NULL, NULL, ?)
-                """,
-                (
-                    invocation_id,
-                    work_item_id,
-                    branch,
-                    provider,
-                    model,
-                    json.dumps(actual_config, ensure_ascii=False, sort_keys=True),
-                    json.dumps(
-                        [
-                            {"ordinal": ordinal, "role": role, "artifact_id": artifact_id}
-                            for ordinal, (role, artifact_id) in enumerate(inputs)
-                        ],
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    ),
-                    local_measured_duration,
-                    retry_parent_invocation_id,
-                    retry_reason,
-                    cleanup_status,
-                ),
-            )
-        return invocation_id
-
-    def update_reference_invocation_details(
-        self,
-        invocation_id: str,
-        *,
-        response_id: str | None = None,
-        provider_usage_duration: float | None = None,
-        provider_usage: Mapping[str, Any] | None = None,
-        provider_cost: float | None = None,
-        failure_code: str | None = None,
-        failure_details: Mapping[str, Any] | None = None,
-        remote_file_id: str | None = None,
-        cleanup_status: str | None = None,
-    ) -> None:
-        self._connection.execute(
-            """
-            UPDATE reference_invocation_details
-            SET response_id=?, provider_usage_duration=?, provider_usage_json=?,
-                provider_cost=?, failure_code=?, failure_details_json=?, remote_file_id=?,
-                cleanup_status=COALESCE(?, cleanup_status)
-            WHERE invocation_id=?
-            """,
-            (
-                response_id,
-                provider_usage_duration,
-                json.dumps(provider_usage, ensure_ascii=False, sort_keys=True)
-                if provider_usage is not None
-                else None,
-                provider_cost,
-                failure_code,
-                json.dumps(failure_details, ensure_ascii=False, sort_keys=True)
-                if failure_details is not None
-                else None,
-                remote_file_id,
-                cleanup_status,
-                invocation_id,
-            ),
-        )
-        self._connection.commit()
-
-    def reference_invocation_details(self, invocation_id: str) -> sqlite3.Row:
-        row = self._connection.execute(
-            "SELECT * FROM reference_invocation_details WHERE invocation_id=?",
-            (invocation_id,),
+    def invocation(self, invocation_id: str) -> sqlite3.Row:
+        row = self.connection.execute(
+            "SELECT * FROM invocations WHERE invocation_id=?", (invocation_id,)
         ).fetchone()
         if row is None:
-            raise IntegrityError(f"unknown Reference Invocation: {invocation_id}")
+            raise IntegrityError(f"unknown Invocation: {invocation_id}")
         return cast(sqlite3.Row, row)
 
-    def reference_invocations_for_work_item(self, work_item_id: str) -> list[sqlite3.Row]:
-        return self._connection.execute(
-            """
-            SELECT i.*, d.work_item_id, d.branch, d.actual_config_json,
-                   d.ordered_input_artifacts_json, d.local_measured_duration,
-                   d.provider_usage_duration, d.provider_usage_json, d.provider_cost,
-                   d.retry_parent_invocation_id, d.retry_reason, d.failure_code,
-                   d.failure_details_json, d.remote_file_id, d.cleanup_status
-            FROM reference_invocation_details d
-            JOIN invocations i ON i.invocation_id=d.invocation_id
-            WHERE d.work_item_id=? ORDER BY i.attempt_number, i.created_at
-            """,
-            (work_item_id,),
+    def invocations_for_run(self, run_id: str) -> list[sqlite3.Row]:
+        return self.connection.execute(
+            "SELECT * FROM invocations WHERE run_id=? ORDER BY created_at, invocation_id",
+            (run_id,),
         ).fetchall()
 
-    def sent_reference_attempt_count(self, work_item_id: str) -> int:
-        row = self._connection.execute(
-            """
-            SELECT COUNT(*)
-            FROM reference_invocation_details d
-            JOIN invocations i ON i.invocation_id=d.invocation_id
-            WHERE d.work_item_id=? AND i.status NOT IN ('created','definitely_not_sent')
-            """,
-            (work_item_id,),
-        ).fetchone()
-        assert row is not None
-        return int(row[0])
-
-    def create_lexicon_invocation(
-        self,
-        *,
-        work_item_id: str,
-        run_id: str,
-        project_id: str,
-        provider: str,
-        model: str,
-        actual_config: Mapping[str, Any],
-        inputs: Sequence[tuple[str, str]],
-        retry_parent_invocation_id: str | None = None,
-        retry_reason: str | None = None,
-    ) -> str:
-        self.lexicon_work_item(work_item_id)
-        logical_key = f"lexicon_extract:{work_item_id}"
-        with self.transaction() as connection:
-            invocation_id = self.create_invocation(
-                run_id=run_id,
-                project_id=project_id,
-                operation="lexicon_extraction",
-                logical_operation_key=logical_key,
-                attempt_number=self.next_invocation_attempt_number(run_id, logical_key),
-                provider=provider,
-                model=model,
-                inputs=inputs,
-            )
-            connection.execute(
-                """
-                INSERT INTO lexicon_invocation_details
-                (invocation_id, work_item_id, provider, model, actual_config_json,
-                 response_id, provider_usage_json, provider_cost,
-                 retry_parent_invocation_id, retry_reason, failure_code,
-                 failure_details_json)
-                VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL, NULL)
-                """,
-                (
-                    invocation_id,
-                    work_item_id,
-                    provider,
-                    model,
-                    json.dumps(actual_config, ensure_ascii=False, sort_keys=True),
-                    retry_parent_invocation_id,
-                    retry_reason,
-                ),
-            )
-        return invocation_id
-
-    def update_lexicon_invocation_details(
-        self,
-        invocation_id: str,
-        *,
-        response_id: str | None = None,
-        provider_usage: Mapping[str, Any] | None = None,
-        provider_cost: float | None = None,
-        failure_code: str | None = None,
-        failure_details: Mapping[str, Any] | None = None,
-    ) -> None:
-        self._connection.execute(
-            """
-            UPDATE lexicon_invocation_details
-            SET response_id=?, provider_usage_json=?, provider_cost=?, failure_code=?,
-                failure_details_json=?
-            WHERE invocation_id=?
-            """,
-            (
-                response_id,
-                json.dumps(provider_usage, ensure_ascii=False, sort_keys=True)
-                if provider_usage is not None
-                else None,
-                provider_cost,
-                failure_code,
-                json.dumps(failure_details, ensure_ascii=False, sort_keys=True)
-                if failure_details is not None
-                else None,
-                invocation_id,
-            ),
-        )
-        self._connection.commit()
-
-    def lexicon_invocations_for_work_item(self, work_item_id: str) -> list[sqlite3.Row]:
-        return self._connection.execute(
-            """
-            SELECT i.*, d.work_item_id, d.actual_config_json,
-                   d.provider_usage_json, d.provider_cost,
-                   d.retry_parent_invocation_id, d.retry_reason,
-                   d.failure_code, d.failure_details_json
-            FROM lexicon_invocation_details d
-            JOIN invocations i ON i.invocation_id=d.invocation_id
-            WHERE d.work_item_id=? ORDER BY i.attempt_number, i.created_at
-            """,
-            (work_item_id,),
+    def invocation_inputs(self, invocation_id: str) -> list[sqlite3.Row]:
+        return self.connection.execute(
+            "SELECT * FROM invocation_inputs WHERE invocation_id=? ORDER BY ordinal",
+            (invocation_id,),
         ).fetchall()
-
-    def sent_lexicon_attempt_count(self, work_item_id: str) -> int:
-        row = self._connection.execute(
-            """
-            SELECT COUNT(*)
-            FROM lexicon_invocation_details d
-            JOIN invocations i ON i.invocation_id=d.invocation_id
-            WHERE d.work_item_id=? AND i.status NOT IN ('created','definitely_not_sent')
-            """,
-            (work_item_id,),
-        ).fetchone()
-        assert row is not None
-        return int(row[0])
 
     def set_invocation_status(
         self,
         invocation_id: str,
         status: str,
         *,
-        response_id: str | None = None,
         artifact_id: str | None = None,
+        response_id: str | None = None,
+        resolved_model: str | None = None,
+        elapsed_ms: int | None = None,
+        reasoning_ms: int | None = None,
+        usage: Mapping[str, Any] | None = None,
         error_message: str | None = None,
     ) -> None:
-        allowed = {
-            "created",
+        if status not in {
             "sending",
             "succeeded",
             "definitely_not_sent",
             "delivery_ambiguous",
             "explicit_failure",
-        }
-        if status not in allowed:
-            raise ContractError("invalid invocation status")
-        self._connection.execute(
+        }:
+            raise ContractError("invalid Invocation status")
+        cursor = self.connection.execute(
             """
-            UPDATE invocations
-            SET status=?, response_id=?, artifact_id=?, error_message=?, updated_at=?
+            UPDATE invocations SET status=?, artifact_id=COALESCE(?, artifact_id),
+                response_id=COALESCE(?, response_id),
+                resolved_model=COALESCE(?, resolved_model),
+                elapsed_ms=COALESCE(?, elapsed_ms),
+                reasoning_ms=COALESCE(?, reasoning_ms),
+                usage_json=COALESCE(?, usage_json), error_message=?, updated_at=?
             WHERE invocation_id=?
             """,
-            (status, response_id, artifact_id, error_message, utc_now(), invocation_id),
+            (
+                status,
+                artifact_id,
+                response_id,
+                resolved_model,
+                elapsed_ms,
+                reasoning_ms,
+                json.dumps(dict(usage), ensure_ascii=False, separators=(",", ":"))
+                if usage is not None
+                else None,
+                error_message,
+                utc_now(),
+                invocation_id,
+            ),
         )
-        self._connection.commit()
+        if cursor.rowcount != 1:
+            raise IntegrityError(f"unknown Invocation: {invocation_id}")
+        self.connection.commit()
 
-    def invocation(self, invocation_id: str) -> sqlite3.Row:
-        row = self._connection.execute(
-            "SELECT * FROM invocations WHERE invocation_id=?", (invocation_id,)
+    def update_remote_job(
+        self,
+        invocation_id: str,
+        *,
+        remote_job_id: str | None = None,
+        remote_status: str | None = None,
+        remote_artifact_refs: Sequence[Mapping[str, Any]] | None = None,
+    ) -> None:
+        row = self.invocation(invocation_id)
+        refs = (
+            json.dumps(list(remote_artifact_refs), ensure_ascii=False, separators=(",", ":"))
+            if remote_artifact_refs is not None
+            else row["remote_artifact_refs_json"]
+        )
+        self.connection.execute(
+            """
+            UPDATE invocations
+            SET remote_job_id=?, remote_status=?, remote_artifact_refs_json=?, updated_at=?
+            WHERE invocation_id=?
+            """,
+            (
+                remote_job_id or row["remote_job_id"],
+                remote_status or row["remote_status"],
+                refs,
+                utc_now(),
+                invocation_id,
+            ),
+        )
+        self.connection.commit()
+
+    def _insert_dependencies(
+        self, tx: sqlite3.Connection, project_id: str, envelope: ArtifactEnvelope
+    ) -> None:
+        for ordinal, item in enumerate(envelope.inputs):
+            tx.execute(
+                """
+                INSERT INTO artifact_dependencies
+                (project_id, artifact_id, ordinal, role, input_artifact_id,
+                 input_source_asset_id, coordinate_range_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    envelope.artifact_id,
+                    ordinal,
+                    item.role,
+                    item.artifact_id,
+                    item.source_asset_id,
+                    (
+                        json.dumps(dict(item.coordinate_range), separators=(",", ":"))
+                        if item.coordinate_range is not None
+                        else None
+                    ),
+                ),
+            )
+
+    def _activate(self, tx: sqlite3.Connection, project_id: str, artifact_id: str) -> None:
+        row = tx.execute(
+            "SELECT * FROM artifacts WHERE project_id=? AND artifact_id=?",
+            (project_id, artifact_id),
         ).fetchone()
         if row is None:
-            raise IntegrityError(f"unknown invocation: {invocation_id}")
-        return cast(sqlite3.Row, row)
-
-    def invocations_for_run(self, run_id: str) -> list[sqlite3.Row]:
-        return self._connection.execute(
-            "SELECT * FROM invocations WHERE run_id=? ORDER BY created_at, invocation_id",
-            (run_id,),
-        ).fetchall()
-
-    def invocation_inputs(self, invocation_id: str) -> list[sqlite3.Row]:
-        return self._connection.execute(
-            "SELECT * FROM invocation_inputs WHERE invocation_id=? ORDER BY ordinal",
-            (invocation_id,),
-        ).fetchall()
-
-    def next_invocation_attempt_number(self, run_id: str, logical_operation_key: str) -> int:
-        row = self._connection.execute(
+            raise IntegrityError(f"unknown Artifact: {artifact_id}")
+        tx.execute(
             """
-            SELECT COALESCE(MAX(attempt_number), 0) FROM invocations
-            WHERE run_id=? AND logical_operation_key=?
+            INSERT INTO current_pointers
+            (project_id, artifact_kind, scope_key, artifact_id, storage_locator,
+             is_stale, updated_at)
+            VALUES (?, ?, ?, ?, ?, 0, ?)
+            ON CONFLICT(project_id, artifact_kind, scope_key) DO UPDATE SET
+                artifact_id=excluded.artifact_id,
+                storage_locator=excluded.storage_locator,
+                is_stale=0,
+                updated_at=excluded.updated_at
             """,
-            (run_id, logical_operation_key),
-        ).fetchone()
-        assert row is not None
-        return int(row[0]) + 1
-
-    def semantic_budget_window(self, run_id: str, chunk_id: str) -> int:
-        row = self._connection.execute(
-            """
-            SELECT COALESCE(MAX(window_index), 0) FROM semantic_budget_resets
-            WHERE run_id=? AND chunk_id=?
-            """,
-            (run_id, chunk_id),
-        ).fetchone()
-        assert row is not None
-        return int(row[0])
-
-    def sent_semantic_attempt_count(
-        self, run_id: str, chunk_id: str, budget_window: int
-    ) -> int:
-        row = self._connection.execute(
-            """
-            SELECT COUNT(*) FROM invocations
-            WHERE run_id=? AND chunk_id=? AND operation='semantic_transcription'
-              AND semantic_budget_window=? AND status NOT IN ('created', 'definitely_not_sent')
-            """,
-            (run_id, chunk_id, budget_window),
-        ).fetchone()
-        assert row is not None
-        return int(row[0])
-
-    def record_semantic_budget_reset(
-        self, run_id: str, project_id: str, chunk_id: str, trigger_invocation_id: str
-    ) -> int:
-        trigger = self.invocation(trigger_invocation_id)
-        if (
-            trigger["run_id"] != run_id
-            or trigger["project_id"] != project_id
-            or trigger["chunk_id"] != chunk_id
-            or trigger["operation"] != "semantic_transcription"
-            or trigger["status"]
-            not in {"definitely_not_sent", "delivery_ambiguous", "explicit_failure"}
-        ):
-            raise ContractError("semantic budget reset trigger is invalid")
-        current = self.semantic_budget_window(run_id, chunk_id)
-        if current >= SEMANTIC_RETRY_RESET_LIMIT:
-            raise ContractError("semantic retry reset limit exhausted")
-        window = current + 1
-        self._connection.execute(
-            """
-            INSERT INTO semantic_budget_resets
-            (run_id, project_id, chunk_id, window_index, trigger_invocation_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (run_id, project_id, chunk_id, window, trigger_invocation_id, utc_now()),
+            (
+                project_id,
+                row["artifact_kind"],
+                row["scope_key"],
+                artifact_id,
+                row["storage_locator"],
+                utc_now(),
+            ),
         )
-        self._connection.commit()
-        return window
 
-    def qa_repair_wave_count(self, run_id: str) -> int:
-        row = self._connection.execute(
-            "SELECT EXISTS(SELECT 1 FROM invocations "
-            "WHERE run_id=? AND operation='qa_alignment_repair')",
-            (run_id,),
-        ).fetchone()
-        assert row is not None
-        return int(row[0])
+    def _stale(
+        self,
+        tx: sqlite3.Connection,
+        project_id: str,
+        targets: Sequence[tuple[str, str | None]],
+    ) -> None:
+        for kind, scope in targets:
+            if scope is None:
+                tx.execute(
+                    "UPDATE current_pointers SET is_stale=1, updated_at=? "
+                    "WHERE project_id=? AND artifact_kind=?",
+                    (utc_now(), project_id, kind),
+                )
+            else:
+                tx.execute(
+                    "UPDATE current_pointers SET is_stale=1, updated_at=? "
+                    "WHERE project_id=? AND artifact_kind=? AND scope_key=?",
+                    (utc_now(), project_id, kind, scope),
+                )
 
-    def dependencies(self, project_id: str, artifact_id: str) -> list[sqlite3.Row]:
-        return self._connection.execute(
-            """
-            SELECT * FROM artifact_dependencies
-            WHERE project_id=? AND artifact_id=? ORDER BY ordinal
-            """,
-            (project_id, artifact_id),
+    def _table_names(self) -> frozenset[str]:
+        rows = self.connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
+        return frozenset(str(row[0]) for row in rows)
 
-    def reference_dependencies(
-        self, project_id: str, artifact_id: str
-    ) -> list[sqlite3.Row]:
-        return self._connection.execute(
-            """
-            SELECT * FROM artifact_reference_dependencies
-            WHERE project_id=? AND artifact_id=? ORDER BY ordinal
-            """,
-            (project_id, artifact_id),
-        ).fetchall()
-
-    def orphan_candidates(self, artifacts_root: Path) -> list[Path]:
-        registered = {
-            Path(row[0]).resolve()
-            for row in self._connection.execute("SELECT storage_locator FROM artifacts").fetchall()
-        }
-        return sorted(
-            path
-            for path in artifacts_root.rglob("*.json")
-            if path.resolve() not in registered
-        )
+    def _table_columns(self, table: str) -> tuple[str, ...]:
+        if table not in REQUIRED_TABLES:
+            raise IntegrityError(f"unknown Registry table: {table}")
+        rows = self.connection.execute(f"PRAGMA table_info({table})").fetchall()
+        return tuple(str(row[1]) for row in rows)

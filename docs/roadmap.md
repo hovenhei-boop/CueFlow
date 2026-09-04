@@ -1,21 +1,58 @@
 # CueFlow Roadmap
 
-## v0.5.1 当前能力
+## v0.5.2 — Architecture migration
 
-Source 主链提供本地媒体准备、远端语义转写与纠错、本地 Forced Alignment、字幕切分、QA 和 SRT 导出。
+本版只交付并测试新的核心真相：
 
-Reference 旁路提供登记/relocate、确定性文档和字幕提取、远端 ASR/Vision/Document Parse、provenance、独立 Run/outcome、work-item retry 和 bundle。Evidence 自动增量生成 Suggested Terms；用户可审核、编辑和维护 Project Lexicon，以及带 Temporary/Permanent 语义的 Project Blacklist，并可在应用级按领域管理所有项目共享的 Official Packs。
+- Qwen/豆包 whole-file ASR 与纠错后 GLM adjudication windows；
+- UserKeywords 唯一 ASR lexical prior；
+- 双 Correction 全文 Base/Peer + `edits[]`、exact locator、可分离 lexical projection；
+- GLM 移至纠错后 lexical 分歧，局部失败转人工；final 封存后才进入 ATA；
+- Schema 7.0.0 / Registry 9、run checkpoints、原子 final/review 和定向恢复；
+- TOS MediaObject、URL-only ATA、Artifact/Registry/retry 必要变更；
+- 删除或断开会形成第二条运行路径的旧 Correction、Chunk 和默认 VocaSync 行为；
+- 新主链的单元、集成替身和契约测试。
 
-## 待独立设计
+本版不顺手统一目录、命名、fixture、helper 或所有依赖。真实凭据环境仍需完成 Qwen
+`special_word_filter` object 序列化、豆包 100 个 inline hotwords、Kimi/Qwen live search 和
+ATA submit/query 响应形状的受控集成验证。
 
-Project Lexicon/Official Packs 对 Source 的实际消费、相关性检索与容量预算、不可变 Effective Glossary Snapshot、证据融合、PPT/板书/屏幕画面补充抽取和 UI 均不在当前实现内。v0.5.1 不允许新词库状态改变现有 Effective Glossary、Source stale 状态或 SRT。
+## v0.5.3 — Cleanup / consolidation
 
-Forced Aligner 的部署与依赖策略需另行实验和批准；当前使用本地实现。
+新架构完成至少一个真实视频端到端后，本版不新增功能，只做集中清理：
 
-### CueFlow Server 接入与执行 provenance
+- 删除不可达 legacy provider/helper/config/dependency；
+- 删除旧 schema/registry 和 compatibility shim；
+- 文件、类、变量命名与 provider abstraction 收敛；
+- 重复 fixture/逻辑整理；
+- 文档、Ruff、MyPy、TODO 和依赖全量审计；
+- 必要的大范围目录重组。
 
-未来正式客户端通过自有 CueFlow Server 使用远端语义与 Reference 能力，不直接接入阿里云。上游 Provider 接入、模型路由、灰度与降级由服务端负责。
+判断标准：旧代码若留下会改变 v0.5.2 运行行为或形成第二条路径，应在 v0.5.2 删除；只是
+脏、丑、重复或不可达的内容留到 v0.5.3。
 
-Server 响应必须携带本次产物实际执行的模型及 revision 标识，客户端必须将实际值持久化到对应 Invocation / Artifact provenance。请求模型名、客户端常量或路由别名不能替代实际执行标识；请求值如需保留，应与执行事实区分。实际标识缺失时不得回填请求值冒充实际值，具体契约校验与失败行为在 Server 设计中确定。
+## v0.5.4～v0.5.x — Debug / calibration / stabilization
 
-验收需覆盖请求模型与实际执行模型不同的场景，包括换模、灰度和降级，确认客户端记录的是实际执行值。本项为后续 Server 契约待办，不修改当前直连适配器、run config 或 schema，也不决定 Forced Aligner 的部署位置。
+v0.5.3 后原则上不再主动大重构，重点是实际视频和边界数据：
+
+```text
+v0.5.4  real-media Debug 与校准
+v0.5.5  failure / retry / 边界情况
+v0.5.6  字幕质量、ATA、segmentation
+v0.5.7  性能、成本、超时
+v0.5.8  安装、环境、配置
+v0.5.9  0.6 RC 级稳定化
+```
+
+首轮校准至少统计：
+
+- agreement overall precision；
+- lexical projection agreement precision；
+- GLM-resolved disagreement precision 与自动消解覆盖率；
+- 无 GLM agreement precision（本版 agreement 均不调用 GLM）；
+- singleton precision；
+- conflict distribution。
+
+另记纯标点忽略数、人工负载、单窗错误率与调用成本。比较“有/无 GLM agreement”需另行
+批准带标签的对照实验；本版 GLM 只处理分歧，不能用生产分组直接推断它降低了共同误改。
+不在 v0.5.2 提前冻结白名单或额外付费探针。
