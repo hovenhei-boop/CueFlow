@@ -73,9 +73,28 @@ class QwenFiletransProvider:
             body = _json_object(response, "Qwen ASR submit")
             output = _object(body.get("output"), "Qwen ASR submit.output")
             task_id = _nonempty(output.get("task_id"), "Qwen ASR task_id")
-            completed = self._poll(client, api_key, task_id)
-            result_document = _qwen_result_document(client, completed)
-            text, units = parse_qwen_result(result_document)
+            metadata = ProviderMetadata(
+                provider=self.provider,
+                requested_model=self.model,
+                resolved_model=self.model,
+                response_id=task_id,
+            )
+            try:
+                completed = self._poll(client, api_key, task_id)
+                result_document = _qwen_result_document(client, completed)
+                text, units = parse_qwen_result(result_document)
+            except httpx.RequestError as exc:
+                raise DeliveryAmbiguousError(
+                    "Qwen ASR query/download is uncertain after task submission",
+                    metadata=metadata,
+                ) from exc
+            except ProviderError as exc:
+                if exc.metadata is None:
+                    exc.metadata = metadata
+                raise
+            except ContractError as exc:
+                exc.metadata = metadata
+                raise
             metadata = ProviderMetadata(
                 provider=self.provider,
                 requested_model=self.model,
@@ -106,7 +125,7 @@ class QwenFiletransProvider:
             if status in {"FAILED", "CANCELED", "UNKNOWN"}:
                 raise ProviderError(f"Qwen ASR task ended with status {status}")
             if time.monotonic() >= deadline:
-                raise ProviderUnavailableError("Qwen ASR query timed out")
+                raise DeliveryAmbiguousError("Qwen ASR query timed out after task submission")
             time.sleep(self._config.poll_interval_seconds)
 
     def close(self) -> None:

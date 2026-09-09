@@ -32,6 +32,7 @@ class ProviderMetadata:
     elapsed_ms: int | None = None
     reasoning_ms: int | None = None
     usage: Mapping[str, Any] | None = None
+    search_results: tuple[Mapping[str, Any], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -42,6 +43,7 @@ class ProviderMetadata:
             "elapsed_ms": self.elapsed_ms,
             "reasoning_ms": self.reasoning_ms,
             "usage": dict(self.usage) if self.usage is not None else None,
+            "search_results": [dict(item) for item in self.search_results],
         }
 
 

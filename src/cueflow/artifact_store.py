@@ -43,6 +43,20 @@ class ArtifactStore:
         self.verify_envelope_file(destination, envelope)
         return destination
 
+    def publish_bytes(self, payload: bytes) -> tuple[str, int, Path]:
+        """Persist complete provider response bytes without diagnostic truncation."""
+        content_hash = "sha256:" + hashlib.sha256(payload).hexdigest()
+        destination = self.blob_path(content_hash)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if not destination.exists():
+            temp_path = self._write_temp(payload, suffix=".blob.tmp")
+            try:
+                os.replace(temp_path, destination)
+            finally:
+                temp_path.unlink(missing_ok=True)
+        self.verify_blob(destination, content_hash, len(payload))
+        return content_hash, len(payload), destination
+
     def publish_blob(self, source: Path) -> tuple[str, int, Path]:
         digest = hashlib.sha256()
         byte_length = 0

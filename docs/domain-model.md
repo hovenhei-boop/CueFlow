@@ -1,84 +1,40 @@
-# CueFlow v0.5.2 Domain Model
+# CueFlow v0.5.3 Domain Model
 
-## Project、SourceAsset 与 MediaObject
+Project 保存 Registry。SourceAsset 的身份是 project_id 与 normalized absolute locator；
+Windows 路径按大小写等价处理。TimelineAudio 是与 presentation 时钟对齐的本地 PCM；
+MediaObject 保存该 TimelineAudio 上传后的 TOS provider、bucket、key、hash、长度和可选版本。
+临时 GET URL 不属于持久领域对象。
 
-Project 保存单项目 Registry。SourceAsset 是用户媒体的外部 locator；TimelineAudio 是本地
-确定性 16kHz mono 工作音频。MediaObject 是上传到 TOS 的内容寻址对象，只保存 provider、
-bucket、object key、content hash、byte length 和可选 version ID。Presigned GET URL 是临时
-调用数据，不是领域对象，也不得持久化。
+JobInput 冻结 SourceAsset、ordered References 和 UserKeywords。本地文本是内容快照；
+PDF/Image URL 是可变远端 locator。原始关键词是两路 ASR 唯一领域先验。
 
-## JobInput
+| 对象 | 职责 |
+| --- | --- |
+| BaseAsr | Qwen 全文与原始 timestamps；冻结 Base |
+| PeerAsr | 豆包全文与原始 timestamps |
+| AsrComparison | 原始文本的机械差异，诊断输入 |
+| CorrectionTranscript / qwen、kimi | 两份独立的完整 corrected_text 与 Provider metadata |
+| MergePlan | 四份全文、精确合并 patches、公共争议区间、原候选与来源区间 |
+| SelectionBatch | 冻结 case/候选 ID、上下文、匿名排列、来源映射和专用提示词 |
+| SelectionResult | 每项唯一已有候选 ID、Provider metadata |
+| EditResolution | Base、最终 patches、KEEP 决策、review items 与 sealed 状态 |
+| ReviewQueue / ReviewResolution | 稳定队列身份与人工决定，包括显式 KEEP |
+| Transcript | 从 sealed final 构建的完整原文，作为 ATA audio_text |
+| AtaResponse | 完整 Provider 响应 blob、实际 audio_text、调用 metadata 和冻结输入 |
+| AtaResult | ATA 原序 utterances 的 text/start_ms/end_ms，加非阻断 diagnostics |
+| SrtRender | 句级结果的机械 SRT 格式化文本，与当前 Run/AtaResult 绑定 |
 
-每个 `run` 或 `correct` 都创建不可变 `JobInput`：
+所有机器修改以原始 Unicode codepoint 的半开 Base 区间表示，支持零长度插入和空文本删除。
+人工 replace 只接受 review_id/action/replacement；区间与 original 从 ReviewItem 取得，调用方不提交 locator 或 offset。
+去重后的候选可以有多个来源；多个相同版本不构成独立投票。
 
-```yaml
-source_asset_id: src_...
-references:
-  - ordinal: 0
-    kind: pdf_url
-    url: https://...
-    locator_semantics: mutable_remote_locator
-  - ordinal: 1
-    kind: text
-    format: md
-    display_name: notes.md
-    text: "...frozen content..."
-user_keywords: [Qwen3.8, C++]
-```
+Run 操作是 run 或 correct。Invocation 的 operation 闭集为 media_upload、qwen_asr、
+doubao_asr、qwen_correction、kimi_correction、glm_selection、ata。每个付费尝试独立保存
+requested/resolved model、response ID、usage、elapsed time、prompt hash、有序输入、retry ancestry，
+以及已完成但违反契约的受控诊断数据。
+Checkpoint 按 run/stage/scope 绑定结果；current pointer 仅是当前投影，不能替代重试输入事实。
 
-本地文本正文是快照；PDF/Image URL 只冻结 locator 字符串。Targeted retry 复用原
-Invocation inputs，无法保证 mutable Reference URL 背后仍是同一内容。
-
-`user_keywords` 是唯一 ASR lexical/semantic prior。没有自动领域词库、术语提取、自然语言
-ASR prompt 或 ASR 结果回灌。
-
-## ASR 与证据
-
-- `BaseAsr`：Qwen 全文件转写，文本即 Frozen BaseTranscript，并带 sentence timestamps；
-- `PeerAsr`：豆包全文件转写，带 utterance timestamps；
-- `AsrComparison`：两份全文按 Unicode code point 的机械差异；
-- `AgreementResolution`：完整两臂 proposals 的 exact/projection 共识和剩余分歧；
-- `AcousticWindowPlan`：只为纠错后的 lexical 分歧生成窗口或局部不可映射结果；
-- `AcousticWindow`：由上述分歧映射出的全局毫秒音频窗；
-- `GlmAdjudicationEvidence`：GLM 对该窗口的独立 multipart 音频转写；
-- `AcousticResolution`：对该分歧的确定性候选选择或人工 review 结果。
-
-`AcousticWindow`/`GlmAdjudicationEvidence` 使用 `window_id` scope。它们不是旧 whole-file ASR Chunk，
-也不形成可拼接的第三份全文。
-
-## Edit、Review 与 Transcript
-
-Qwen 与 Kimi 各自产生一个 arm-specific edit proposal。每项 edit 的外部契约仅包含：
-
-```json
-{"source_sentence":"...", "original":"...", "replacement":"..."}
-```
-
-Resolver 在 Frozen Base 上确定性计算区间。两个模型同 span 的 lexical projection 相同，
-即支持共同文字修改 + Base 格式；不同 span 不允许局部拼接共识。纯标点分歧被忽略。
-`EditResolution` 汇总初次 agreement 和后置 GLM 结果；仅剩 unresolved 项进入 `ReviewQueue`。
-稳定 review ID 与 exact queue artifact ID 避免过期决策。`ReviewResolution` 留存人工选择，
-包括 keep。声学工作全部终结且 review 清零后封存 final，才创建 Transcript。Transcript 精确
-绑定 Base 和 final，不允许全文模型输出或中间 preview 绕过 resolver。
-
-## Alignment 与字幕
-
-ATA Alignment 绑定精确 MediaObject 和 Transcript，使用全局整数毫秒。每个 Transcript Atom
-必须恰好有一个 assignment，顺序一致、区间不重叠且不超过音频 duration。Subtitle 只能
-切分/渲染 Atom，不改 Transcript；QA 检查身份、覆盖与时间结构，SrtRender 只消费通过 gate
-的 current 对象。
-
-## Run 与 Invocation
-
-Run 的 `operation_kind` 是 `run` 或 `correct`，状态包括 `needs_review`。Invocation operation
-闭集为：
-
-```text
-media_upload qwen_asr doubao_asr glm_asr
-qwen_correction kimi_correction ata
-```
-
-Invocation 保存 requested/resolved model、local idempotency key、远端 job/status、可选 response
-ID、elapsed/reasoning time、usage、prompt version/hash、结果 Artifact 和 retry ancestry。ordered
-`invocation_inputs` 是 targeted retry 的输入事实；retry 不从最新 pointer 猜测原调用内容。
-`run_checkpoints` 是同 run 的 stage/scope 恢复边界；新 `correct` 不复用旧 Correction 决定。
+同一项目只有一个写者。纠错网络请求可以并行，只有主线程发布结果。成功结果、invocation 和
+checkpoint 同事务；final 与 review queue 同事务。ATA 的成功断点是完整 AtaResponse；
+本地规范化、serializer 不属于付费调用。它们失败时 raw 和成功调用记录保持可追溯，
+normalized AtaResult 已生成时也保留。旧版本数据库和 Artifact 不转换。

@@ -4,7 +4,6 @@ from cueflow.ata_provider import build_ata_submit_request
 from cueflow.base_asr_provider import build_qwen_request
 from cueflow.config import QWEN_ASR_MODEL
 from cueflow.doubao_asr_provider import build_doubao_request
-from cueflow.glm_asr_provider import build_glm_form
 
 
 def test_qwen_request_has_exact_model_keywords_and_nested_filter() -> None:
@@ -48,15 +47,6 @@ def test_doubao_context_is_only_inline_hotwords() -> None:
         "sensitive_words_filter",
     ):
         assert forbidden not in serialized
-
-
-def test_glm_has_hotwords_but_no_prompt_or_url() -> None:
-    assert build_glm_form(["S&P"]) == {
-        "model": "glm-asr-2512",
-        "stream": "false",
-        "hotwords": ["S&P"],
-    }
-    assert "prompt" not in build_glm_form(["S&P"])
 
 
 def test_ata_uses_current_url_contract_only() -> None:

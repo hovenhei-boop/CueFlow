@@ -387,21 +387,16 @@ def prepare_media(
                         "base_asr",
                         "peer_asr",
                         "asr_comparison",
-                        "acoustic_window_plan",
-                        "acoustic_window",
-                        "glm_adjudication_evidence",
-                        "acoustic_resolution",
-                        "agreement_resolution",
-                        "qwen_edit_proposal",
-                        "kimi_edit_proposal",
-                        "edit_proposal",
+                        "correction_transcript",
+                        "merge_plan",
+                        "selection_batch",
+                        "selection_result",
                         "edit_resolution",
                         "review_queue",
                         "review_resolution",
                         "transcript",
-                        "alignment",
-                        "subtitle",
-                        "qa",
+                        "ata_response",
+                        "ata_result",
                         "srt_render",
                     )
                 ],
@@ -442,19 +437,6 @@ def render_timeline_audio(
             raise ContractError("Timeline Audio is not 16kHz mono PCM s16le")
         if wav.getnframes() != probe.total_sample_count:
             raise ContractError("Timeline Audio sample length does not match presentation duration")
-
-
-def slice_wave(source: Path, destination: Path, start_ms: int, end_ms: int) -> None:
-    with wave.open(str(source), "rb") as input_wav:
-        rate = input_wav.getframerate()
-        start_frame = round(start_ms * rate / 1000)
-        end_frame = round(end_ms * rate / 1000)
-        input_wav.setpos(start_frame)
-        frames = input_wav.readframes(end_frame - start_frame)
-        with wave.open(str(destination), "wb") as output_wav:
-            output_wav.setparams(input_wav.getparams())
-            output_wav.setnframes(0)
-            output_wav.writeframes(frames)
 
 
 def quantize_samples(value: Fraction, sample_rate_hz: int) -> int:

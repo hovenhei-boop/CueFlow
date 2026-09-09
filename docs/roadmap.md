@@ -1,58 +1,36 @@
 # CueFlow Roadmap
 
-## v0.5.2 — Architecture migration
+## v0.5.3
 
-本版只交付并测试新的核心真相：
+本轮主链为双 ASR、双全文纠错、确定性合并、局部 GLM 候选选择、ATA 和 SRT。
+原始 Base/Peer 保持独立；GLM 允许按需联网，只选择已有目标文字，使用独立提示词。
 
-- Qwen/豆包 whole-file ASR 与纠错后 GLM adjudication windows；
-- UserKeywords 唯一 ASR lexical prior；
-- 双 Correction 全文 Base/Peer + `edits[]`、exact locator、可分离 lexical projection；
-- GLM 移至纠错后 lexical 分歧，局部失败转人工；final 封存后才进入 ATA；
-- Schema 7.0.0 / Registry 9、run checkpoints、原子 final/review 和定向恢复；
-- TOS MediaObject、URL-only ATA、Artifact/Registry/retry 必要变更；
-- 删除或断开会形成第二条运行路径的旧 Correction、Chunk 和默认 VocaSync 行为；
-- 新主链的单元、集成替身和契约测试。
+落实内容：
 
-本版不顺手统一目录、命名、fixture、helper 或所有依赖。真实凭据环境仍需完成 Qwen
-`special_word_filter` object 序列化、豆包 100 个 inline hotwords、Kimi/Qwen live search 和
-ATA submit/query 响应形状的受控集成验证。
+- corrected_text 全文契约与精确 Unicode codepoint 映射，支持插入、删除和不同跨度；
+- 一致/单路修改自动接受，冲突构建 Base/Peer/Qwen/Kimi 去重候选；
+- 冻结 KEEP、上下文和候选 ID；每批最多 8 项，完整输入预算与严格输出校验；
+- 两路纠错并行 I/O，主线程单写者；每次格式重试独立计费记录；
+- Schema 11.0.0 / Registry 13，旧项目拒绝且保持不变；
+- 移除声学裁决、闲置 VocaSync、旧模型 edits 提示词与配套运行入口；
+- ATA 完整 raw、原序句级结果与非阻断诊断；机械 SRT serializer 与状态真实性检查；
+- 故障恢复、类型/静态检查、打包安装；独立真实服务验收需另行授权。
 
-## v0.5.3 — Cleanup / consolidation
+不把模型升级、资料提取、关键词词库、Office 支持、标点美化或大范围目录改名并入本轮。
+实际验证结果见本轮实施报告；规划或替身测试不能当作真实服务调用通过。
 
-新架构完成至少一个真实视频端到端后，本版不新增功能，只做集中清理：
+## v0.5.4～v0.5.x
 
-- 删除不可达 legacy provider/helper/config/dependency；
-- 删除旧 schema/registry 和 compatibility shim；
-- 文件、类、变量命名与 provider abstraction 收敛；
-- 重复 fixture/逻辑整理；
-- 文档、Ruff、MyPy、TODO 和依赖全量审计；
-- 必要的大范围目录重组。
+后续集中于相同输入的校准和稳定性，不默认继续重构：
 
-判断标准：旧代码若留下会改变 v0.5.2 运行行为或形成第二条路径，应在 v0.5.2 删除；只是
-脏、丑、重复或不可达的内容留到 v0.5.3。
+| 方向 | 测量内容 |
+| --- | --- |
+| 文本精度 | Base/Peer 错误、一致修改与单路修改的精度、共同漏改 |
+| GLM 选择 | 选择精度、KEEP 比例、全部候选都错的比例、非法响应率 |
+| 上下文 | 200/400/800 字的匹配音频对照，避免把更多文字直接当作质量提升 |
+| 输出 | 独立人工评估 ATA 句级字幕、阅读速度、词内符号与最终口播，不加入运行时质量 gate |
+| 成本/恢复 | 每分钟媒体的 tokens/费用、延迟、失败批次、显式重试和人工负担 |
+| 安装/运行 | 干净环境、凭据缺失、服务端错误、并发与中断 |
 
-## v0.5.4～v0.5.x — Debug / calibration / stabilization
-
-v0.5.3 后原则上不再主动大重构，重点是实际视频和边界数据：
-
-```text
-v0.5.4  real-media Debug 与校准
-v0.5.5  failure / retry / 边界情况
-v0.5.6  字幕质量、ATA、segmentation
-v0.5.7  性能、成本、超时
-v0.5.8  安装、环境、配置
-v0.5.9  0.6 RC 级稳定化
-```
-
-首轮校准至少统计：
-
-- agreement overall precision；
-- lexical projection agreement precision；
-- GLM-resolved disagreement precision 与自动消解覆盖率；
-- 无 GLM agreement precision（本版 agreement 均不调用 GLM）；
-- singleton precision；
-- conflict distribution。
-
-另记纯标点忽略数、人工负载、单窗错误率与调用成本。比较“有/无 GLM agreement”需另行
-批准带标签的对照实验；本版 GLM 只处理分歧，不能用生产分组直接推断它降低了共同误改。
-不在 v0.5.2 提前冻结白名单或额外付费探针。
+真实服务、联网内容和辅助材料 locator 都可能变化。新增付费实验应明确输入、模型参数、
+评价真值和预算；不能将错误候选的一致率解释为独立投票，也不能承诺 GLM 自动纠正所有错误。

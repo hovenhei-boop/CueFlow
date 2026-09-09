@@ -5,13 +5,12 @@ import shutil
 from dataclasses import asdict, dataclass
 from typing import Any
 
-SCHEMA_VERSION = "7.0.0"
-COMPONENT_VERSION = "0.5.2"
-ATOMIZER_VERSION = "0.2.0"
+SCHEMA_VERSION = "11.0.0"
+COMPONENT_VERSION = "0.5.3"
 
 QWEN_ASR_MODEL = "qwen-audio-3.0-asr-flash-filetrans"
 DOUBAO_ASR_MODEL = "bigmodel"
-GLM_ASR_MODEL = "glm-asr-2512"
+GLM_SELECTION_MODEL = "glm-5.2"
 QWEN_CORRECTION_MODEL = "qwen3.8-max-2026-09-02"
 KIMI_CORRECTION_MODEL = "kimi-k3"
 ATA_PROVIDER = "volcengine-ata"
@@ -32,36 +31,14 @@ class MediaPrepConfig:
 
 
 @dataclass(frozen=True)
-class EvidenceWindowConfig:
+class SelectionConfig:
     version: str = "0.1.0"
-    padding_ms: int = 3_000
-    merge_gap_ms: int = 2_000
-    max_duration_ms: int = 30_000
-    max_bytes: int = 25_000_000
-
-
-@dataclass(frozen=True)
-class SegmenterConfig:
-    version: str = "0.2.0"
-    max_display_units: int = 10
-    removable_punctuation: str = "。；;？?！!—–."
-    comma_punctuation: str = "，,"
-    english_clause_starters: tuple[str, ...] = (
-        "when",
-        "while",
-        "because",
-        "although",
-        "if",
-        "unless",
-        "who",
-        "which",
-        "that",
-    )
-
-
-@dataclass(frozen=True)
-class QaRulesetConfig:
-    version: str = "0.2.0"
+    context_chars: int = 400
+    max_context_chars: int = 500
+    max_cases: int = 8
+    max_input_bytes: int = 48_000
+    max_output_tokens: int = 1_024
+    web_search: bool = True
 
 
 @dataclass(frozen=True)
@@ -94,15 +71,15 @@ def result_config(runtime: RuntimeConfig | None = None) -> dict[str, Any]:
     chosen = runtime or RuntimeConfig.detect()
     return {
         "media": asdict(MediaPrepConfig()),
-        "evidence_windows": asdict(EvidenceWindowConfig()),
-        "segmenter": asdict(SegmenterConfig()),
-        "qa": asdict(QaRulesetConfig()),
+        "selection": asdict(SelectionConfig()),
         "qwen_asr_model": QWEN_ASR_MODEL,
         "doubao_asr_model": DOUBAO_ASR_MODEL,
-        "glm_asr_model": GLM_ASR_MODEL,
+        "glm_selection_model": GLM_SELECTION_MODEL,
         "qwen_correction_model": QWEN_CORRECTION_MODEL,
         "kimi_correction_model": KIMI_CORRECTION_MODEL,
-        "alignment_provider": ATA_PROVIDER,
+        "ata_provider": ATA_PROVIDER,
+        "ata_punctuation_mode": "3",
+        "srt_serializer": "utterances-v1",
         "max_user_keywords": MAX_USER_KEYWORDS,
         "max_source_duration_ms_exclusive": MAX_SOURCE_DURATION_MS,
         "max_source_bytes_exclusive": MAX_SOURCE_BYTES,

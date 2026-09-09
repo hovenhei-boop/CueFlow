@@ -7,7 +7,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from cueflow.canonical import artifact_content_hash
-from cueflow.config import ATOMIZER_VERSION, MAX_USER_KEYWORDS, SCHEMA_VERSION
+from cueflow.config import MAX_USER_KEYWORDS, SCHEMA_VERSION
 from cueflow.errors import ContractError
 
 ARTIFACT_KINDS = frozenset(
@@ -19,26 +19,20 @@ ARTIFACT_KINDS = frozenset(
         "base_asr",
         "peer_asr",
         "asr_comparison",
-        "acoustic_window_plan",
-        "acoustic_window",
-        "glm_adjudication_evidence",
-        "agreement_resolution",
-        "acoustic_resolution",
         "review_resolution",
-        "qwen_edit_proposal",
-        "kimi_edit_proposal",
-        "edit_proposal",
+        "correction_transcript",
+        "merge_plan",
+        "selection_batch",
+        "selection_result",
         "edit_resolution",
         "review_queue",
         "transcript",
-        "alignment",
-        "subtitle",
-        "qa",
+        "ata_response",
+        "ata_result",
         "srt_render",
     }
 )
-SCOPED_KINDS = frozenset({"acoustic_window", "glm_adjudication_evidence", "acoustic_resolution"})
-ATOM_CLASSES = frozenset({"word", "cjk_character", "number", "pronounceable_symbol"})
+SCOPED_KINDS = frozenset({"correction_transcript", "selection_batch", "selection_result"})
 TEXT_REFERENCE_FORMATS = frozenset({"txt", "md", "csv", "json"})
 URL_REFERENCE_KINDS = frozenset({"pdf_url", "image_url"})
 
@@ -237,7 +231,7 @@ def validate_scope(kind: str, scope_key: str, payload: Mapping[str, Any]) -> Non
     if kind not in ARTIFACT_KINDS:
         raise ContractError(f"unknown artifact kind: {kind}")
     if kind in SCOPED_KINDS:
-        field = "disagreement_id" if kind == "acoustic_resolution" else "window_id"
+        field = "arm" if kind == "correction_transcript" else "batch_id"
         if payload.get(field) != scope_key:
             raise ContractError(f"{kind} scope_key must equal payload.{field}")
     elif scope_key != "global":
@@ -258,68 +252,68 @@ def validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
         _positive_int(payload.get("total_sample_count"), "total_sample_count")
         _blob(payload.get("audio_blob"), "timeline_audio.audio_blob")
     elif kind == "media_object":
-        for name in ("source_asset_id", "provider", "bucket", "object_key", "content_hash"):
+        for name in (
+            "timeline_audio_artifact_id",
+            "provider",
+            "bucket",
+            "object_key",
+            "content_hash",
+        ):
             _string(payload.get(name), f"media_object.{name}")
         _positive_int(payload.get("byte_length"), "media_object.byte_length")
         if "get_url" in payload:
             raise ContractError("media_object must not persist a presigned GET URL")
-    elif kind in {"base_asr", "peer_asr", "glm_adjudication_evidence"}:
+    elif kind in {"base_asr", "peer_asr"}:
         _string(payload.get("source_text"), f"{kind}.source_text")
         _timed_units(payload.get("timed_units"), f"{kind}.timed_units")
         _provider_metadata(payload.get("provider_metadata"), f"{kind}.provider_metadata")
-        if kind == "glm_adjudication_evidence":
-            _string(payload.get("window_id"), "glm_adjudication_evidence.window_id")
     elif kind == "asr_comparison":
         _hunks(payload.get("hunks"))
-    elif kind == "acoustic_window":
-        _string(payload.get("window_id"), "window_id")
-        start, end = _interval(payload, "global_start_ms", "global_end_ms")
-        blob = _blob(payload.get("audio_blob"), "acoustic_window.audio_blob")
-        if end - start > 30_000:
-            raise ContractError("GLM evidence window exceeds 30 seconds")
-        if int(blob["byte_length"]) > 25_000_000:
-            raise ContractError("GLM evidence window exceeds 25 MB")
-    elif kind in {"qwen_edit_proposal", "kimi_edit_proposal"}:
-        _edits(payload.get("edits"), f"{kind}.edits")
-        _provider_metadata(payload.get("provider_metadata"), f"{kind}.provider_metadata")
-    elif kind == "edit_proposal":
-        proposals = _mapping(payload.get("proposals"), "edit_proposal.proposals")
-        metadata = _mapping(payload.get("provider_metadata"), "provider_metadata")
-        if set(proposals) != {"qwen", "kimi"} or set(metadata) != {"qwen", "kimi"}:
-            raise ContractError("edit_proposal requires qwen and kimi arms")
-        for arm, value in proposals.items():
-            _edits(value, f"proposals.{arm}")
-            _provider_metadata(metadata[arm], f"provider_metadata.{arm}")
-    elif kind == "acoustic_window_plan":
-        _string(payload.get("run_id"), "run_id")
-        planned = payload.get("disagreement_ids")
-        if not isinstance(planned, list) or len(planned) != len(set(planned)):
-            raise ContractError("window plan requires unique disagreement IDs")
-        covered: list[str] = []
-        for window in payload.get("windows", []):
-            item = _mapping(window, "windows[]")
-            start, end = _interval(item, "global_start_ms", "global_end_ms")
-            if end - start > 30_000:
-                raise ContractError("planned window exceeds 30 seconds")
-            _string(item.get("window_id"), "window_id")
-            covered.extend(item["disagreement_ids"])
-        covered.extend(item["disagreement_id"] for item in payload.get("unavailable", []))
-        if sorted(covered) != sorted(planned):
-            raise ContractError("window plan does not exactly partition disagreements")
-    elif kind == "acoustic_resolution":
-        _string(payload.get("disagreement_id"), "disagreement_id")
-        _string(payload.get("reason"), "reason")
-        if payload.get("status") not in {"resolved", "review"}:
-            raise ContractError("invalid acoustic resolution status")
-        if payload["status"] == "resolved":
-            _string(payload.get("selected_text"), "selected_text", allow_empty=True)
-            _string(payload.get("evidence_artifact_id"), "evidence_artifact_id")
+    elif kind == "correction_transcript":
+        if payload.get("arm") not in {"qwen", "kimi"}:
+            raise ContractError("Unknown correction arm")
+        _string(payload.get("corrected_text"), "corrected_text")
+        _provider_metadata(payload.get("provider_metadata"), "provider_metadata")
+    elif kind == "selection_batch":
+        from cueflow.conflict_selection import validate_batch
+
+        validate_batch(payload)
+    elif kind == "selection_result":
+        from cueflow.conflict_selection import validate_decisions
+
+        validate_decisions(
+            {"decisions": payload.get("decisions")}, _mapping(payload.get("request"), "request")
+        )
+        _provider_metadata(payload.get("provider_metadata"), "provider_metadata")
     elif kind == "review_resolution":
         _string(payload.get("run_id"), "run_id")
         _string(payload.get("queue_artifact_id"), "queue_artifact_id")
-        if not isinstance(payload.get("decisions"), list):
+        decisions = payload.get("decisions")
+        if not isinstance(decisions, list):
             raise ContractError("review decisions are missing")
-    elif kind in {"agreement_resolution", "edit_resolution"}:
+        decision_ids: set[str] = set()
+        for raw in decisions:
+            decision = _mapping(raw, "review decisions[]")
+            action = decision.get("action")
+            fields = {"review_id", "action", "replacement"} if action == "replace" else {
+                "review_id",
+                "action",
+            }
+            if set(decision) != fields:
+                raise ContractError("review decision fields do not match the contract")
+            review_id = _string(decision.get("review_id"), "review decision.review_id")
+            if review_id in decision_ids:
+                raise ContractError("review decisions contain a duplicate review_id")
+            decision_ids.add(review_id)
+            if action not in {"keep", "qwen", "kimi", "peer", "replace"}:
+                raise ContractError("invalid review decision action")
+            if action == "replace":
+                _string(
+                    decision.get("replacement"),
+                    "review decision.replacement",
+                    allow_empty=True,
+                )
+    elif kind in {"merge_plan", "edit_resolution"}:
         _string(payload.get("base_text"), "edit_resolution.base_text")
         resolved = payload.get("resolved_edits")
         reviews = payload.get("review_items")
@@ -330,67 +324,76 @@ def validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
             _non_negative_int(item.get("start"), "resolved_edit.start")
             _non_negative_int(item.get("end"), "resolved_edit.end")
             _string(item.get("replacement"), "resolved_edit.replacement", allow_empty=True)
-            if item.get("resolution") == "lexical_agreement_ignore_prosody":
-                from cueflow.edit_resolution import (
-                    locate_edit,
-                    parse_edits_json,
-                    project_lexical_changes,
-                )
-
-                support = _mapping(item.get("support"), "projection.support")
-                for arm in ("qwen", "kimi"):
-                    edits = parse_edits_json({"edits": support.get(arm)})
-                    if len(edits) != 1:
-                        raise ContractError("projection agreement requires one edit per arm")
-                    located = locate_edit(str(payload["base_text"]), edits[0])
-                    if (located.start, located.end) != (item["start"], item["end"]):
-                        raise ContractError(
-                            "projection agreement cannot merge different Base spans"
-                        )
-                    projection = project_lexical_changes(str(payload["base_text"]), located)
-                    if projection.get("text") != item["replacement"]:
-                        raise ContractError("projection agreement cannot invent lexical content")
-                    stored = _mapping(support.get("projections"), "projection.projections")
-                    arm_projection = _mapping(stored.get(arm), f"projection.{arm}")
-                    if arm_projection != {
-                        "status": "resolved",
-                        "text": projection["text"],
-                        "parts": [projection],
-                    }:
-                        raise ContractError("stored projection provenance does not recompute")
         from cueflow.edit_resolution import apply_resolved_payload
 
         rebuilt = apply_resolved_payload(str(payload["base_text"]), resolved)
         if payload.get("corrected_preview") != rebuilt:
             raise ContractError("resolution preview does not rebuild from Base")
-        if kind == "agreement_resolution":
-            for field in ("lexical_disagreements", "ignored_disagreements"):
-                if not isinstance(payload.get(field), list):
-                    raise ContractError(f"agreement resolution missing {field}")
+        if kind == "merge_plan":
+            from cueflow.conflict_selection import build_merge_plan
+
+            variants = _mapping(payload.get("variants"), "variants")
+            if set(variants) != {"base", "peer", "qwen", "kimi"}:
+                raise ContractError("Merge plan requires four source transcripts")
+            texts = {key: _string(value, key, allow_empty=True) for key, value in variants.items()}
+            if dict(payload) != build_merge_plan(
+                texts["base"], texts["peer"], texts["qwen"], texts["kimi"]
+            ):
+                raise ContractError("Merge plan provenance does not recompute")
         else:
             _string(payload.get("run_id"), "run_id")
-            pending = _non_negative_int(payload.get("pending_acoustic"), "pending_acoustic")
+            pending = _non_negative_int(payload.get("pending_selection"), "pending_selection")
             if not isinstance(payload.get("sealed"), bool):
                 raise ContractError("resolution.sealed must be boolean")
             if payload["sealed"] and (pending or reviews):
                 raise ContractError("sealed resolution has pending work")
     elif kind == "review_queue":
         _string(payload.get("run_id"), "run_id")
-        if not isinstance(payload.get("items"), list):
+        _string(payload.get("resolution_artifact_id"), "resolution_artifact_id")
+        items = payload.get("items")
+        if not isinstance(items, list):
             raise ContractError("review_queue.items must be an array")
-        if payload.get("status") not in {"clear", "needs_review", "resolved"}:
+        status = payload.get("status")
+        if status not in {"clear", "needs_review"}:
             raise ContractError("invalid review_queue status")
+        if (status == "clear") != (not items):
+            raise ContractError("review_queue status does not match its items")
+        queue_ids: set[str] = set()
+        for raw in items:
+            item = _mapping(raw, "review_queue.items[]")
+            review_id = _string(item.get("review_id"), "review item.review_id")
+            if review_id in queue_ids:
+                raise ContractError("review_queue contains a duplicate review_id")
+            queue_ids.add(review_id)
+            start = _non_negative_int(item.get("start"), "review item.start")
+            end = _non_negative_int(item.get("end"), "review item.end")
+            if end < start:
+                raise ContractError("review item has a reversed Base interval")
+            original = _string(item.get("original"), "review item.original", allow_empty=True)
+            if len(original) != end - start:
+                raise ContractError("review item original does not match its Base interval length")
+            candidates = _mapping(item.get("candidates"), "review item.candidates")
+            for source, text in candidates.items():
+                if source not in {"base", "qwen", "kimi", "peer"}:
+                    raise ContractError("review item contains an unknown candidate source")
+                _string(text, f"review item.candidates.{source}", allow_empty=True)
+            if candidates.get("base") != original:
+                raise ContractError("review item Base candidate does not match original")
     elif kind == "transcript":
         validate_transcript_payload(payload)
-    elif kind == "alignment":
-        validate_alignment_payload(payload)
-    elif kind == "subtitle":
-        validate_subtitle_payload(payload)
-    elif kind == "qa":
-        validate_qa_payload(payload)
+    elif kind == "ata_response":
+        _ata_dependencies(payload)
+        _string(payload.get("invocation_id"), "invocation_id")
+        _string(payload.get("audio_text"), "audio_text", allow_empty=True)
+        _provider_metadata(payload.get("provider_metadata"), "provider_metadata")
+        _blob(payload.get("response_blob"), "response_blob")
+    elif kind == "ata_result":
+        _ata_dependencies(payload)
+        _string(payload.get("ata_response_artifact_id"), "ata_response_artifact_id")
+        validate_ata_result_payload(payload)
     elif kind == "srt_render":
-        _string(payload.get("subtitle_artifact_id"), "subtitle_artifact_id")
-        _string(payload.get("qa_artifact_id"), "qa_artifact_id")
+        _string(payload.get("run_id"), "run_id")
+        _string(payload.get("ata_result_artifact_id"), "ata_result_artifact_id")
         _string(payload.get("text"), "srt_render.text", allow_empty=True)
 
 
@@ -427,103 +430,43 @@ def validate_job_input_payload(payload: Mapping[str, Any]) -> None:
 
 
 def validate_transcript_payload(payload: Mapping[str, Any]) -> None:
-    source_text = _string(payload.get("source_text"), "source_text")
+    _string(payload.get("source_text"), "source_text")
     _string(payload.get("base_asr_artifact_id"), "base_asr_artifact_id")
     _string(payload.get("edit_resolution_artifact_id"), "edit_resolution_artifact_id")
-    if payload.get("correction_mode") != "post_correction_adjudication":
+    if payload.get("correction_mode") != "dual_fulltext_selection":
         raise ContractError("invalid transcript.correction_mode")
-    leading = _string(payload.get("leading_decoration", ""), "leading_decoration", allow_empty=True)
-    atoms = payload.get("atoms")
-    if (
-        not isinstance(atoms, list)
-        or not atoms
-        or payload.get("atomizer_version") != ATOMIZER_VERSION
+
+
+def _ata_dependencies(payload: Mapping[str, Any]) -> None:
+    for field in (
+        "run_id", "transcript_artifact_id", "media_object_artifact_id", "timeline_audio_artifact_id"
     ):
-        raise ContractError("transcript atoms or atomizer version are invalid")
-    rebuilt = leading
-    for position, raw in enumerate(atoms):
-        atom = _mapping(raw, "atoms[]")
-        if atom.get("position") != position or atom.get("atom_class") not in ATOM_CLASSES:
-            raise ContractError("invalid transcript atom order or class")
-        _string(atom.get("atom_id"), "atom_id")
-        rebuilt += _string(atom.get("text"), "atom.text")
-        rebuilt += _string(atom.get("decoration_after", ""), "decoration_after", allow_empty=True)
-    if rebuilt != source_text:
-        raise ContractError("transcript atoms do not rebuild source_text")
+        _string(payload.get(field), field)
 
 
-def validate_alignment_payload(payload: Mapping[str, Any]) -> None:
-    _string(payload.get("transcript_artifact_id"), "transcript_artifact_id")
-    _string(payload.get("media_object_artifact_id"), "media_object_artifact_id")
-    _string(payload.get("timeline_audio_artifact_id"), "timeline_audio_artifact_id")
-    duration = _positive_int(payload.get("duration_ms"), "alignment.duration_ms")
-    if payload.get("provider_coordinate_system") != "global_milliseconds":
-        raise ContractError("invalid alignment coordinate system")
-    assignments = payload.get("assignments")
-    if not isinstance(assignments, list) or not assignments:
-        raise ContractError("alignment.assignments must be a non-empty array")
-    previous_end = -1
-    for raw in assignments:
-        item = _mapping(raw, "assignments[]")
-        _string(item.get("atom_id"), "assignment.atom_id")
-        start, end = _interval(item, "global_start_ms", "global_end_ms")
-        if start < previous_end or end > duration:
-            raise ContractError("alignment assignments overlap or exceed duration")
-        previous_end = end
-
-
-def validate_alignment_against(
-    alignment: Mapping[str, Any], transcript: Mapping[str, Any], duration_ms: int
-) -> None:
-    assignments = alignment.get("assignments")
-    if not isinstance(assignments, list):
-        raise ContractError("alignment assignments missing")
-    actual = [
-        _string(_mapping(item, "assignments[]").get("atom_id"), "atom_id") for item in assignments
-    ]
-    if actual != atom_ids(transcript) or alignment.get("duration_ms") != duration_ms:
-        raise ContractError("alignment does not exactly cover the corrected transcript")
-
-
-def validate_subtitle_payload(payload: Mapping[str, Any]) -> None:
-    _string(payload.get("transcript_artifact_id"), "subtitle.transcript_artifact_id")
-    _string(payload.get("alignment_artifact_id"), "subtitle.alignment_artifact_id")
-    _string(payload.get("segmenter_config_hash"), "segmenter_config_hash")
-    duration = _positive_int(payload.get("duration_ms"), "subtitle.duration_ms")
-    cues = payload.get("cues")
-    if not isinstance(cues, list):
-        raise ContractError("subtitle.cues must be an array")
-    previous_end = -1
-    for raw in cues:
-        cue = _mapping(raw, "cues[]")
-        _string(cue.get("cue_id"), "cue_id")
-        start, end = _interval(cue, "global_start_ms", "global_end_ms")
-        if start < previous_end or end > duration:
-            raise ContractError("subtitle cues overlap or exceed duration")
-        previous_end = end
-        _string(cue.get("text"), "cue.text")
-        count = _positive_int(cue.get("display_unit_count"), "display_unit_count")
-        refs = cue.get("atom_refs")
-        if not isinstance(refs, list) or len(refs) != count:
-            raise ContractError("cue atom_refs must exactly cover display units")
-
-
-def validate_qa_payload(payload: Mapping[str, Any]) -> None:
-    if payload.get("qa_ruleset_version") != "0.2.0":
-        raise ContractError("unsupported QA ruleset version")
-    if payload.get("result") not in {"passed", "warnings", "blocked"}:
-        raise ContractError("invalid QA result")
-    if not isinstance(payload.get("subject_artifact_ids"), list):
-        raise ContractError("qa.subject_artifact_ids must be an array")
-    if not isinstance(payload.get("issues"), list):
-        raise ContractError("qa.issues must be an array")
-
-
-def atom_ids(payload: Mapping[str, Any]) -> list[str]:
-    atoms = payload.get("atoms")
-    if not isinstance(atoms, list):
-        raise ContractError("transcript atoms missing")
-    return [_string(_mapping(atom, "atoms[]").get("atom_id"), "atom_id") for atom in atoms]
+def validate_ata_result_payload(payload: Mapping[str, Any]) -> None:
+    utterances = payload.get("utterances")
+    if not isinstance(utterances, list):
+        raise ContractError("ata_result.utterances must be an array")
+    for raw in utterances:
+        item = _mapping(raw, "utterances[]")
+        _string(item.get("text"), "utterance.text", allow_empty=True)
+        for field in ("start_ms", "end_ms"):
+            if type(item.get(field)) is not int:
+                raise ContractError(f"utterance.{field} must be an integer")
+    diagnostics = _mapping(payload.get("diagnostics"), "diagnostics")
+    for field in (
+        "utterance_count", "empty_text_count", "negative_time_count",
+        "reversed_interval_count", "zero_duration_count", "overlap_count"
+    ):
+        _non_negative_int(diagnostics.get(field), f"diagnostics.{field}")
+    comparison = _mapping(diagnostics.get("text_comparison"), "text_comparison")
+    if comparison.get("relation") not in {"identical", "differs"}:
+        raise ContractError("invalid text comparison relation")
+    for field in ("input_length", "output_length"):
+        _non_negative_int(comparison.get(field), f"text_comparison.{field}")
+    if type(comparison.get("length_delta")) is not int:
+        raise ContractError("text_comparison.length_delta must be an integer")
 
 
 def _provider_metadata(value: Any, name: str) -> None:
@@ -561,18 +504,6 @@ def _hunks(value: Any) -> None:
         _string(item.get("peer_text"), "hunk.peer_text", allow_empty=True)
         if item.get("category") not in {"prosodic_format_only", "lexical"}:
             raise ContractError("invalid hunk category")
-
-
-def _edits(value: Any, name: str) -> None:
-    if not isinstance(value, list):
-        raise ContractError(f"{name} must be an array")
-    for raw in value:
-        item = _mapping(raw, f"{name}[]")
-        if set(item) != {"source_sentence", "original", "replacement"}:
-            raise ContractError("edit fields do not match the current contract")
-        _string(item["source_sentence"], "source_sentence")
-        _string(item["original"], "original")
-        _string(item["replacement"], "replacement", allow_empty=True)
 
 
 def _blob(value: Any, name: str) -> Mapping[str, Any]:

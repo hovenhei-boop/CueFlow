@@ -43,11 +43,11 @@ class _ReferenceAction(argparse.Action):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="cueflow", description="CueFlow v0.5.2 subtitle generation CLI"
+        prog="cueflow", description="CueFlow v0.5.3 subtitle generation CLI"
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    init = commands.add_parser("init", help="create a new v0.5.2 project")
+    init = commands.add_parser("init", help="create a new v0.5.3 project")
     init.add_argument("project_dir", type=Path)
     init.add_argument("--name", required=True)
 
@@ -166,7 +166,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
                 if row["status"]
                 in {"definitely_not_sent", "delivery_ambiguous", "explicit_failure"}
             ]
-            if failed:
+            # After ATA commits, failures are local. Do not suggest replaying an older paid failure.
+            if failed and context.registry.checkpoint(run_id, "ata_response") is None:
                 row = failed[-1]
                 payload["invocation_id"] = str(row["invocation_id"])
                 payload["invocation_status"] = str(row["status"])

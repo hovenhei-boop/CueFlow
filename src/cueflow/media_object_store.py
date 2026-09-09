@@ -25,9 +25,9 @@ class MediaObjectRef:
     byte_length: int
     version_id: str | None = None
 
-    def artifact_payload(self, source_asset_id: str) -> dict[str, object]:
+    def artifact_payload(self, timeline_audio_artifact_id: str) -> dict[str, object]:
         result: dict[str, object] = {
-            "source_asset_id": source_asset_id,
+            "timeline_audio_artifact_id": timeline_audio_artifact_id,
             "provider": self.provider,
             "bucket": self.bucket,
             "object_key": self.object_key,
@@ -42,7 +42,7 @@ class MediaObjectRef:
 class MediaObjectStore(Protocol):
     provider: str
 
-    def upload(self, path: Path) -> MediaObjectRef: ...
+    def upload(self, path: Path, *, object_name: str | None = None) -> MediaObjectRef: ...
 
     def presign_get(self, ref: MediaObjectRef) -> str: ...
 
@@ -57,14 +57,17 @@ class TosMediaObjectStore:
         self._config = config or TosConfig()
         self._module: Any | None = None
 
-    def upload(self, path: Path) -> MediaObjectRef:
+    def upload(self, path: Path, *, object_name: str | None = None) -> MediaObjectRef:
         endpoint = os.getenv("TOS_ENDPOINT")
         region = os.getenv("TOS_REGION")
         bucket = os.getenv("TOS_BUCKET")
         if not endpoint or not region or not bucket:
             raise ProviderUnavailableError("TOS requires TOS_ENDPOINT, TOS_REGION, and TOS_BUCKET")
         digest, size = _hash_file(path)
-        object_key = f"{self._config.object_prefix}/{digest.removeprefix('sha256:')}/{path.name}"
+        name = object_name or path.name
+        if Path(name).name != name or not name:
+            raise ContractError("TOS object_name must be one filename")
+        object_key = f"{self._config.object_prefix}/{digest.removeprefix('sha256:')}/{name}"
         client = self._client or self._make_client(endpoint, region)
         try:
             result = client.put_object_from_file(bucket, object_key, str(path))

@@ -1,79 +1,79 @@
-# CueFlow v0.5.2 Failure Model
+# CueFlow v0.5.3 Failure Model
 
-## 原则
+## 状态与恢复
 
-CueFlow 不自动重放可能产生重复计费的请求，不对严格 JSON 做宽松修复，不静默替换模型，
-也不把部分结果伪装为成功。Run 终态包括 `succeeded`、`needs_review`、`failed` 和
-`interrupted`。
+Run 终态为 succeeded、needs_review、failed、interrupted。Invocation 状态：
 
-Invocation 状态：
+- created：已落盘，尚未开始 Provider 交付；
+- sending：可能已经交付；
+- succeeded：该远端步骤结果、invocation 和 checkpoint 已原子提交；ATA 此处指完整原始响应；
+- definitely_not_sent：凭据或客户端等交付前条件明确不可用；
+- delivery_ambiguous：网络、流或进程中断，无法证明是否完成；
+- explicit_failure：Provider 明确拒绝，或完成的响应违反输出契约。
 
-- `created`：已落盘但尚未开始 Provider 交付；
-- `sending`：交付已经开始；
-- `succeeded`：Provider 结果已校验并绑定 Artifact；
-- `definitely_not_sent`：凭据、client、输入或交付前链路明确失败；
-- `delivery_ambiguous`：请求可能已到达，或已有远端 job 但状态无法确认；
-- `explicit_failure`：Provider 明确拒绝，或响应违反本地 Contract。
+崩溃恢复将遗留 created 收为 definitely_not_sent，sending 收为 delivery_ambiguous，run 标为
+interrupted。磁盘上的未引用结果文件不能授权重发，也不能冒充成功断点。
 
-崩溃恢复把遗留 `created` 收口为 `definitely_not_sent`，把遗留 `sending` 收口为
-`delivery_ambiguous`，并把 Run 标记为 `interrupted`。
+## 重试
 
-## Retry
+SDK 自动重试关闭。Qwen/Kimi 纠错与 GLM 选择只有在响应明确结束、但严格 JSON 或输出契约
+无效时，才由编排层自动原样重试一次。两个请求分别保存 invocation、response ID、usage 和
+retry ancestry；失败的首次付费请求不会从成本记录中消失。输入、模型、提示词和参数保持不变。
+实时搜索结果可能变化，因此原样请求不代表整个互联网证据链可重放。
 
-Provider transport 和 TOS SDK 自动 retry 关闭。Correction 只有在模型已明确结束但严格 JSON/
-schema 无效时，允许一次语义输入完全相同的原样 retry；不改模型、Prompt、References、
-Keywords 或静态证据。因为 live search 在环，这次调用的互联网结果仍可能变化。
+没有 completion marker、网络交付不明、timeout 不自动重试。用户显式 retry 只重发指定失败
+invocation，复用原 ordered inputs、prompt hash、模型和 idempotency key。已经成功的臂或批次
+不重跑；恢复不从最新 current pointer 猜测旧输入。旧 retry ancestor、成功结果和人工封存后的
+GLM 决定拒绝再裁决。原 run 的配置或提示词变化也会在付费调用前拒绝恢复。
 
-传输歧义绝不自动重放。用户可以显式执行 `cueflow retry PROJECT INVOCATION_ID`；这是一次有
-重复计费风险的明确用户动作。Targeted retry 绑定原 Run、原 ordered Invocation inputs、原
-idempotency key，并记录 `retry_of_invocation_id`，不读取新的 UserKeywords 或其他 run 的结果；
-重发 Correction 时仍会联网，搜索结果不保证相同。
+Qwen/Doubao ASR 在 submit 成功并取得 task/request ID 后立即建立 Provider metadata。
+后续 query、结果下载或解析失败仍保留该 ID；query timeout 是已提交后的
+delivery_ambiguous，不是 definitely_not_sent。
 
-`cueflow resume PROJECT RUN_ID` 只复用该 run 的已提交 checkpoint，继续从未提交的工作；
-不会自动重试 failed / ambiguous 调用。Correction 目标重试只重发失败臂，成功臂保持原样；
-尚未调用的另一臂可以首次调用。GLM 定向重试只重发该窗，其他终结结果和 Correction 保留；
-旧 retry ancestor、已成功调用、已经人工封存的 final 均不能再次裁决。普通 resume 不刷新
-终结窗口结果或 review 队列版本。与此相反，新 `correct` 明确重新调用两个 Correction 模型。
+普通 resume 继续从未调用的阶段，并复用已提交 checkpoint，不刷新终结 review 队列。
+新 correct 是新的付费纠错 run，可以替换 References，但必须保持 ASR 时的同序 UserKeywords。
+ATA 已提交后恢复导出，不重复调用 ATA。单项目 writer lock 排斥其他写者。
 
-配置/Prompt 身份漂移直接拒绝原 run 恢复，要求新 run；用户需要改变 References 时使用
-`correct`。操作持有单项目 writer lock，失败即提示已有写者，不并发生成两个 final。
-ATA 完成而导出未完成的 run，从 alignment checkpoint 恢复，不重复调用 ATA。
+两路纠错并行执行网络请求，主线程单独写入。一个臂失败仍收集并保存另一个已完成结果；
+required arm 不全时不生成合并稿。GLM 单批失败只让该批 case 进入 review，其他批次继续。
 
-## 输入与 Provider Gate
+## Gate
 
-- 源媒体 `duration >= 5h` 或 `byte_length >= 512,000,000`：付费 ASR 前 fail closed；
-- 非 HTTPS PDF/Image、非 UTF-8/空文本、Office 文件、未知 Reference：本地 ContractError；
-- 超过 100 个、空白-only 或非字符串 Keyword：本地 ContractError；
-- GLM 合并窗超过 30s：不合并；最终 WAV 超过 30s 或 25MB：调用前失败；
-- 任一 required Base/Peer ASR、Correction 或 ATA 失败：不降级到单路成功；
-- malformed JSON/schema：Correction 原样 retry 一次后仍无效则该臂失败，不生成假 keep；
-- 流未正常结束、没有 completion marker：delivery ambiguous，不自动重试；
-- edit 无法 exact locate、定位不唯一、单臂矛盾重叠：contract review，不调用 GLM；
-- 纯句法标点分歧：保持 Base 格式，不调用 GLM、不制造 review；
-- 同 span 的共同 lexical projection：自动接受，不因附带标点不同丢失共同纠错；
-- projection 无法可靠拆分、lexical singleton/conflict、有效的不同 span：GLM；
-- 单个 GLM timeout/5xx/provider failure/返回无效：仅该窗关联项转 review，继续其他窗口；
-- GLM 没有唯一 exact contextual match，或候选/位置不唯一：人工 review；
-- 本地 Artifact/hash/Registry 损坏：硬失败，不能伪装成普通 GLM 不可用；
-- 声学工作尚未终结、review 未清零或 final 未封存：不产生付费 ATA 调用；
-- ATA word token 与 Transcript Atom 不一致：ContractError，不导出 SRT；
-- QA blocked 或 identity/stale 不一致：ExportBlockedError。
+- 源媒体 duration >= 5h 或 byte_length >= 512,000,000：ASR 前拒绝。
+- 非 HTTPS PDF/Image、Office、非 UTF-8/空文本或无效关键词：输入契约错误。
+- 任一 required Base、Peer、纠错臂、ATA 失败：不降级为单路成功。
+- BaseTranscript 非空时 corrected_text 为空：已完成但输出契约无效，不当作删除全文。
+- 纠错全文必须能从精确 diff 完整重建；不做 Unicode/大小写等价，不模糊修补。
+- 单路修改和相同修改自动接受；两路修改不同才进入 GLM。
+- Peer 核心边界不可映射：Peer 选项缺席，不截取猜测的文字补齐四选一。
+- 超过完整 case 输入预算：整项 review，不截断目标，不把大改动直接判错。
+- GLM 无效、缺项、重复或未知候选：失败；不伪造 KEEP 或部分有效的批次结果。
+- GLM 返回合法 KEEP：正常决策，保留 Base 并记录；不视为系统失败。
+- Artifact/hash/Registry 损坏：硬失败，不归类为模型不确定。
+- review 未清零、选择未终结或 final 未封存：不能调用 ATA。
+- ATA 响应无法读为 utterances 数组，或句子的 text/整数毫秒字段缺失：本地规范化失败，
+  不生成 SRT；已成功返回的完整 raw 和 task ID 保留，成功 invocation 不改判为失败。
+- ATA 句级负时间、start>end：AtaResult 与 diagnostics 正常落盘，在 SRT serializer 阶段
+  抛 SrtSerializationError，Run failed；不进入 needs_review，不修正原始时间。
+- ATA 重叠、时间倒序、超媒体范围、零时长、空 text、空数组、单句或超长句、文字差异：
+  正常序列化。收据只记录，不产生 warning 级别、质量评分或 gate。
+- 非当前 Run、stale、未封存、依赖/在盘 hash 损坏或 raw blob 不存在：工程一致性错误，
+  拒绝导出。不会拿旧 Run 的字幕替代本次结果。
+- ATA raw/normalized checkpoint 提交后的本地失败：resume 复用结果，不重新调用 ATA。
+  确定性的字段缺失或非法 SRT 时间在 resume 后仍失败；不能用无限付费重试掩盖它。
 
-Presigned media URL 默认有效 7 天，以覆盖异步轮询和显式重试窗口；每次需要时重新签发，URL
-本身不持久化。若 URL 在 Provider 取回媒体前失效，上游调用明确失败。
+## 质量边界
 
-## 已接受的残余风险
+Base 和 Peer 都可能错，两路纠错可能共享同一错误来源。一致或单路修改也可能误改；GLM
+只检查分歧，不检查自动接受的修改，也不能从四个都错的候选中创造正确答案。文本语境和
+搜索只能帮助选择，不能证明实际发音。提示词要求保留真实口误、重复、自我修正和事实错误。
 
-1. Qwen 与豆包可能以相同方式听错，Correction 两臂也可能都未发现；错误将随 Frozen Base
-   出厂，架构无法自愈。
-2. 两个 Correction 模型都使用实时互联网，可能受同一错误网页或相关搜索结果影响并提交
-   相同的错误 replacement，尤其是纯音频无法区分拼写的专名。CueFlow 接受这一相关性风险。
-3. 搜索证据不持久化，因此错误 agreement 无法完整重构当时的互联网证据链；retry 也不
-   保证看到相同外部信息。
-4. GLM 不检查双模型 agreement 或共同 keep，不能发现两臂共同误改或共同漏改。
-5. GLM exact match 是保守工程门槛，不是正确性的声学证明；固定上下文、大小写以外的细微
-   差异、同音异写、超长 utterance 都可能增加人工负载。不得为提高自动率添加模糊匹配。
-6. PDF/Image 是 mutable URL locator，retry 期间可能过期或原地换内容，v0.5.2 不做内容
-   hash 或快照。
+选择器允许自动联网，不强制每项联网；只保存服务端实际返回的搜索 metadata，不承诺完整
+搜索快照。PDF/Image locator 在重试期间可能过期或换内容。定向重试可能再次计费。
+已正常完成但格式/契约无效的返回在 invocation 中保存 response ID、usage 和受控诊断；
+纠错和选择器的较大原文只保存 SHA-256、字节数与 truncated 标志，不把原文拼入错误消息。
+ATA 成功结果不使用该截断机制：完整正文保存到内容寻址 blob，再链接到 AtaResponse；
+JSON/HTTP/query 失败尚未得到成功结果时继续使用明确错误与 task ID 诊断。
 
-没有用户关键词时不注入领域词库是有意的质量取舍，见 Architecture，不是运行失败。
+结构测试和成功生成 SRT 不是字幕准确率的证明。精度、误改率、KEEP 率、人工负担
+和单位媒体时长成本须用独立音频标注与相同输入实验测量，不能从候选去重数量推断投票置信度。

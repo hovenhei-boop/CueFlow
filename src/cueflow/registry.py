@@ -11,7 +11,7 @@ from typing import Any, cast
 from cueflow.errors import ContractError, IntegrityError
 from cueflow.schema import ArtifactEnvelope, utc_now
 
-REGISTRY_SCHEMA_VERSION = 9
+REGISTRY_SCHEMA_VERSION = 13
 REQUIRED_TABLES = frozenset(
     {
         "projects",
@@ -101,6 +101,7 @@ REQUIRED_TABLE_COLUMNS = {
         "prompt_sha256",
         "artifact_id",
         "error_message",
+        "diagnostic_json",
         "retry_of_invocation_id",
         "created_at",
         "updated_at",
@@ -132,7 +133,7 @@ CREATE TABLE source_assets (
     storage_locator TEXT NOT NULL,
     registered_at TEXT NOT NULL,
     PRIMARY KEY (project_id, source_asset_id),
-    UNIQUE (project_id, filename),
+    UNIQUE (project_id, storage_locator),
     FOREIGN KEY (project_id) REFERENCES projects(project_id)
 );
 
@@ -204,7 +205,7 @@ CREATE TABLE invocations (
     project_id TEXT NOT NULL,
     operation TEXT NOT NULL CHECK (
         operation IN (
-            'media_upload', 'qwen_asr', 'doubao_asr', 'glm_asr',
+            'media_upload', 'qwen_asr', 'doubao_asr', 'glm_selection',
             'qwen_correction', 'kimi_correction', 'ata'
         )
     ),
@@ -230,6 +231,7 @@ CREATE TABLE invocations (
     prompt_sha256 TEXT,
     artifact_id TEXT,
     error_message TEXT,
+    diagnostic_json TEXT,
     retry_of_invocation_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -282,7 +284,7 @@ class Registry:
             raise IntegrityError(
                 "incompatible Registry schema: "
                 f"expected {REGISTRY_SCHEMA_VERSION}, found {version}; "
-                "CueFlow v0.5.2 does not migrate older projects"
+                "CueFlow v0.5.3 does not migrate older projects"
             )
         actual_tables = self._table_names()
         if actual_tables != REQUIRED_TABLES:
@@ -342,8 +344,8 @@ class Registry:
 
     def register_source_asset(self, project_id: str, value: Mapping[str, Any]) -> sqlite3.Row:
         existing = self.connection.execute(
-            "SELECT * FROM source_assets WHERE project_id=? AND filename=? COLLATE BINARY",
-            (project_id, str(value["filename"])),
+            "SELECT * FROM source_assets WHERE project_id=? AND storage_locator=? COLLATE BINARY",
+            (project_id, str(value["storage_locator"])),
         ).fetchone()
         if existing is not None:
             return cast(sqlite3.Row, existing)
@@ -695,9 +697,10 @@ class Registry:
                  status, provider, requested_model, resolved_model, idempotency_key,
                  remote_job_id, remote_status, remote_artifact_refs_json, response_id,
                  elapsed_ms, reasoning_ms, usage_json, prompt_version, prompt_sha256,
-                 artifact_id, error_message, retry_of_invocation_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 'created', ?, ?, NULL, ?, NULL, NULL, NULL, NULL,
-                        NULL, NULL, NULL, ?, ?, NULL, NULL, ?, ?, ?)
+                 artifact_id, error_message, diagnostic_json, retry_of_invocation_id,
+                 created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, 'created', ?, ?, NULL, ?, NULL, NULL, NULL, NULL,
+                        NULL, NULL, NULL, ?, ?, NULL, NULL, NULL, ?, ?, ?)
                 """,
                 (
                     invocation_id,
@@ -755,6 +758,7 @@ class Registry:
         reasoning_ms: int | None = None,
         usage: Mapping[str, Any] | None = None,
         error_message: str | None = None,
+        diagnostic: Mapping[str, Any] | None = None,
     ) -> None:
         if status not in {
             "sending",
@@ -771,7 +775,8 @@ class Registry:
                 resolved_model=COALESCE(?, resolved_model),
                 elapsed_ms=COALESCE(?, elapsed_ms),
                 reasoning_ms=COALESCE(?, reasoning_ms),
-                usage_json=COALESCE(?, usage_json), error_message=?, updated_at=?
+                usage_json=COALESCE(?, usage_json), error_message=?,
+                diagnostic_json=COALESCE(?, diagnostic_json), updated_at=?
             WHERE invocation_id=?
             """,
             (
@@ -785,6 +790,9 @@ class Registry:
                 if usage is not None
                 else None,
                 error_message,
+                json.dumps(dict(diagnostic), ensure_ascii=False, separators=(",", ":"))
+                if diagnostic is not None
+                else None,
                 utc_now(),
                 invocation_id,
             ),

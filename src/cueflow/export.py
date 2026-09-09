@@ -2,52 +2,44 @@ from __future__ import annotations
 
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from cueflow.canonical import hash_json
 from cueflow.config import COMPONENT_VERSION
-from cueflow.errors import ExportBlockedError
+from cueflow.errors import ContractError, ExportBlockedError, SrtSerializationError
 from cueflow.project import ProjectContext
+from cueflow.run_runtime import _get
 from cueflow.schema import ArtifactEnvelope, InputRef, Producer
 
 
-def render_srt(subtitle: Mapping[str, object]) -> str:
+def render_srt(utterances: Sequence[Mapping[str, Any]]) -> str:
     blocks: list[str] = []
-    cues = subtitle.get("cues", [])
-    if not isinstance(cues, list):
-        raise ExportBlockedError("Subtitle cues are invalid")
-    for index, cue in enumerate(cues, start=1):
-        if not isinstance(cue, Mapping):
-            raise ExportBlockedError("Subtitle contains an invalid Cue")
-        text = str(cue.get("text", ""))
-        if not text:
-            raise ExportBlockedError("Subtitle contains an empty Cue")
-        blocks.append(
-            f"{index}\n{_srt_time(int(cue['global_start_ms']))} --> "
-            f"{_srt_time(int(cue['global_end_ms']))}\n{text}"
-        )
+    for index, item in enumerate(utterances, start=1):
+        text, start, end = item.get("text"), item.get("start_ms"), item.get("end_ms")
+        if not isinstance(text, str) or type(start) is not int or type(end) is not int:
+            raise SrtSerializationError(f"Utterance {index} requires text and integer milliseconds")
+        if start < 0 or end < 0 or start > end:
+            raise SrtSerializationError(f"Utterance {index} has negative or reversed SRT times")
+        blocks.append(f"{index}\n{_srt_time(start)} --> {_srt_time(end)}\n{text}")
     return "\n\n".join(blocks) + ("\n" if blocks else "")
 
 
 def publish_srt(
     context: ProjectContext,
     *,
+    run_id: str,
     timeline_audio: ArtifactEnvelope,
     transcript: ArtifactEnvelope,
-    alignment: ArtifactEnvelope,
-    subtitle: ArtifactEnvelope,
-    qa: ArtifactEnvelope,
+    ata_response: ArtifactEnvelope,
+    ata_result: ArtifactEnvelope,
 ) -> tuple[ArtifactEnvelope, Path]:
     validate_export_gate(
-        context,
-        timeline_audio=timeline_audio,
-        transcript=transcript,
-        alignment=alignment,
-        subtitle=subtitle,
-        qa=qa,
+        context, run_id=run_id, timeline_audio=timeline_audio, transcript=transcript,
+        ata_response=ata_response, ata_result=ata_result,
     )
-    text = render_srt(subtitle.payload)
+    text = render_srt(ata_result.payload["utterances"])
     envelope = ArtifactEnvelope.create(
         artifact_kind="srt_render",
         scope_key="global",
@@ -56,15 +48,12 @@ def publish_srt(
             component_version=COMPONENT_VERSION,
             provider=None,
             model=None,
-            config_hash=hash_json({"encoding": "utf-8", "format": "srt"}),
+            config_hash=hash_json({"encoding": "utf-8", "serializer": "utterances-v1"}),
         ),
-        inputs=[
-            InputRef(role="subtitle", artifact_id=subtitle.artifact_id),
-            InputRef(role="qa", artifact_id=qa.artifact_id),
-        ],
+        inputs=[InputRef(role="ata_result", artifact_id=ata_result.artifact_id)],
         payload={
-            "subtitle_artifact_id": subtitle.artifact_id,
-            "qa_artifact_id": qa.artifact_id,
+            "run_id": run_id,
+            "ata_result_artifact_id": ata_result.artifact_id,
             "encoding": "utf-8",
             "byte_length": len(text.encode("utf-8")),
             "text": text,
@@ -79,36 +68,92 @@ def publish_srt(
 def validate_export_gate(
     context: ProjectContext,
     *,
+    run_id: str,
     timeline_audio: ArtifactEnvelope,
     transcript: ArtifactEnvelope,
-    alignment: ArtifactEnvelope,
-    subtitle: ArtifactEnvelope,
-    qa: ArtifactEnvelope,
+    ata_response: ArtifactEnvelope,
+    ata_result: ArtifactEnvelope,
 ) -> None:
-    for envelope in (timeline_audio, transcript, alignment, subtitle, qa):
+    """Validate ownership and provenance, never subtitle quality."""
+    if context.registry.run(run_id)["project_id"] != context.project_id:
+        raise ExportBlockedError("Run belongs to another project")
+    for envelope in (timeline_audio, transcript, ata_response, ata_result):
         _require_current(context, envelope)
+        checkpoint = _get(context, run_id, envelope.artifact_kind, envelope.scope_key)
+        if checkpoint is None or checkpoint.artifact_id != envelope.artifact_id:
+            raise ExportBlockedError("Artifact is not the requested Run's checkpoint")
     resolution = context.artifact(str(transcript.payload["edit_resolution_artifact_id"]))
     _require_current(context, resolution)
     if (
-        not resolution.payload.get("sealed")
-        or resolution.payload.get("pending_acoustic")
+        resolution.payload.get("run_id") != run_id
+        or not resolution.payload.get("sealed")
+        or resolution.payload.get("pending_selection")
         or resolution.payload.get("review_items")
         or resolution.payload.get("corrected_preview") != transcript.payload["source_text"]
     ):
-        raise ExportBlockedError("Transcript requires its sealed, fully resolved source")
-    if qa.payload.get("result") == "blocked":
-        raise ExportBlockedError("QA contains unresolved structural blocking errors")
-    if alignment.payload.get("timeline_audio_artifact_id") != timeline_audio.artifact_id:
-        raise ExportBlockedError("Alignment references a non-current TimelineAudio")
-    if alignment.payload.get("transcript_artifact_id") != transcript.artifact_id:
-        raise ExportBlockedError("Alignment references a non-current Transcript")
-    if subtitle.payload.get("transcript_artifact_id") != transcript.artifact_id:
-        raise ExportBlockedError("Subtitle references a non-current Transcript")
-    if subtitle.payload.get("alignment_artifact_id") != alignment.artifact_id:
-        raise ExportBlockedError("Subtitle references a non-current Alignment")
-    qa_inputs = [item.artifact_id for item in qa.inputs if item.artifact_id is not None]
-    if qa.payload.get("subject_artifact_ids") != qa_inputs:
-        raise ExportBlockedError("QA subjects differ from exact dependency edges")
+        raise ExportBlockedError("Transcript requires this Run's sealed, fully resolved source")
+    media_object = context.artifact(str(ata_response.payload["media_object_artifact_id"]))
+    _require_current(context, media_object)
+    checkpoint = _get(context, run_id, "media_object")
+    if checkpoint is None or checkpoint.artifact_id != media_object.artifact_id:
+        raise ExportBlockedError("ATA media object is not the requested Run's checkpoint")
+    audio_blob = timeline_audio.payload["audio_blob"]
+    if (
+        media_object.payload.get("timeline_audio_artifact_id") != timeline_audio.artifact_id
+        or media_object.payload.get("content_hash") != audio_blob["content_hash"]
+        or media_object.payload.get("byte_length") != audio_blob["byte_length"]
+    ):
+        raise ExportBlockedError("ATA media object references a different TimelineAudio")
+    _require_inputs(media_object, [("timeline_audio", timeline_audio.artifact_id)])
+    for envelope in (ata_response, ata_result):
+        if (
+            envelope.payload["run_id"] != run_id
+            or envelope.payload["transcript_artifact_id"] != transcript.artifact_id
+            or envelope.payload["timeline_audio_artifact_id"] != timeline_audio.artifact_id
+            or envelope.payload["media_object_artifact_id"] != media_object.artifact_id
+        ):
+            raise ExportBlockedError("ATA provenance differs from this Run's frozen inputs")
+    if ata_result.payload["ata_response_artifact_id"] != ata_response.artifact_id:
+        raise ExportBlockedError("ATA result references a different raw response")
+    if ata_response.payload["audio_text"] != transcript.payload["source_text"]:
+        raise ExportBlockedError("ATA request text differs from the sealed Transcript")
+    _require_inputs(ata_response, [
+        ("media_object", media_object.artifact_id),
+        ("timeline_audio", timeline_audio.artifact_id),
+        ("transcript", transcript.artifact_id),
+    ])
+    _require_inputs(ata_result, [
+        ("ata_response", ata_response.artifact_id),
+        ("transcript", transcript.artifact_id),
+        ("timeline_audio", timeline_audio.artifact_id),
+    ])
+    invocation = context.registry.invocation(str(ata_response.payload["invocation_id"]))
+    invocation_inputs = [
+        (row["role"], row["input_artifact_id"])
+        for row in context.registry.invocation_inputs(str(invocation["invocation_id"]))
+    ]
+    if (
+        invocation["run_id"] != run_id
+        or invocation["operation"] != "ata"
+        or invocation["status"] != "succeeded"
+        or invocation["artifact_id"] != ata_response.artifact_id
+        or invocation["response_id"] != ata_response.payload["provider_metadata"]["response_id"]
+        or invocation_inputs != [
+            ("media_object", media_object.artifact_id), ("transcript", transcript.artifact_id)
+        ]
+    ):
+        raise ExportBlockedError("ATA raw response requires its successful Run invocation")
+    blob = ata_response.payload["response_blob"]
+    context.store.verify_blob(
+        context.store.blob_path(blob["content_hash"]), blob["content_hash"], blob["byte_length"]
+    )
+
+
+def _require_inputs(envelope: ArtifactEnvelope, expected: list[tuple[str, str]]) -> None:
+    if list(envelope.inputs) != [
+        InputRef(role=role, artifact_id=identity) for role, identity in expected
+    ]:
+        raise ExportBlockedError("ATA dependency edges differ from its provenance")
 
 
 def _require_current(context: ProjectContext, envelope: ArtifactEnvelope) -> None:
@@ -123,6 +168,13 @@ def _require_current(context: ProjectContext, envelope: ArtifactEnvelope) -> Non
         raise ExportBlockedError(
             f"Artifact is not current and non-stale: {envelope.artifact_kind}/{envelope.scope_key}"
         )
+    # created_at is not semantic identity: identical re-publications may have another timestamp.
+    try:
+        envelope.validate()
+    except ContractError as exc:
+        raise ExportBlockedError("Supplied artifact violates its schema/hash contract") from exc
+    if context.artifact(envelope.artifact_id).content_hash != envelope.content_hash:
+        raise ExportBlockedError("Supplied artifact differs from its persisted envelope")
 
 
 def _atomic_text_projection(text: str, destination: Path) -> None:

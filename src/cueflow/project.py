@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import wraps
@@ -94,15 +95,16 @@ class ProjectContext:
         self, path: Path, *, asset_kind: str, media_kind: str | None = None
     ) -> dict[str, Any]:
         if asset_kind != "media":
-            raise ContractError("v0.5.2 source assets must use asset_kind=media")
+            raise ContractError("v0.5.3 source assets must use asset_kind=media")
         resolved = _readable_source_path(path)
+        locator = os.path.normcase(os.path.normpath(str(resolved)))
         value: dict[str, Any] = {
             "filename": path.name,
             "asset_kind": asset_kind,
             "media_kind": media_kind,
             "format": path.suffix.lower().lstrip(".") or "unknown",
             "storage_mode": "external_reference",
-            "storage_locator": str(resolved),
+            "storage_locator": locator,
             "registered_at": utc_now(),
         }
         return dict(self.registry.register_source_asset(self.project_id, value))

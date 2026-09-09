@@ -56,16 +56,12 @@ def normalize_keywords(values: Sequence[str]) -> list[str]:
     return result
 
 
-def has_correction_context(payload: dict[str, object]) -> bool:
-    return bool(payload.get("references") or payload.get("user_keywords"))
-
-
 def _url_reference(spec: ReferenceSpec, ordinal: int) -> dict[str, object]:
     url = spec.value.strip()
     parsed = urlsplit(url)
     if parsed.scheme != "https" or not parsed.netloc:
         raise UnsupportedReferenceError(
-            "v0.5.2 PDF and image References require an absolute HTTPS URL"
+            "v0.5.3 PDF and image References require an absolute HTTPS URL"
         )
     display_name = Path(parsed.path).name or parsed.netloc
     return {
@@ -81,16 +77,16 @@ def _text_reference(path: Path, ordinal: int) -> dict[str, object]:
     suffix = path.suffix.lower().lstrip(".")
     if suffix in OFFICE_FORMATS:
         raise UnsupportedReferenceError(
-            "v0.5.2 does not convert Office files; export the file to PDF and provide "
+            "v0.5.3 does not convert Office files; export the file to PDF and provide "
             "it with --pdf-url"
         )
     if suffix == "pdf" or suffix in {"png", "jpg", "jpeg", "webp"}:
         raise UnsupportedReferenceError(
-            "v0.5.2 accepts local files only for TXT/MD/CSV/JSON; PDF and images "
+            "v0.5.3 accepts local files only for TXT/MD/CSV/JSON; PDF and images "
             "must use --pdf-url or --image-url"
         )
     if suffix not in TEXT_REFERENCE_FORMATS:
-        raise UnsupportedReferenceError("v0.5.2 text References must be TXT, MD, CSV, or JSON")
+        raise UnsupportedReferenceError("v0.5.3 text References must be TXT, MD, CSV, or JSON")
     try:
         if not path.is_file():
             raise UnsupportedReferenceError(f"Reference text file is missing: {path}")
