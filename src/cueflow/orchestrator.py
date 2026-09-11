@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from cueflow.artifact_versions import artifact_producer_version
 from cueflow.asr_comparison import compare_asr
 from cueflow.asr_contracts import AsrResult, ProviderMetadata, WholeFileAsrProvider
 from cueflow.ata_provider import AtaResponse, VolcengineAtaProvider
@@ -15,7 +16,6 @@ from cueflow.base_asr_provider import QwenFiletransProvider
 from cueflow.canonical import hash_json
 from cueflow.cloud_stream import CompletedResponseError
 from cueflow.config import (
-    COMPONENT_VERSION,
     RuntimeConfig,
     result_config,
 )
@@ -136,7 +136,7 @@ def _save(
     envelope = ArtifactEnvelope.create(
         artifact_kind=kind,
         scope_key=scope,
-        producer=_deterministic_producer(kind, {
+        producer=_deterministic_producer(kind, kind, {
             "run_id": run_id, "config_hash": _config_hash(),
             "execution_round": context.registry.round_number(run_id, kind),
         }),
@@ -648,6 +648,7 @@ def _correction_transcripts(
                     artifact_kind="correction_transcript",
                     scope_key=provider.arm,
                     producer=_provider_producer(
+                        "correction_transcript",
                         provider.provider,
                         provider.model,
                         {
@@ -774,6 +775,7 @@ def _select_batch(
                 artifact_kind="selection_result",
                 scope_key=batch.scope_key,
                 producer=_provider_producer(
+                    "selection_result",
                     provider.provider,
                     provider.model,
                     {"prompt_sha256": batch.payload["prompt_sha256"], "web_search": "auto"},
@@ -995,7 +997,7 @@ def _publish_payload_job_input(
     envelope = ArtifactEnvelope.create(
         artifact_kind="job_input",
         scope_key="global",
-        producer=_deterministic_producer("job_input", {"format": "0.5.4"}),
+        producer=_deterministic_producer("job_input", "job_input", {"format": "0.5.4"}),
         inputs=[InputRef(role="source_media", source_asset_id=str(payload["source_asset_id"]))],
         payload=payload,
     )
@@ -1046,7 +1048,9 @@ def _upload_media(
         envelope = ArtifactEnvelope.create(
             artifact_kind="media_object",
             scope_key="global",
-            producer=_provider_producer(store.provider, None, {"url_persisted": False}),
+            producer=_provider_producer(
+                "media_object", store.provider, None, {"url_persisted": False}
+            ),
             inputs=[InputRef(role="timeline_audio", artifact_id=timeline_audio.artifact_id)],
             payload=ref.artifact_payload(timeline_audio.artifact_id),
         )
@@ -1117,7 +1121,9 @@ def _whole_asr(
         envelope = ArtifactEnvelope.create(
             artifact_kind=artifact_kind,
             scope_key="global",
-            producer=_provider_producer(provider.provider, provider.model, {"whole_file": True}),
+            producer=_provider_producer(
+                artifact_kind, provider.provider, provider.model, {"whole_file": True}
+            ),
             inputs=[
                 InputRef(role="media_object", artifact_id=media_object.artifact_id),
                 InputRef(role="job_input", artifact_id=job_input.artifact_id),
@@ -1164,7 +1170,9 @@ def _comparison(
         artifact_kind="asr_comparison",
         scope_key="global",
         producer=_deterministic_producer(
-            "character_diff", {"algorithm": "difflib-sequence-matcher-v1", "normalization": "none"}
+            "asr_comparison",
+            "character_diff",
+            {"algorithm": "difflib-sequence-matcher-v1", "normalization": "none"},
         ),
         inputs=[
             InputRef(role="base_asr", artifact_id=base.artifact_id),
@@ -1220,7 +1228,10 @@ def _ata_stage(
             artifact_kind="ata_response",
             scope_key="global",
             producer=_provider_producer(
-                provider.provider, provider.model, {"sta_punc_mode": "3", "transport": "url"}
+                "ata_response",
+                provider.provider,
+                provider.model,
+                {"sta_punc_mode": "3", "transport": "url"},
             ),
             inputs=[
                 InputRef(role="media_object", artifact_id=media_object.artifact_id),
@@ -1333,12 +1344,31 @@ def _units_from_payload(payload: Mapping[str, Any]) -> tuple[Any, ...]:
     return tuple(result)
 
 
-def _deterministic_producer(component: str, config: Mapping[str, Any]) -> Producer:
-    return Producer(component, COMPONENT_VERSION, None, None, hash_json(config))
+def _deterministic_producer(
+    artifact_kind: str, component: str, config: Mapping[str, Any]
+) -> Producer:
+    return Producer(
+        component,
+        artifact_producer_version(artifact_kind),
+        None,
+        None,
+        hash_json(config),
+    )
 
 
-def _provider_producer(provider: str, model: str | None, config: Mapping[str, Any]) -> Producer:
-    return Producer(provider, COMPONENT_VERSION, provider, model, hash_json(config))
+def _provider_producer(
+    artifact_kind: str,
+    provider: str,
+    model: str | None,
+    config: Mapping[str, Any],
+) -> Producer:
+    return Producer(
+        provider,
+        artifact_producer_version(artifact_kind),
+        provider,
+        model,
+        hash_json(config),
+    )
 
 
 def _fail_run(context: RunContext, run_id: str, exc: BaseException) -> None:

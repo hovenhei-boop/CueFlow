@@ -50,3 +50,31 @@ class ExportBlockedError(CueFlowError):
 
 class SrtSerializationError(CueFlowError):
     """ATA values cannot be represented by the SRT serializer."""
+
+
+class AccountError(CueFlowError):
+    """Base error for the product-level Account Core."""
+
+
+class AccountNotFoundError(AccountError):
+    """The requested account object does not exist."""
+
+
+class AccountStateError(AccountError):
+    """The account state does not permit the requested transition."""
+
+
+class IdentityConflictError(AccountError):
+    """A verified identity is already active on another account."""
+
+
+class SessionStateError(AccountError):
+    """A Session or Session Family cannot perform the requested transition."""
+
+
+class AccountMigrationError(AccountError):
+    """The Account database could not reach the current forward-only schema."""
+
+
+class AccountMigrationLockedError(AccountMigrationError):
+    """Another process owns the Account database migration lock."""

@@ -6,13 +6,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from cueflow import __version__
 from cueflow.api import Workspace
 from cueflow.errors import ContractError
 from cueflow.orchestrator import resolve_review, resume_run
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cueflow", description="CueFlow Core 0.5.4")
+    parser = argparse.ArgumentParser(prog="cueflow", description=f"CueFlow Core {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in (
         "init",

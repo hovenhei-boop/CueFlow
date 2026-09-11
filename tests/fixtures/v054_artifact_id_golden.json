@@ -1,0 +1,319 @@
+{
+  "baseline_commit": "53d56c9",
+  "source_manifest_sha256": "6000CA674908A5BEB460FC3C16069C76FE9E32CBBD820761F8A22A3BB68A4805",
+  "purpose": "Fake object-store golden proving v0.5.4 to v0.6.0 producer-version refactor equivalence; not a production cross-Run Artifact ID guarantee.",
+  "artifacts": [
+    {
+      "artifact_kind": "asr_comparison",
+      "scope_key": "global",
+      "artifact_id": "art_9cea4502f7fdce2099b92ab9c39960a7b2566dd82b7b156c4446a38e33060281",
+      "content_hash": "sha256:9cea4502f7fdce2099b92ab9c39960a7b2566dd82b7b156c4446a38e33060281",
+      "producer": {
+        "component": "character_diff",
+        "component_version": "0.5.4",
+        "provider": null,
+        "model": null,
+        "config_hash": "sha256:6a109de896c3ab3dd8a2721bfc6c4230531727cf10901e745d67c22c8dc169b4"
+      }
+    },
+    {
+      "artifact_kind": "ata_response",
+      "scope_key": "global",
+      "artifact_id": "art_0dbdfac4b39933fdb55e229d64cb087d262e05d1760b3660cfe145db6d627957",
+      "content_hash": "sha256:0dbdfac4b39933fdb55e229d64cb087d262e05d1760b3660cfe145db6d627957",
+      "producer": {
+        "component": "fixture-ata",
+        "component_version": "0.5.4",
+        "provider": "fixture-ata",
+        "model": "ata",
+        "config_hash": "sha256:6f784500a2a58b97dd865a90b14b834a3f8a6c5a2ea905249a8665bdc27a0994"
+      }
+    },
+    {
+      "artifact_kind": "ata_result",
+      "scope_key": "global",
+      "artifact_id": "art_7388bc6a7d93a4ece0e125d27f318b6b064344b01ae5e515770dfb4f87cecf57",
+      "content_hash": "sha256:7388bc6a7d93a4ece0e125d27f318b6b064344b01ae5e515770dfb4f87cecf57",
+      "producer": {
+        "component": "ata_result",
+        "component_version": "0.5.4",
+        "provider": null,
+        "model": null,
+        "config_hash": "sha256:6ec8df8380ceba571a3ceed341c02d789011309ce7b7e16ff23be747deb3d8ca"
+      }
+    },
+    {
+      "artifact_kind": "base_asr",
+      "scope_key": "global",
+      "artifact_id": "art_0f03902f5b22986c48ff2331e1fedd84fe3fa11e8f1b090cf2fa5649bd9481eb",
+      "content_hash": "sha256:0f03902f5b22986c48ff2331e1fedd84fe3fa11e8f1b090cf2fa5649bd9481eb",
+      "producer": {
+        "component": "fixture",
+        "component_version": "0.5.4",
+        "provider": "fixture",
+        "model": "long",
+        "config_hash": "sha256:715e32002090718627a4a0918d169349ca7e7f9e101bb56da511917ac7f5fc36"
+      }
+    },
+    {
+      "artifact_kind": "correction_transcript",
+      "scope_key": "kimi",
+      "artifact_id": "art_4d87888d17f9b33613ebcee4fdaa52bf11f203bd6a69793a0df45804aff27b9f",
+      "content_hash": "sha256:4d87888d17f9b33613ebcee4fdaa52bf11f203bd6a69793a0df45804aff27b9f",
+      "producer": {
+        "component": "fixture-correction",
+        "component_version": "0.5.4",
+        "provider": "fixture-correction",
+        "model": "long",
+        "config_hash": "sha256:0f62063666a68ec6319d70fc86a206c24bbd94d8e3a58d9b90cef88f76a8442c"
+      }
+    },
+    {
+      "artifact_kind": "correction_transcript",
+      "scope_key": "qwen",
+      "artifact_id": "art_226fbc18cec0939e3254b856003611b0245e0f517c6222eafe3ab3cb95e44307",
+      "content_hash": "sha256:226fbc18cec0939e3254b856003611b0245e0f517c6222eafe3ab3cb95e44307",
+      "producer": {
+        "component": "fixture-correction",
+        "component_version": "0.5.4",
+        "provider": "fixture-correction",
+        "model": "long",
+        "config_hash": "sha256:0f62063666a68ec6319d70fc86a206c24bbd94d8e3a58d9b90cef88f76a8442c"
+      }
+    },
+    {
+      "artifact_kind": "edit_resolution",
+      "scope_key": "global",
+      "artifact_id": "art_1cea23b427102b96c2a69edf26966a4422d2d8a08c0ec4c96c7fa86878f066d8",
+      "content_hash": "sha256:1cea23b427102b96c2a69edf26966a4422d2d8a08c0ec4c96c7fa86878f066d8",
+      "producer": {
+        "component": "edit_resolution",
+        "component_version": "0.5.4",
+        "provider": null,
+        "model": null,
+        "config_hash": "sha256:6ec8df8380ceba571a3ceed341c02d789011309ce7b7e16ff23be747deb3d8ca"
+      }
+    },
+    {
+      "artifact_kind": "edit_resolution",
+      "scope_key": "global",
+      "artifact_id": "art_7d10cb37673d12781030a055bc7ed7a5e5b1f491a593bc1c41ab7e1211c9c059",
+      "content_hash": "sha256:7d10cb37673d12781030a055bc7ed7a5e5b1f491a593bc1c41ab7e1211c9c059",
+      "producer": {
+        "component": "edit_resolution",
+        "component_version": "0.5.4",
+        "provider": null,
+        "model": null,
+        "config_hash": "sha256:6ec8df8380ceba571a3ceed341c02d789011309ce7b7e16ff23be747deb3d8ca"
+      }
+    },
+    {
+      "artifact_kind": "job_input",
+      "scope_key": "global",
+      "artifact_id": "art_703c87c43243b17ae14b026dccb3df1564df2e55d6c3b612a79e3930019868eb",
+      "content_hash": "sha256:703c87c43243b17ae14b026dccb3df1564df2e55d6c3b612a79e3930019868eb",
+      "producer": {
+        "component": "job_input",
+        "component_version": "0.5.4",
+        "provider": null,
+        "model": null,
+        "config_hash": "sha256:fb79c7f22f4fe83512eff93182ba7464ad851b3f7dbba8a324e5a730a178de69"
+      }
+    },
+    {
+      "artifact_kind": "media_object",
+      "scope_key": "global",
+      "artifact_id": "art_04142df3da3acd7cdc3a57346a2e75760bfddae2dd058f220702beb682c76604",
+      "content_hash": "sha256:04142df3da3acd7cdc3a57346a2e75760bfddae2dd058f220702beb682c76604",
+      "producer": {
+        "component": "fake-object-store",
+        "component_version": "0.5.4",
+        "provider": "fake-object-store",
+        "model": null,
+        "config_hash": "sha256:ba2b1fae5a747485239081500ad54189f771de43449db98d6e53e88a40d87c91"
+      }
+    },
+    {
+      "artifact_kind": "media_probe",
+      "scope_key": "global",
+      "artifact_id": "art_8e1dd6e37fbf1cff02e9218f766cd86129a675b3952222989a239966d705818b",
+      "content_hash": "sha256:8e1dd6e37fbf1cff02e9218f766cd86129a675b3952222989a239966d705818b",
+      "producer": {
+        "component": "media",
+        "component_version": "0.5.4",
+        "provider": null,
+        "model": null,
+        "config_hash": "sha256:ad43044e6dd7f440e4c1e83d1d3437d3f123eecb55b68b1ba7a175d693787ff0"
+      }
+    },
+    {
+      "artifact_kind": "merge_plan",
+      "scope_key": "global",
+      "artifact_id": "art_e29c111ec5ae917a69be7807cfc1e3daf0c70685510392a4e8446d3aa5b17738",
+      "content_hash": "sha256:e29c111ec5ae917a69be7807cfc1e3daf0c70685510392a4e8446d3aa5b17738",
+      "producer": {
+        "component": "merge_plan",
+        "component_version": "0.5.4",
+        "provider": null,
+        "model": null,
+        "config_hash": "sha256:6ec8df8380ceba571a3ceed341c02d789011309ce7b7e16ff23be747deb3d8ca"
+      }
+    },
+    {
+      "artifact_kind": "peer_asr",
+      "scope_key": "global",
+      "artifact_id": "art_dc0ff124ac775c738ad460e8e7bc678ff83b1552cdda92c368b7bf24532cbf8d",
+      "content_hash": "sha256:dc0ff124ac775c738ad460e8e7bc678ff83b1552cdda92c368b7bf24532cbf8d",
+      "producer": {
+        "component": "fixture",
+        "component_version": "0.5.4",
+        "provider": "fixture",
+        "model": "long",
+        "config_hash": "sha256:715e32002090718627a4a0918d169349ca7e7f9e101bb56da511917ac7f5fc36"
+      }
+    },
+    {
+      "artifact_kind": "review_queue",
+      "scope_key": "global",
+      "artifact_id": "art_dc40ecba8996f198325bfcaa57495ca67b0e5db1f1968d49d976839bd32e7127",
+      "content_hash": "sha256:dc40ecba8996f198325bfcaa57495ca67b0e5db1f1968d49d976839bd32e7127",
+      "producer": {
+        "component": "review_queue",
+        "component_version": "0.5.4",
+        "provider": null,
+        "model": null,
+        "config_hash": "sha256:6ec8df8380ceba571a3ceed341c02d789011309ce7b7e16ff23be747deb3d8ca"
+      }
+    },
+    {
+      "artifact_kind": "review_queue",
+      "scope_key": "global",
+      "artifact_id": "art_fc91ccfd3f9bea2b4669f889840b26debd90bb3029a97e1a695f67030c7fbbb1",
+      "content_hash": "sha256:fc91ccfd3f9bea2b4669f889840b26debd90bb3029a97e1a695f67030c7fbbb1",
+      "producer": {
+        "component": "review_queue",
+        "component_version": "0.5.4",
+        "provider": null,
+        "model": null,
+        "config_hash": "sha256:6ec8df8380ceba571a3ceed341c02d789011309ce7b7e16ff23be747deb3d8ca"
+      }
+    },
+    {
+      "artifact_kind": "review_resolution",
+      "scope_key": "global",
+      "artifact_id": "art_e464222d38955ec7b08eee1a5e295821adf5241fc9b9dfde75fcedf6f13a630e",
+      "content_hash": "sha256:e464222d38955ec7b08eee1a5e295821adf5241fc9b9dfde75fcedf6f13a630e",
+      "producer": {
+        "component": "review_resolution",
+        "component_version": "0.5.4",
+        "provider": null,
+        "model": null,
+        "config_hash": "sha256:6ec8df8380ceba571a3ceed341c02d789011309ce7b7e16ff23be747deb3d8ca"
+      }
+    },
+    {
+      "artifact_kind": "selection_batch",
+      "scope_key": "batch_454cc0e4e9c9811b8d2128d6",
+      "artifact_id": "art_cfd14d48a15de2d36a8f87e88bde7e940f38e917913a8f566e759f8d93e20452",
+      "content_hash": "sha256:cfd14d48a15de2d36a8f87e88bde7e940f38e917913a8f566e759f8d93e20452",
+      "producer": {
+        "component": "selection_batch",
+        "component_version": "0.5.4",
+        "provider": null,
+        "model": null,
+        "config_hash": "sha256:6ec8df8380ceba571a3ceed341c02d789011309ce7b7e16ff23be747deb3d8ca"
+      }
+    },
+    {
+      "artifact_kind": "selection_batch",
+      "scope_key": "batch_65062f4844ba00b653e408d4",
+      "artifact_id": "art_bf54b568b671d82bd03bc9dc8bc40abcd56ee5591ab35533527626412f84ca13",
+      "content_hash": "sha256:bf54b568b671d82bd03bc9dc8bc40abcd56ee5591ab35533527626412f84ca13",
+      "producer": {
+        "component": "selection_batch",
+        "component_version": "0.5.4",
+        "provider": null,
+        "model": null,
+        "config_hash": "sha256:6ec8df8380ceba571a3ceed341c02d789011309ce7b7e16ff23be747deb3d8ca"
+      }
+    },
+    {
+      "artifact_kind": "selection_batch",
+      "scope_key": "batch_b4ffbd8c8222cbc4d4ba9bcb",
+      "artifact_id": "art_7910ce1303accff91430ba10860f685f77d1618325186f1b7673e50aabf551d2",
+      "content_hash": "sha256:7910ce1303accff91430ba10860f685f77d1618325186f1b7673e50aabf551d2",
+      "producer": {
+        "component": "selection_batch",
+        "component_version": "0.5.4",
+        "provider": null,
+        "model": null,
+        "config_hash": "sha256:6ec8df8380ceba571a3ceed341c02d789011309ce7b7e16ff23be747deb3d8ca"
+      }
+    },
+    {
+      "artifact_kind": "selection_result",
+      "scope_key": "batch_454cc0e4e9c9811b8d2128d6",
+      "artifact_id": "art_83bd7bd17b1dac6d8f48c1b1cec7917ece35df1411004328b6ac92ae0d04d75b",
+      "content_hash": "sha256:83bd7bd17b1dac6d8f48c1b1cec7917ece35df1411004328b6ac92ae0d04d75b",
+      "producer": {
+        "component": "fixture-glm",
+        "component_version": "0.5.4",
+        "provider": "fixture-glm",
+        "model": "glm-5.2",
+        "config_hash": "sha256:36903484e03df9257db9f3e122b7e802d86b561738a1eafc6d759f4afcc9a4bc"
+      }
+    },
+    {
+      "artifact_kind": "selection_result",
+      "scope_key": "batch_b4ffbd8c8222cbc4d4ba9bcb",
+      "artifact_id": "art_8e8cc75b8947cce8549d644363dc3ed2bc4199431dcd4b939aac3e90e4aeddc6",
+      "content_hash": "sha256:8e8cc75b8947cce8549d644363dc3ed2bc4199431dcd4b939aac3e90e4aeddc6",
+      "producer": {
+        "component": "fixture-glm",
+        "component_version": "0.5.4",
+        "provider": "fixture-glm",
+        "model": "glm-5.2",
+        "config_hash": "sha256:36903484e03df9257db9f3e122b7e802d86b561738a1eafc6d759f4afcc9a4bc"
+      }
+    },
+    {
+      "artifact_kind": "srt_render",
+      "scope_key": "global",
+      "artifact_id": "art_0e497519b5b216839092aea56a389f14b0dbb343781f2c762322f1751050c8bb",
+      "content_hash": "sha256:0e497519b5b216839092aea56a389f14b0dbb343781f2c762322f1751050c8bb",
+      "producer": {
+        "component": "srt_render",
+        "component_version": "0.5.4",
+        "provider": null,
+        "model": null,
+        "config_hash": "sha256:0a4a8e37bde5e5ca609d19114be4f61679dca051d5a792dabfffb4c8e4a56b30"
+      }
+    },
+    {
+      "artifact_kind": "timeline_audio",
+      "scope_key": "global",
+      "artifact_id": "art_2d92783d0ae4084fb0087fe1d52e3f54d5b6a9cb125f9daaafaa2edd281e20af",
+      "content_hash": "sha256:2d92783d0ae4084fb0087fe1d52e3f54d5b6a9cb125f9daaafaa2edd281e20af",
+      "producer": {
+        "component": "media",
+        "component_version": "0.5.4",
+        "provider": null,
+        "model": null,
+        "config_hash": "sha256:ad43044e6dd7f440e4c1e83d1d3437d3f123eecb55b68b1ba7a175d693787ff0"
+      }
+    },
+    {
+      "artifact_kind": "transcript",
+      "scope_key": "global",
+      "artifact_id": "art_9d8a2718bf0ba2664428f84faef153a1cba45550f40777be77af7c76e002d399",
+      "content_hash": "sha256:9d8a2718bf0ba2664428f84faef153a1cba45550f40777be77af7c76e002d399",
+      "producer": {
+        "component": "transcript",
+        "component_version": "0.5.4",
+        "provider": null,
+        "model": null,
+        "config_hash": "sha256:6ec8df8380ceba571a3ceed341c02d789011309ce7b7e16ff23be747deb3d8ca"
+      }
+    }
+  ]
+}

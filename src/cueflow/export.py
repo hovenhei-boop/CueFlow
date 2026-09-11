@@ -6,8 +6,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from cueflow.artifact_versions import artifact_producer_version
 from cueflow.canonical import hash_json
-from cueflow.config import COMPONENT_VERSION
 from cueflow.errors import ContractError, ExportBlockedError, SrtSerializationError
 from cueflow.project import RunContext
 from cueflow.run_runtime import _get
@@ -45,7 +45,7 @@ def publish_srt(
         scope_key="global",
         producer=Producer(
             component="srt_render",
-            component_version=COMPONENT_VERSION,
+            component_version=artifact_producer_version("srt_render"),
             provider=None,
             model=None,
             config_hash=hash_json({"encoding": "utf-8", "serializer": "utterances-v1"}),

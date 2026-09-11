@@ -1,3 +1,5 @@
 """CueFlow subtitle generation engine."""
 
-__version__ = "0.5.4"
+from cueflow.config import APP_VERSION
+
+__version__ = APP_VERSION

@@ -13,9 +13,9 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, cast
 
+from cueflow.artifact_versions import artifact_producer_version
 from cueflow.canonical import hash_json
 from cueflow.config import (
-    COMPONENT_VERSION,
     MAX_SOURCE_BYTES,
     MAX_SOURCE_DURATION_MS,
     MediaPrepConfig,
@@ -337,14 +337,15 @@ def prepare_media(
     if probe.duration_ms >= MAX_SOURCE_DURATION_MS:
         raise ContractError("source media must be shorter than 5 hours")
     media_config = MediaPrepConfig()
-    media_producer = _producer("media", asdict(media_config))
+    probe_producer = _producer("media_probe", "media", asdict(media_config))
+    timeline_producer = _producer("timeline_audio", "media", asdict(media_config))
     source_input = InputRef(
         role="source_media", source_asset_id=str(source_asset["source_asset_id"])
     )
     probe_envelope = ArtifactEnvelope.create(
         artifact_kind="media_probe",
         scope_key="global",
-        producer=media_producer,
+        producer=probe_producer,
         inputs=[source_input],
         payload=probe.payload,
     )
@@ -366,7 +367,7 @@ def prepare_media(
         timeline_envelope = ArtifactEnvelope.create(
             artifact_kind="timeline_audio",
             scope_key="global",
-            producer=media_producer,
+            producer=timeline_producer,
             inputs=[
                 source_input,
                 InputRef(role="media_probe", artifact_id=probe_envelope.artifact_id),
@@ -562,10 +563,12 @@ def _stream_facts(stream: Mapping[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def _producer(component: str, config: Mapping[str, Any]) -> Producer:
+def _producer(
+    artifact_kind: str, component: str, config: Mapping[str, Any]
+) -> Producer:
     return Producer(
         component=component,
-        component_version=COMPONENT_VERSION,
+        component_version=artifact_producer_version(artifact_kind),
         provider=None,
         model=None,
         config_hash=hash_json(config),

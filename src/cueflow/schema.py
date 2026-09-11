@@ -5,32 +5,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from cueflow.artifact_versions import ARTIFACT_KINDS
 from cueflow.canonical import artifact_content_hash
 from cueflow.config import MAX_USER_KEYWORDS, SCHEMA_VERSION
 from cueflow.errors import ContractError
 
-ARTIFACT_KINDS = frozenset(
-    {
-        "job_input",
-        "media_probe",
-        "timeline_audio",
-        "media_object",
-        "base_asr",
-        "peer_asr",
-        "asr_comparison",
-        "review_resolution",
-        "correction_transcript",
-        "merge_plan",
-        "selection_batch",
-        "selection_result",
-        "edit_resolution",
-        "review_queue",
-        "transcript",
-        "ata_response",
-        "ata_result",
-        "srt_render",
-    }
-)
 SCOPED_KINDS = frozenset({"correction_transcript", "selection_batch", "selection_result"})
 TEXT_REFERENCE_FORMATS = frozenset({"txt", "md", "csv", "json"})
 

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cueflow"
-version = "0.5.4"
-description = "Content-addressed subtitle generation engine"
+version = "0.6.0"
+description = "Content-addressed subtitle engine with an account core"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

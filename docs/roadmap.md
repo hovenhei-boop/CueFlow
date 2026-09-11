@@ -1,14 +1,25 @@
 # CueFlow Roadmap
 
+## v0.6.0
+
+独立 Account Core：一个 User 绑定多个 AuthIdentity，每个 User 恰好一个 active E.164 手机；
+Session family/rotation/revoke，最多 5 个 active families；独立 AccountStore、forward-only
+migration、迁移锁/备份/ledger、审计和彻底注销。产品版本与 18 个 Artifact producer 语义版本
+解耦，字幕主链保持 v0.5.4 Artifact ID。细节见
+[Account Core 冻结设计](v0.6.0-account-core-design.md)。
+
+本版不实现登录、注册、验证码、OAuth callback、HTTP、支付或权限。
+
 ## v0.5.4
 
 同一主机多进程托管准备：可选 Project、Run 执行隔离、execution rounds、DAG 失败恢复、
 持久取消、远端回执、usage 留痕、TOS 业务资产与本地 artifacts 分离、结果契约。
 细节见 [冻结设计](v0.5.4-design.md)。真实平台和长媒体验收完成前不宣布发布。
 
-## v0.6.x
+## v0.6.1+
 
-HTTP、Worker 调度、上传适配、用户和权限等 Web 产品层。浏览器媒体处理和分布式执行
+手机号验证码登录、其他身份绑定、HTTP、Worker 调度、上传适配、权限和支付等 Web 产品层。
+浏览器媒体处理和分布式执行
 需要单独设计及验证，不借 0.5.4 改动现有音频/字幕算法。
 
 ## 已验证算法底座
