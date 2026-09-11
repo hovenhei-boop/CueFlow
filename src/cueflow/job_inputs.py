@@ -2,12 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
-from urllib.parse import urlsplit
 
 from cueflow.config import MAX_USER_KEYWORDS
-from cueflow.errors import ContractError, UnsupportedReferenceError
-from cueflow.schema import TEXT_REFERENCE_FORMATS
+from cueflow.errors import ContractError
 
 OFFICE_FORMATS = frozenset({"doc", "docx", "ppt", "pptx", "xls", "xlsx"})
 
@@ -24,17 +21,11 @@ def build_job_input_payload(
     references: Sequence[ReferenceSpec] = (),
     keywords: Sequence[str] = (),
 ) -> dict[str, object]:
-    prepared: list[dict[str, object]] = []
-    for ordinal, spec in enumerate(references):
-        if spec.kind in {"pdf_url", "image_url"}:
-            prepared.append(_url_reference(spec, ordinal))
-        elif spec.kind == "text_file":
-            prepared.append(_text_reference(Path(spec.value), ordinal))
-        else:
-            raise ContractError(f"unknown Reference input kind: {spec.kind}")
+    if references:
+        raise ContractError("Reference files must be captured in their owning Run")
     return {
         "source_asset_id": source_asset_id,
-        "references": prepared,
+        "references": [],
         "user_keywords": normalize_keywords(keywords),
     }
 
@@ -54,53 +45,3 @@ def normalize_keywords(values: Sequence[str]) -> list[str]:
     if len(result) > MAX_USER_KEYWORDS:
         raise ContractError(f"at most {MAX_USER_KEYWORDS} user keywords are allowed")
     return result
-
-
-def _url_reference(spec: ReferenceSpec, ordinal: int) -> dict[str, object]:
-    url = spec.value.strip()
-    parsed = urlsplit(url)
-    if parsed.scheme != "https" or not parsed.netloc:
-        raise UnsupportedReferenceError(
-            "v0.5.3 PDF and image References require an absolute HTTPS URL"
-        )
-    display_name = Path(parsed.path).name or parsed.netloc
-    return {
-        "ordinal": ordinal,
-        "kind": spec.kind,
-        "url": url,
-        "display_name": display_name,
-        "locator_semantics": "mutable_remote_locator",
-    }
-
-
-def _text_reference(path: Path, ordinal: int) -> dict[str, object]:
-    suffix = path.suffix.lower().lstrip(".")
-    if suffix in OFFICE_FORMATS:
-        raise UnsupportedReferenceError(
-            "v0.5.3 does not convert Office files; export the file to PDF and provide "
-            "it with --pdf-url"
-        )
-    if suffix == "pdf" or suffix in {"png", "jpg", "jpeg", "webp"}:
-        raise UnsupportedReferenceError(
-            "v0.5.3 accepts local files only for TXT/MD/CSV/JSON; PDF and images "
-            "must use --pdf-url or --image-url"
-        )
-    if suffix not in TEXT_REFERENCE_FORMATS:
-        raise UnsupportedReferenceError("v0.5.3 text References must be TXT, MD, CSV, or JSON")
-    try:
-        if not path.is_file():
-            raise UnsupportedReferenceError(f"Reference text file is missing: {path}")
-        text = path.read_text(encoding="utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise UnsupportedReferenceError(f"Reference text file must be valid UTF-8: {path}") from exc
-    except OSError as exc:
-        raise UnsupportedReferenceError(f"Reference text file is unreadable: {path}") from exc
-    if not text:
-        raise UnsupportedReferenceError(f"Reference text file is empty: {path}")
-    return {
-        "ordinal": ordinal,
-        "kind": "text",
-        "format": suffix,
-        "display_name": path.name,
-        "text": text,
-    }

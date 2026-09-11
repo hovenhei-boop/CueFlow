@@ -29,10 +29,10 @@ from cueflow.errors import (
 )
 from cueflow.glm_selection_provider import SelectionResult
 from cueflow.orchestrator import (
-    correct_project,
     resolve_review,
     resume_run,
     retry_invocation,
+    retry_run,
     run_project,
 )
 from cueflow.project import single_writer
@@ -243,7 +243,7 @@ class FailKimi(FakeKimiCorrection):
         raise ProviderError("Kimi failed")
 
 
-def test_failed_arm_retry_reuses_success_and_correct_is_a_new_paid_run(
+def test_failed_arm_retry_reuses_success_and_retry_run_is_a_new_round(
     tmp_path: Any,
     monkeypatch: Any,
 ) -> None:
@@ -260,7 +260,7 @@ def test_failed_arm_retry_reuses_success_and_correct_is_a_new_paid_run(
                 qwen_correction_factory=FakeQwenCorrection,
                 kimi_correction_factory=FailKimi,
             )
-        run_id = context.registry.runs(context.project_id)[-1]["run_id"]
+        run_id = context.registry.run(context.run_id)["run_id"]
         failed = context.registry.invocations_for_run(run_id)[-1]
         retry_invocation(
             context,
@@ -270,17 +270,19 @@ def test_failed_arm_retry_reuses_success_and_correct_is_a_new_paid_run(
             ata_factory=FakeAta,
         )
         assert len(FakeQwenCorrection.requests) == len(FakeKimiCorrection.requests) == 1
-        new_run = correct_project(
-            context,
+        new_run = retry_run(
+            context, run_id,
             media_store_factory=FakeMediaStore,
             qwen_correction_factory=FakeQwenCorrection,
             kimi_correction_factory=FakeKimiCorrection,
             ata_factory=FakeAta,
         )
-        assert new_run["run_id"] != run_id
+        assert new_run["run_id"] == run_id
+        assert new_run["execution_round"] == 2
         assert len(FakeQwenCorrection.requests) == len(FakeKimiCorrection.requests) == 2
         operations = [
             row["operation"] for row in context.registry.invocations_for_run(new_run["run_id"])
+            if row["execution_round"] == 2
         ]
         assert operations == ["qwen_correction", "kimi_correction", "ata"]
     finally:
@@ -311,7 +313,7 @@ def test_plan_checkpoint_survives_crash_before_glm(tmp_path: Any, monkeypatch: A
                 kimi_correction_factory=LongKimi,
                 glm_selection_factory=WindowGlm,
             )
-        run_id = context.registry.runs(context.project_id)[-1]["run_id"]
+        run_id = context.registry.run(context.run_id)["run_id"]
         assert len(context.current_artifact("merge_plan").payload["cases"]) == 3
         assert not WindowGlm.calls
         monkeypatch.setattr(orchestrator, "_select_batch", original)
@@ -484,7 +486,7 @@ def test_interruption_during_glm_resumes_other_windows_without_ambiguous_replay(
                 kimi_correction_factory=LongKimi,
                 glm_selection_factory=InterruptedGlm,
             )
-        run_id = context.registry.runs(context.project_id)[-1]["run_id"]
+        run_id = context.registry.run(context.run_id)["run_id"]
         resumed = resume_run(
             context, run_id, media_store_factory=FakeMediaStore, glm_selection_factory=WindowGlm
         )
@@ -529,7 +531,7 @@ def test_final_and_queue_checkpoint_roll_back_together(tmp_path: Any, monkeypatc
                 qwen_correction_factory=FakeQwenCorrection,
                 kimi_correction_factory=FakeKimiCorrection,
             )
-        run_id = context.registry.runs(context.project_id)[-1]["run_id"]
+        run_id = context.registry.run(context.run_id)["run_id"]
         assert context.registry.checkpoint(run_id, "edit_resolution") is None
         assert context.registry.checkpoint(run_id, "review_queue") is None
         monkeypatch.setattr(orchestrator, "_save", original_save)
@@ -570,7 +572,7 @@ def test_resume_after_ata_commit_does_not_repeat_ata(tmp_path: Any, monkeypatch:
                 kimi_correction_factory=FakeKimiCorrection,
                 ata_factory=CountingAta,
             )
-        run_id = context.registry.runs(context.project_id)[-1]["run_id"]
+        run_id = context.registry.run(context.run_id)["run_id"]
         assert context.registry.checkpoint(run_id, "ata_response") is not None
         monkeypatch.setattr(orchestrator, "_publish_downstream", original_downstream)
         result = resume_run(context, run_id, media_store_factory=FakeMediaStore)
@@ -628,9 +630,9 @@ def test_paid_result_checkpoint_and_current_pointer_are_one_commit(
             run_project(
                 context, path, media_store_factory=FakeMediaStore, qwen_asr_factory=FakeQwenAsr
             )
-        run_id = context.registry.runs(context.project_id)[-1]["run_id"]
+        run_id = context.registry.run(context.run_id)["run_id"]
         assert context.registry.checkpoint(run_id, "base_asr") is None
-        assert context.registry.current_pointer(context.project_id, "base_asr", "global") is None
+        assert context.registry.current_pointer(context.run_id, "base_asr", "global") is None
         invocation = context.registry.invocations_for_run(run_id)[-1]
         assert invocation["status"] == "delivery_ambiguous"
         assert invocation["artifact_id"] is None
@@ -687,7 +689,7 @@ def test_parallel_corrections_have_one_database_writer_and_preserve_success(
                 qwen_correction_factory=ParallelQwen,
                 kimi_correction_factory=ParallelKimi,
             )
-        run_id = context.registry.runs(context.project_id)[-1]["run_id"]
+        run_id = context.registry.run(context.run_id)["run_id"]
         assert context.registry.checkpoint(run_id, "correction_transcript", "qwen") is not None
         assert context.registry.checkpoint(run_id, "correction_transcript", "kimi") is None
         assert set(published_threads) == {main_thread}
@@ -727,7 +729,7 @@ def test_ambiguous_correction_metadata_is_persisted(
                 qwen_correction_factory=AmbiguousQwen,
                 kimi_correction_factory=FakeKimiCorrection,
             )
-        run_id = context.registry.runs(context.project_id)[-1]["run_id"]
+        run_id = context.registry.run(context.run_id)["run_id"]
         row = next(
             item
             for item in context.registry.invocations_for_run(run_id)
@@ -780,7 +782,7 @@ def test_ata_serialization_failure_preserves_success_metadata_and_result(
                 kimi_correction_factory=FakeKimiCorrection,
                 ata_factory=InvalidTimeAta,
             )
-        run_id = context.registry.runs(context.project_id)[-1]["run_id"]
+        run_id = context.registry.run(context.run_id)["run_id"]
         row = next(
             item
             for item in context.registry.invocations_for_run(run_id)
@@ -925,7 +927,7 @@ def test_new_input_invalidates_all_scoped_selection_and_correction_outputs(
     try:
         before = [
             dict(row)
-            for row in context.registry.current_artifacts(context.project_id)
+            for row in context.registry.current_artifacts(context.run_id)
             if row["artifact_kind"]
             in {"correction_transcript", "merge_plan", "selection_batch", "selection_result"}
         ]
@@ -940,7 +942,7 @@ def test_new_input_invalidates_all_scoped_selection_and_correction_outputs(
         _publish_payload_job_input(context, payload)
         for row in before:
             pointer = context.registry.current_pointer(
-                context.project_id, row["artifact_kind"], row["scope_key"]
+                context.run_id, row["artifact_kind"], row["scope_key"]
             )
             assert pointer["is_stale"] == 1
             assert pointer["artifact_id"] == row["artifact_id"]

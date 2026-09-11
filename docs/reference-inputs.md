@@ -1,50 +1,23 @@
-# CueFlow v0.5.3 Reference Inputs
+# CueFlow v0.5.4 Reference Inputs
 
-## 当前支持
+用户只提交本地/上传文件，不提交 URL。Reference 成员、顺序和原始字节在 Run 创建时固定。
+关键词最多 100 个，只裁剪首尾空白、拒绝空串并 exact 去重，保持 Unicode、大小写和标点。
+关键词直接进入 ASR/Correction；Reference 仅用于 Correction，不构造词库、摘要或强制替换表。
 
-| CLI | JobInput kind | CueFlow 持有内容 | Correction 输入 |
-|---|---|---|---|
-| `--pdf-url HTTPS_URL` | `pdf_url` | URL 字符串 | 原始 PDF URL |
-| `--image-url HTTPS_URL` | `image_url` | URL 字符串 | 原始图片 URL |
-| `--text-file FILE` | `text` | UTF-8 正文快照 | 原始文本 |
-| `--keyword VALUE` | `user_keywords` | 精确字符串 | 两个 Correction arm；同时在 T0 输入两路 ASR |
+| 文件 | 准备方式 | Correction 输入 |
+|---|---|---|
+| TXT/MD/CSV/JSON | 原件保存 TOS，UTF-8-sig 读取，正文保留 | 内联原文 |
+| PDF | 原件保存 TOS，检查基本完整性 | 本次调用生成的 PDF URL |
+| PNG/JPG/JPEG/WebP | 原件保存 TOS | 本次调用生成的 image URL |
+| DOC/DOCX/PPT/PPTX/XLS/XLSX | 可选 LibreOffice headless 转 PDF | 本次调用生成的 PDF URL |
 
-同一命令中三类 Reference 按选项出现顺序保存，不按类型重排。URL 类型由 CLI 明示，CueFlow
-不依赖扩展名、Content-Type 或主动下载推断。
+Office 各次转换使用独立临时目录与 UserInstallation，默认超时 120 秒。
+损坏、密码保护、不支持、缺少转换器、超时、无输出或 PDF 基本完整性检查失败，都记录
+reference_unavailable warning 并排除，不阻断媒体转写。全部 Reference 不可用也允许继续。
+SQLite/数据完整性/取消错误不降级为 warning。PDF 检查不是完整 PDF 渲染器或内容解析器。
 
-TXT/MD/CSV/JSON 必须是非空 UTF-8 文件。PDF 与图片必须是调用时可由 Correction Provider
-访问的 HTTPS URL。v0.5.3 没有 Reference Upload API，因此不接受本地 PDF/图片。
-
-## ASR 边界
-
-References 完全不进入 ASR 前处理。没有 Hint Builder、Reference extraction、项目背景摘要、
-内置领域包或自动术语层。只有用户显式提交的 UserKeywords 是 ASR lexical/semantic prior。
-
-关键词规则：
-
-1. 最多 100 个；
-2. 只 strip 首尾 whitespace；
-3. 空串拒绝；
-4. exact duplicate 去重并保留首次出现顺序；
-5. 保持原 Unicode、标点和大小写。
-
-`correct` 可替换 References，但 UserKeywords 必须与初始 `run` 完全相同；改变关键词要求新
-`run`，不能只重跑 Correction。
-
-## Locator 语义
-
-Reference URL 是 mutable locator，不是 immutable content snapshot：
-
-- targeted retry 复用原 URL 字符串；
-- signed/temporary URL 过期会明确失败；
-- URL 原地换内容时 CueFlow 不检测；
-- v0.5.3 不保存 Reference 内容 hash、size、page count 或 MIME；
-- 不建立 SSRF 下载器、redirect 策略或 Reference 临时文件链。
-
-媒体上传到 TOS 与 Reference URL 是两条不同的边界：MediaObject 有内容 hash，临时 presigned
-媒体 URL 不持久化；外部 Reference URL 仍只有 locator 语义。
-
-## 明确不支持
-
-DOC/DOCX/PPT/PPTX/XLS/XLSX 不接受也不转换。用户必须自行导出 PDF 并提供 `--pdf-url`。
-本版没有 Office COM、LibreOffice、conversion worker 或 PDF 本地预检。
+失败 Office 原件保留可恢复对象；retry_run 可重新准备相同字节。恢复后有效集合扩大，
+两路 Correction 与下游重算；原件不能用调用方后来修改的文件替换。
+没有失败时 Reference 准备复用。签名 URL 不落 Registry/Artifact，每次真正调用模型时再生成。
+无需 ProviderUpload/file_id 缓存。真实 Kimi/Qwen PDF URL 内容读取仍是发布验收门槛，
+不能把模拟请求成功当作已通过真实平台验证。

@@ -1,8 +1,10 @@
-# CueFlow v0.5.3 Failure Model
+# CueFlow v0.5.4 Failure Model
 
 ## 状态与恢复
 
-Run 终态为 succeeded、needs_review、failed、interrupted。Invocation 状态：
+Run 执行终止状态为 succeeded、failed、cancelled、interrupted；needs_review 为等待审核。
+interrupted 表示异常中断，result.error.code 为 interrupted；调用方不得解析错误文本。
+Invocation 状态：
 
 - created：已落盘，尚未开始 Provider 交付；
 - sending：可能已经交付；
@@ -31,8 +33,8 @@ Qwen/Doubao ASR 在 submit 成功并取得 task/request ID 后立即建立 Provi
 delivery_ambiguous，不是 definitely_not_sent。
 
 普通 resume 继续从未调用的阶段，并复用已提交 checkpoint，不刷新终结 review 队列。
-新 correct 是新的付费纠错 run，可以替换 References，但必须保持 ASR 时的同序 UserKeywords。
-ATA 已提交后恢复导出，不重复调用 ATA。单项目 writer lock 排斥其他写者。
+retry_run 增加轮次，优先恢复失败/降级依赖；无失败时重跑 Correction 后半段。输入不能替换。
+ATA 已提交后恢复导出，不重复调用 ATA。单 Run writer lock 排斥其他写者。
 
 两路纠错并行执行网络请求，主线程单独写入。一个臂失败仍收集并保存另一个已完成结果；
 required arm 不全时不生成合并稿。GLM 单批失败只让该批 case 进入 review，其他批次继续。
@@ -77,3 +79,12 @@ JSON/HTTP/query 失败尚未得到成功结果时继续使用明确错误与 tas
 
 结构测试和成功生成 SRT 不是字幕准确率的证明。精度、误改率、KEEP 率、人工负担
 和单位媒体时长成本须用独立音频标注与相同输入实验测量，不能从候选去重数量推断投票置信度。
+
+## 托管恢复
+
+queued/running/needs_review/succeeded/failed/cancelled/interrupted 全链路统一。取消请求绑定轮次，
+独立连接短事务写入，不获取执行锁；cancelled 不承诺远端撤销或零费用。
+远端返回 task_id 后立即提交 Registry，已知任务恢复查询原 ID；未知交付不自动重新提交。
+Reference 可预期准备失败产生 warning；媒体、Registry 和完整性失败仍阻断。
+结果发布失败与模型失败分开，已完成的付费结果不因投影/TOS 暂时不可用而丢弃。
+详细边界见 [0.5.4 设计](v0.5.4-design.md)。

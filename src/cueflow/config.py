@@ -5,8 +5,8 @@ import shutil
 from dataclasses import asdict, dataclass
 from typing import Any
 
-SCHEMA_VERSION = "11.0.0"
-COMPONENT_VERSION = "0.5.3"
+SCHEMA_VERSION = "12.0.0"
+COMPONENT_VERSION = "0.5.4"
 
 QWEN_ASR_MODEL = "qwen-audio-3.0-asr-flash-filetrans"
 DOUBAO_ASR_MODEL = "bigmodel"

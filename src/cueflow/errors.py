@@ -2,6 +2,12 @@ class CueFlowError(Exception):
     """Base error for explicit CueFlow failures."""
 
 
+class CancelledError(CueFlowError):
+    """Cooperative stop; remote work and charges may remain."""
+
+    metadata: object | None = None
+
+
 class ContractError(CueFlowError):
     """A frozen schema or architecture invariant was violated."""
 
@@ -19,7 +25,7 @@ class SourceMissingError(IntegrityError):
 
 
 class UnsupportedReferenceError(ContractError):
-    """A Reference input is outside the explicit v0.5.3 contract."""
+    """A Reference input is outside the explicit v0.5.4 contract."""
 
 
 class ProviderError(CueFlowError):

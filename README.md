@@ -1,6 +1,6 @@
 # CueFlow
 
-CueFlow v0.5.3 从双路 ASR 恢复逐字稿，再由火山 ATA 对齐并输出 SRT。
+CueFlow v0.5.4 从双路 ASR 恢复逐字稿，再由火山 ATA 对齐并输出 SRT。
 Qwen ASR 是冻结 Base，豆包 ASR 是独立 Peer。千问与 Kimi 分别返回完整纠错文稿；
 本地接受一致修改和单路修改，仅将两路修改不同的区间交给 GLM 在已有候选中选择。
 GLM 使用单独提示词，允许按需联网，不能生成第三种文字。
@@ -59,65 +59,48 @@ python -m venv .venv
 `CUEFLOW_FFMPEG` 与 `CUEFLOW_FFPROBE` 可以覆盖可执行文件路径。客户端不安装 PyTorch、
 CUDA、本地 ASR 或本地 Forced Aligner。
 
-## CLI
+## Core 入口
 
 ```powershell
-cueflow init PROJECT --name NAME
-
-cueflow run PROJECT MEDIA `
-  --pdf-url https://example.com/report.pdf `
-  --image-url https://example.com/slide.png `
-  --text-file notes.md `
-  --keyword "Qwen3.8" `
-  --keyword "C++"
-
-cueflow status PROJECT
-cueflow resume PROJECT RUN_ID
-cueflow retry PROJECT INVOCATION_ID
+cueflow init WORKSPACE
+cueflow project-create WORKSPACE "Sony A6700"
+cueflow run WORKSPACE MEDIA --reference notes.md --reference manual.docx --keyword "Sony A6700"
+cueflow status WORKSPACE RUN_ID
+cueflow retry-run WORKSPACE RUN_ID
+cueflow retry-invocation WORKSPACE INVOCATION_ID
+cueflow resume WORKSPACE RUN_ID
+cueflow cancel WORKSPACE RUN_ID --round 1
 ```
 
-若结果为 `needs_review`，创建一个 UTF-8 JSON 文件，并一次覆盖队列中的所有项目：
+Project 可选，使用 `--project PROJECT_ID` 将 Run 加入项目。每个 Run 拥有独立执行目录和锁。
+媒体、Reference、Keywords 在创建时固定；更换任何输入都必须创建新 Run。
+`retry-run` 优先恢复失败/降级节点及其下游；无失败时重跑两路 Correction 与后半段。
+同 Run 复用成功 ASR，跨 Run 不复用。
 
-```json
-{
-  "run_id": "run_...",
-  "expected_review_queue_artifact_id": "art_...",
-  "decisions": [
-    {"review_id": "dis_...a", "action": "keep"},
-    {"review_id": "dis_...b", "action": "qwen"},
-    {"review_id": "rev_...c", "action": "replace", "replacement": "Groq"}
-  ]
-}
-```
+Reference 只接受文件。TXT/MD/CSV/JSON 保留原始 UTF-8 文本；PDF/图片保存在 TOS，按调用生成 URL；
+Office 通过可选的 LibreOffice headless 转 PDF。无法准备的 Reference 记录 warning、排除并继续；
+SQLite/完整性/取消错误不会被降级吞掉。失败的 Office 原件保留可恢复对象。
 
-然后执行 `cueflow review PROJECT decisions.json`。`action` 可为 `keep`、`qwen`、`kimi`、`peer` 或
-`replace`；ID 必须来自该 run 当前的真实队列，不能使用下标或本示例占位值。服务端从
-ReviewItem 取出冻结的 Base `[start,end)`；replace 只提交 replacement，不接受
-source_sentence、original 或调用方 offset。显式 keep 也会持久化；过期队列拒绝提交。
-review 未清零前不会调用 ATA。
+媒体沿用现有 preparation，标准为 16 kHz mono PCM WAV；TOS 保存与 TimelineAudio 相同的字节。
+本地持久执行区保存 artifacts、blobs、checkpoint 和完整 ATA raw。Core 不删除调用方的媒体原文件。
+服务器上传适配器可在标准媒体持久化后删除自己拥有的原视频临时文件。
 
-`resume` 继续指定 run 从未提交的步骤，复用已完成 checkpoint，不重发失败或交付不明的
-付费请求。`retry` 仅针对指定失败 invocation，可能重复计费，必须由用户明确执行；已成功
-的纠错臂/GLM 批次不重跑。GLM 单批失败不阻塞其他批次，相关区间转人工 review。
+结果契约是 `contract_version: "1.0"`，状态统一使用 `succeeded`。
+每轮输出位于 `WORKSPACE/runs/RUN_ID/attempts/N/final.srt` 与 `result.json`，成功输出同时持久化 TOS；
+Run 根目录 `result.json` 是当前轮次投影。失败轮次不会暴露上一轮 SRT 作为自己的成功结果。
 
-`cueflow correct` 可以在不重跑 ASR 的情况下替换整组 References，但必须传入与原
-`run` 完全相同、同序的 UserKeywords。新 `correct` 会重新调用两个 Correction 模型，而不是
-复用旧纠错结果。若要改变关键词，必须重新 `run`，以保证两路 ASR
-收到同一组先验。
+review 文件必须包含 run_id、expected_review_queue_artifact_id 和完整 decisions[]；
+`cueflow review WORKSPACE RUN_ID decisions.json` 提交决策。允许 keep/qwen/kimi/peer/replace，
+replace 仅提供 replacement，区间取自已冻结 ReviewItem。未清零 review 不调用 ATA。
 
-关键词最多 100 个，只执行首尾空白裁剪、空串拒绝和 exact 去重，并保持首次出现顺序、
-Unicode、大小写及标点。`.NET`、`C++`、`GPT-5.6` 等不会被词法归一化。没有用户关键词时，
-ASR 不接收任何领域 lexical prior；References 只进入 Correction。
+Python 接口见 `cueflow.api.Workspace`。`run()` 是同步便捷入口；需要 Worker 调度时，使用
+`create_run()` 获得 queued handle，再调用 `execute_run(run_id)`。`retry_run()` 会直接执行新轮次。
+`get_result(run_id, execution_round=N)` 可读取历史轮次，`events` 命令可读取持久进度事件。
+取消是协作式停止，不保证撤销远端任务或免除费用。未知 usage 始终为 null。
 
-PDF/Image URL 必须由 CLI 显式声明类型。CueFlow 不下载 URL 猜 MIME；本地文本在命令开始
-时以 UTF-8 读取并把正文冻结进 `JobInput`。v0.5.3 不接受本地 PDF/图片，也不转换 Office
-文件。
+当前 Artifact Schema 为 **12.0.0**，Registry 为 **15**。非当前数据库（包括开发期 Registry 14）拒绝打开且不改写，不提供迁移。
+本版不包含 HTTP、用户、支付或分布式 Worker。真实 Provider/TOS 与长媒体发布验收仍须单独通过。
 
-当前 Artifact Schema 为 **11.0.0**，Registry 为 **13**。旧项目只拒绝打开，不迁移或重写；
-本版不提供旧版本兼容入口，请创建新项目。正常输出是
-`PROJECT/output/subtitles.srt`，内容寻址 Artifact、blob 和 SQLite 状态位于
-`PROJECT/.cueflow/`。
-
-详细契约见 [Architecture](docs/architecture.md)、
+完整边界见 [0.5.4 设计](docs/v0.5.4-design.md)、[Architecture](docs/architecture.md)、
 [Reference Inputs](docs/reference-inputs.md)、[Schema Contracts](docs/schema-contracts.md)、
 [Failure Model](docs/failure-model.md) 与 [Roadmap](docs/roadmap.md)。

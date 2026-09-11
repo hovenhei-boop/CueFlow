@@ -1,4 +1,4 @@
-# CueFlow v0.5.3 Architecture
+# CueFlow v0.5.4 Architecture
 
 ## 主链
 
@@ -19,9 +19,9 @@ text_diff.py 负责精确文本映射，conflict_selection.py 负责合并、候
   两路 ASR 使用同序冻结 UserKeywords；没有切块 fallback。
 - UserKeywords 是 ASR 唯一领域先验：最多 100，trim、拒绝空串、exact 去重，保持顺序。
   References、其他 ASR 输出、纠错结果和搜索发现的术语均不回灌 ASR。
-- References 原样进入两路纠错；PDF/Image 只接受显式类型的 HTTPS URL，本地文本冻结 UTF-8 正文。
+- References 从 Run 捕获的文件准备；文本保留 UTF-8 正文，PDF/Image 使用 TOS 对象身份，Office 可选转 PDF。
 - Presigned URL 只在需要调用时生成，不进入 Artifact 或 Registry。TOS 对象保存稳定内容身份。
-- 内容寻址、哈希校验、单项目写锁、结果与 checkpoint 原子发布、最终 SRT 原子替换保持有效。
+- 内容寻址、哈希校验、单 Run 写锁、结果与 checkpoint 原子发布、最终 SRT 原子替换保持有效。
 - ATA 是字幕文字、分句及时间的唯一 authority。CueFlow 只读取句级字段并格式化 SRT，
   不重新分句、不加工文字、不制造新时间；导出只检查状态真实性和 SRT 可表示性。
 
@@ -143,6 +143,11 @@ Export Gate 保留 current/stale、在盘 schema/hash、当前 Run checkpoint、
 ATA raw 和本地 AtaResult 已提交后，resume 只重放剩余本地步骤；不重新计费。
 不可解析的成功响应在 resume 时仍明确失败，不自动发起新的 ATA 请求。
 
-Schema 11.0.0 / Registry 13 只接受当前契约；不提供任何旧 Artifact 转换、迁移或兼容入口。
+Schema 12.0.0 / Registry 15 只接受当前契约；不提供任何旧 Artifact 转换、迁移或兼容入口。
 旧项目不改写、不删除，应新建项目。纠错阶段的 review/needs_review 继续存在，与 ATA 无关。
 成功生成 SRT 不是字幕准确率或播放器显示质量的证明；需要独立真实音频评估。
+
+## 托管边界
+
+Workspace/Project/Run、execution round、失败依赖恢复、取消、TOS 发布与 orphan 清理见 [0.5.4 设计](v0.5.4-design.md)。
+本地 ArtifactStore 与 TOS ObjectStorage 分开，所有执行归属绑定明确 Run。

@@ -9,6 +9,7 @@ from typing import Any, cast
 
 from cueflow.asr_contracts import ProviderMetadata
 from cueflow.errors import (
+    CancelledError,
     ContractError,
     DeliveryAmbiguousError,
     ProviderError,
@@ -77,6 +78,7 @@ def complete_json(
     provider: str,
     model: str,
     body: Mapping[str, Any],
+    checkpoint: Callable[[], None] = lambda: None,
 ) -> tuple[Any, ProviderMetadata, str]:
     try:
         client = factory(api_key=api_key, base_url=base_url, max_retries=0, timeout=900.0)
@@ -102,6 +104,7 @@ def complete_json(
         )
 
     try:
+        checkpoint()
         stream = client.chat.completions.create(
             model=model, stream=True, stream_options={"include_usage": True}, **body
         )
@@ -125,8 +128,12 @@ def complete_json(
                 content = getattr(choices[0].delta, "content", None)
                 if isinstance(content, str):
                     parts.append(content)
+            checkpoint()
     except Exception as exc:
         metadata = current_metadata()
+        if isinstance(exc, CancelledError):
+            exc.metadata = metadata
+            raise
         if getattr(exc, "status_code", None) is not None:
             raise ProviderError(
                 f"{provider} explicit HTTP failure: {getattr(exc, 'status_code', None)}",

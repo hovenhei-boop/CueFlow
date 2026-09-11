@@ -15,6 +15,7 @@ from cueflow.errors import (
     ContractError,
     ProviderUnavailableError,
 )
+from cueflow.provider_control import ProviderControl
 
 PROMPT_VERSION = "transcript-recovery-fulltext-zh-v1"
 PROMPT_RESOURCE = "prompts/transcript_recovery_fulltext_zh_v1.txt"
@@ -52,20 +53,24 @@ class OpenAiCompatibleCorrectionProvider:
     api_key_env: str
     base_url_env: str
 
-    def __init__(self, client_factory: Callable[..., Any] | None = None) -> None:
+    def __init__(self, client_factory: Callable[..., Any] | None = None,
+                 environment: Mapping[str, str] | None = None) -> None:
         self._client_factory = client_factory
+        self._environment = dict(os.environ if environment is None else environment)
+        self.control = ProviderControl()
 
     def correct(self, request: CorrectionRequest) -> CorrectionResult:
         if not request.base_text:
             raise ContractError("Correction requires a non-empty Frozen BaseTranscript")
-        api_key = os.getenv(self.api_key_env)
-        base_url = os.getenv(self.base_url_env)
+        api_key = self._environment.get(self.api_key_env)
+        base_url = self._environment.get(self.base_url_env)
         if not api_key or not base_url:
             raise ProviderUnavailableError(
                 f"{self.arm} Correction requires {self.api_key_env} and {self.base_url_env}"
             )
         value, metadata, raw_text = complete_json(
             self._client_factory or openai_factory(),
+            checkpoint=self.control.checkpoint,
             api_key=api_key,
             base_url=base_url,
             provider=self.provider,

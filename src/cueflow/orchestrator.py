@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from cueflow.correction_provider import (
 from cueflow.doubao_asr_provider import DoubaoFileAsrProvider
 from cueflow.edit_resolution import apply_resolved_payload
 from cueflow.errors import (
+    CancelledError,
     ContractError,
     CueFlowError,
     IntegrityError,
@@ -51,9 +53,18 @@ from cueflow.glm_selection_provider import (
     load_selection_prompt,
 )
 from cueflow.job_inputs import ReferenceSpec, build_job_input_payload
+from cueflow.lifecycle import check_cancellation, invalidate, progress
 from cueflow.media import MediaBundle, prepare_media, probe_source
 from cueflow.media_object_store import MediaObjectStore, TosMediaObjectStore, media_ref_from_payload
-from cueflow.project import ProjectContext, single_writer
+from cueflow.object_storage import bind_object, persist_object
+from cueflow.project import RunContext, single_writer
+from cueflow.provider_control import bind_control
+from cueflow.publication import publish_result, publish_terminal_snapshot
+from cueflow.reference_preparation import (
+    capture_references,
+    prepare_references,
+    resolve_reference_urls,
+)
 from cueflow.run_runtime import (
     _bind,
     _checkpoint_args,
@@ -75,7 +86,7 @@ AtaFactory = Callable[[], VolcengineAtaProvider]
 
 
 @dataclass(frozen=True)
-class _Factories:
+class ProviderFactories:
     media: MediaStoreFactory = TosMediaObjectStore
     qwen: WholeAsrFactory = QwenFiletransProvider
     doubao: WholeAsrFactory = DoubaoFileAsrProvider
@@ -83,6 +94,21 @@ class _Factories:
     qwen_correction: CorrectionFactory = QwenCorrectionProvider
     kimi_correction: CorrectionFactory = KimiCorrectionProvider
     ata: AtaFactory = VolcengineAtaProvider
+
+    def __post_init__(self) -> None:
+        environment = dict(os.environ)
+        defaults: dict[str, Any] = {
+            "media": TosMediaObjectStore, "qwen": QwenFiletransProvider,
+            "doubao": DoubaoFileAsrProvider, "glm": GlmSelectionProvider,
+            "qwen_correction": QwenCorrectionProvider, "kimi_correction": KimiCorrectionProvider,
+            "ata": VolcengineAtaProvider,
+        }
+        for name, provider_type in defaults.items():
+            if getattr(self, name) is provider_type:
+                def factory(chosen: Any = provider_type) -> Any:
+                    return chosen(environment=environment)
+
+                object.__setattr__(self, name, factory)
 
 
 def _config_hash() -> str:
@@ -100,7 +126,7 @@ def _config_hash() -> str:
 
 
 def _save(
-    context: ProjectContext,
+    context: RunContext,
     run_id: str,
     kind: str,
     payload: Mapping[str, Any],
@@ -110,7 +136,10 @@ def _save(
     envelope = ArtifactEnvelope.create(
         artifact_kind=kind,
         scope_key=scope,
-        producer=_deterministic_producer(kind, {"run_id": run_id, "config_hash": _config_hash()}),
+        producer=_deterministic_producer(kind, {
+            "run_id": run_id, "config_hash": _config_hash(),
+            "execution_round": context.registry.round_number(run_id, kind),
+        }),
         inputs=[InputRef(role=item.artifact_kind, artifact_id=item.artifact_id) for item in inputs],
         payload=payload,
     )
@@ -120,9 +149,9 @@ def _save(
     )
 
 
-def _check_run(context: ProjectContext, run_id: str) -> None:
+def _check_run(context: RunContext, run_id: str) -> None:
     row = context.registry.run(run_id)
-    if row["project_id"] != context.project_id or row["config_hash"] != _config_hash():
+    if row["run_id"] != context.run_id or row["config_hash"] != _config_hash():
         raise ContractError("run identity/config/prompt changed; create a new run")
     if row["status"] == "succeeded":
         raise ContractError("a completed run cannot be resumed")
@@ -130,7 +159,7 @@ def _check_run(context: ProjectContext, run_id: str) -> None:
 
 @single_writer
 def run_project(
-    context: ProjectContext,
+    context: RunContext,
     media_path: Path,
     *,
     references: Sequence[ReferenceSpec] = (),
@@ -144,23 +173,9 @@ def run_project(
     kimi_correction_factory: CorrectionFactory | None = None,
     ata_factory: AtaFactory | None = None,
 ) -> dict[str, Any]:
-    context.registry.recover_running_source_runs()
-    source = context.register_external_asset(media_path, asset_kind="media")
-    job = _publish_job_input(
-        context,
-        source_asset_id=str(source["source_asset_id"]),
-        references=references,
-        keywords=keywords,
-    )
-    run_id = context.registry.create_source_run(
-        context.project_id,
-        operation_kind="run",
-        source_asset_id=str(source["source_asset_id"]),
-        job_input_artifact_id=job.artifact_id,
-        config_hash=_config_hash(),
-    )
-    _bind(context, run_id, job)
-    factories = _Factories(
+    context.registry.recover_running_source_runs(context.run_id)
+    run_id = _initialize_inputs(context, media_path, references, keywords)
+    factories = ProviderFactories(
         media_store_factory or TosMediaObjectStore,
         qwen_asr_factory or QwenFiletransProvider,
         doubao_asr_factory or DoubaoFileAsrProvider,
@@ -172,61 +187,38 @@ def run_project(
     return _execute(context, run_id, factories, runtime=runtime)
 
 
-@single_writer
-def correct_project(
-    context: ProjectContext,
-    *,
-    references: Sequence[ReferenceSpec] = (),
-    keywords: Sequence[str] = (),
-    qwen_correction_factory: CorrectionFactory | None = None,
-    kimi_correction_factory: CorrectionFactory | None = None,
-    glm_selection_factory: GlmFactory | None = None,
-    ata_factory: AtaFactory | None = None,
-    media_store_factory: MediaStoreFactory | None = None,
-) -> dict[str, Any]:
-    context.registry.recover_running_source_runs()
-    saved = [
-        context.current_artifact(kind)
-        for kind in ("base_asr", "peer_asr", "media_object", "media_probe", "timeline_audio")
-    ]
-    base, peer, media_object = saved[:3]
-    payload = build_job_input_payload(
-        source_asset_id=str(base.payload["source_asset_id"]),
-        references=references,
+def _initialize_inputs(context: RunContext, media_path: Path,
+                       references: Sequence[ReferenceSpec], keywords: Sequence[str]) -> str:
+    if context.registry.run(context.run_id)["source_asset_id"] is not None:
+        raise ContractError("Run inputs are already bound; use retry_run or create a new Run")
+    capture_references(context, references)
+    source = context.register_external_asset(media_path, asset_kind="media")
+    job = _publish_job_input(
+        context,
+        source_asset_id=str(source["source_asset_id"]),
+        references=(),
         keywords=keywords,
     )
-    for arm in (base, peer):
-        if arm.payload["user_keywords"] != payload["user_keywords"]:
-            raise ContractError("correct cannot change UserKeywords; create a new ASR run")
-        if arm.payload["source_asset_id"] != payload["source_asset_id"]:
-            raise IntegrityError("Base/Peer source identity mismatch")
-        if not any(item.artifact_id == media_object.artifact_id for item in arm.inputs):
-            raise IntegrityError("Base/Peer media identity mismatch")
-    job = _publish_payload_job_input(context, payload)
     run_id = context.registry.create_source_run(
-        context.project_id,
-        operation_kind="correct",
-        source_asset_id=str(payload["source_asset_id"]),
+        context.run_id,
+        operation_kind="run",
+        source_asset_id=str(source["source_asset_id"]),
         job_input_artifact_id=job.artifact_id,
         config_hash=_config_hash(),
     )
-    for artifact in (job, *saved):
-        _bind(context, run_id, artifact)
-    factories = _Factories(
-        media=media_store_factory or TosMediaObjectStore,
-        glm=glm_selection_factory or GlmSelectionProvider,
-        qwen_correction=qwen_correction_factory or QwenCorrectionProvider,
-        kimi_correction=kimi_correction_factory or KimiCorrectionProvider,
-        ata=ata_factory or VolcengineAtaProvider,
-    )
-    return _execute(context, run_id, factories)
+    _bind(context, run_id, job)
+    return run_id
 
 
 @single_writer
-def resume_run(
-    context: ProjectContext,
-    run_id: str,
-    *,
+def initialize_inputs(context: RunContext, media_path: Path,
+                      references: Sequence[ReferenceSpec], keywords: Sequence[str]) -> str:
+    return _initialize_inputs(context, media_path, references, keywords)
+
+
+@single_writer
+def retry_run(
+    context: RunContext, run_id: str, *, runtime: RuntimeConfig | None = None,
     media_store_factory: MediaStoreFactory | None = None,
     qwen_asr_factory: WholeAsrFactory | None = None,
     doubao_asr_factory: WholeAsrFactory | None = None,
@@ -235,12 +227,44 @@ def resume_run(
     kimi_correction_factory: CorrectionFactory | None = None,
     ata_factory: AtaFactory | None = None,
 ) -> dict[str, Any]:
-    context.registry.recover_running_source_runs()
+    from cueflow.lifecycle import begin_retry
+
+    if context.run_id != run_id or context.registry.run(run_id)["config_hash"] != _config_hash():
+        raise ContractError("Run/config identity mismatch")
+    context.registry.recover_running_source_runs(run_id)
+    begin_retry(context)
+    return _execute(context, run_id, ProviderFactories(
+        media_store_factory or TosMediaObjectStore, qwen_asr_factory or QwenFiletransProvider,
+        doubao_asr_factory or DoubaoFileAsrProvider, glm_selection_factory or GlmSelectionProvider,
+        qwen_correction_factory or QwenCorrectionProvider,
+        kimi_correction_factory or KimiCorrectionProvider, ata_factory or VolcengineAtaProvider,
+    ), runtime=runtime)
+
+
+@single_writer
+def resume_run(
+    context: RunContext,
+    run_id: str,
+    *,
+    runtime: RuntimeConfig | None = None,
+    media_store_factory: MediaStoreFactory | None = None,
+    qwen_asr_factory: WholeAsrFactory | None = None,
+    doubao_asr_factory: WholeAsrFactory | None = None,
+    glm_selection_factory: GlmFactory | None = None,
+    qwen_correction_factory: CorrectionFactory | None = None,
+    kimi_correction_factory: CorrectionFactory | None = None,
+    ata_factory: AtaFactory | None = None,
+) -> dict[str, Any]:
+    context.registry.recover_running_source_runs(context.run_id)
+    if run_id == context.run_id and context.registry.run(run_id)["status"] == "succeeded":
+        from cueflow.publication import repair_completed_result
+
+        return repair_completed_result(context)
     _check_run(context, run_id)
     return _execute(
         context,
         run_id,
-        _Factories(
+        ProviderFactories(
             media_store_factory or TosMediaObjectStore,
             qwen_asr_factory or QwenFiletransProvider,
             doubao_asr_factory or DoubaoFileAsrProvider,
@@ -249,12 +273,13 @@ def resume_run(
             kimi_correction_factory or KimiCorrectionProvider,
             ata_factory or VolcengineAtaProvider,
         ),
+        runtime=runtime,
     )
 
 
 @single_writer
 def retry_invocation(
-    context: ProjectContext,
+    context: RunContext,
     invocation_id: str,
     *,
     media_store_factory: MediaStoreFactory | None = None,
@@ -265,10 +290,12 @@ def retry_invocation(
     kimi_correction_factory: CorrectionFactory | None = None,
     ata_factory: AtaFactory | None = None,
 ) -> dict[str, Any]:
-    context.registry.recover_running_source_runs()
+    context.registry.recover_running_source_runs(context.run_id)
     row = context.registry.invocation(invocation_id)
     run_id = str(row["run_id"])
     _check_run(context, run_id)
+    if row["execution_round"] != context.registry.round_number(run_id):
+        raise ContractError("cannot retry an invocation from an earlier execution round")
     siblings = [
         item
         for item in context.registry.invocations_for_run(run_id)
@@ -286,7 +313,7 @@ def retry_invocation(
     return _execute(
         context,
         run_id,
-        _Factories(
+        ProviderFactories(
             media_store_factory or TosMediaObjectStore,
             qwen_asr_factory or QwenFiletransProvider,
             doubao_asr_factory or DoubaoFileAsrProvider,
@@ -300,15 +327,16 @@ def retry_invocation(
 
 
 def _execute(
-    context: ProjectContext,
+    context: RunContext,
     run_id: str,
-    factories: _Factories,
+    factories: ProviderFactories,
     *,
     runtime: RuntimeConfig | None = None,
     retry_of: str | None = None,
 ) -> dict[str, Any]:
     try:
         context.registry.set_run_status(run_id, "running")
+        progress(context, "preparing")
         job = _get(context, run_id, "job_input")
         if job is None:
             job = context.artifact(str(context.registry.run(run_id)["job_input_artifact_id"]))
@@ -316,7 +344,7 @@ def _execute(
         timeline = _get(context, run_id, "timeline_audio")
         if timeline is None:
             source = context.registry.source_asset(
-                context.project_id, str(job.payload["source_asset_id"])
+                context.run_id, str(job.payload["source_asset_id"])
             )
             source_path = context.verify_external_asset(str(source["source_asset_id"]))
             chosen_runtime = runtime or RuntimeConfig.detect()
@@ -339,15 +367,12 @@ def _execute(
         _verify_media_object_for_timeline(media_object, media.timeline_audio)
         # Sign only when a URL-consuming Provider is actually invoked. GLM and
         # checkpoint-only resumes must not depend on TOS credentials/availability.
-        media_url: str | None = None
-
         def get_media_url() -> str:
-            nonlocal media_url
-            if media_url is None:
-                media_url = _presign(context, media_object, factories.media)
-            return media_url
+            return _presign(context, media_object, factories.media)
 
-        keywords = tuple(cast(Sequence[str], job.payload["user_keywords"]))
+        original_job = context.artifact(str(context.registry.run(run_id)["job_input_artifact_id"]))
+        keywords = tuple(cast(Sequence[str], original_job.payload["user_keywords"]))
+        progress(context, "asr")
         base = _stage(
             context,
             run_id,
@@ -359,7 +384,7 @@ def _execute(
                 "base_asr",
                 "qwen_asr",
                 media_object,
-                job,
+                original_job,
                 get_media_url(),
                 keywords,
                 factories.qwen(),
@@ -379,7 +404,7 @@ def _execute(
                 "peer_asr",
                 "doubao_asr",
                 media_object,
-                job,
+                original_job,
                 get_media_url(),
                 keywords,
                 factories.doubao(),
@@ -391,6 +416,13 @@ def _execute(
         comparison = _get(context, run_id, "asr_comparison")
         if comparison is None:
             comparison = _bind(context, run_id, _comparison(context, base, peer))
+        prepared_refs = prepare_references(context, factories.media)
+        if list(job.payload["references"]) != prepared_refs:
+            invalidate(context, {"job_input"})
+            job = _bind(context, run_id, _publish_payload_job_input(
+                context, {**original_job.payload, "references": prepared_refs},
+            ))
+        progress(context, "correction")
         request = CorrectionRequest(
             str(base.payload["source_text"]),
             str(peer.payload["source_text"]),
@@ -409,6 +441,7 @@ def _execute(
             factories,
             retry_of,
         )
+        progress(context, "review")
         agreement = _get(context, run_id, "merge_plan")
         if agreement is None:
             payload = build_merge_plan(
@@ -424,6 +457,7 @@ def _execute(
         if not final.payload["sealed"]:
             context.registry.set_run_status(run_id, "needs_review")
             queue = _require(context, run_id, "review_queue")
+            publish_terminal_snapshot(context, factories.media)
             return {
                 "status": "needs_review",
                 "run_id": run_id,
@@ -444,6 +478,7 @@ def _execute(
                 },
                 [base, final],
             )
+        progress(context, "ata")
         ata_response = _stage(
             context,
             run_id,
@@ -463,7 +498,7 @@ def _execute(
             retry_of,
         )
         context.registry.activate_artifacts(
-            context.project_id,
+            context.run_id,
             [
                 item.artifact_id
                 for item in (
@@ -482,16 +517,18 @@ def _execute(
                 )
             ],
         )
+        progress(context, "export")
         result = _publish_downstream(context, run_id, media, transcript, ata_response)
-        context.registry.set_run_status(run_id, "succeeded")
-        return result
+        check_cancellation(context)
+        return {**result, **publish_result(context, factories.media, Path(result["output_path"]))}
     except BaseException as exc:
         _fail_run(context, run_id, exc)
+        publish_terminal_snapshot(context, factories.media)
         raise
 
 
 def _upload_for_run(
-    context: ProjectContext,
+    context: RunContext,
     run_id: str,
     timeline_audio: ArtifactEnvelope,
     factory: MediaStoreFactory,
@@ -517,14 +554,14 @@ def _upload_for_run(
 
 
 def _correction_transcripts(
-    context: ProjectContext,
+    context: RunContext,
     run_id: str,
     job: ArtifactEnvelope,
     base: ArtifactEnvelope,
     peer: ArtifactEnvelope,
     comparison: ArtifactEnvelope,
     request: CorrectionRequest,
-    factories: _Factories,
+    factories: ProviderFactories,
     retry_of: str | None,
 ) -> list[ArtifactEnvelope]:
     inputs = [base, peer, job, comparison]
@@ -533,9 +570,9 @@ def _correction_transcripts(
     pending: dict[Future[CorrectionResult], tuple[CorrectionProvider, str, int]] = {}
     prompt_hash = load_correction_prompt()[1]
 
-    def invoke(provider: CorrectionProvider) -> CorrectionResult:
+    def invoke(provider: CorrectionProvider, actual_request: CorrectionRequest) -> CorrectionResult:
         try:
-            return provider.correct(request)
+            return provider.correct(actual_request)
         finally:
             provider.close()
 
@@ -544,6 +581,13 @@ def _correction_transcripts(
         def submit(
             provider: CorrectionProvider, retry: str | None, key: str | None, attempt: int
         ) -> None:
+            store = factories.media()
+            try:
+                signed = resolve_reference_urls([dict(item) for item in request.references], store)
+            finally:
+                store.close()
+            actual_request = CorrectionRequest(request.base_text, request.peer_text, signed,
+                                               request.user_keywords, request.comparison_hunks)
             invocation = _new_invocation(
                 context,
                 run_id,
@@ -557,7 +601,9 @@ def _correction_transcripts(
                 retry_of=retry,
                 idempotency_key=key,
             )
-            pending[executor.submit(invoke, provider)] = (provider, invocation, attempt)
+            bind_control(context, provider, invocation)
+            future = executor.submit(invoke, provider, actual_request)
+            pending[future] = (provider, invocation, attempt)
 
         for arm, factory in (
             ("qwen", factories.qwen_correction),
@@ -628,7 +674,7 @@ def _correction_transcripts(
 
 
 def _selection_stage(
-    context: ProjectContext,
+    context: RunContext,
     run_id: str,
     base: ArtifactEnvelope,
     plan: ArtifactEnvelope,
@@ -693,7 +739,7 @@ def _selection_stage(
 
 
 def _select_batch(
-    context: ProjectContext,
+    context: RunContext,
     run_id: str,
     batch: ArtifactEnvelope,
     factory: GlmFactory,
@@ -716,6 +762,7 @@ def _select_batch(
             idempotency_key=key,
         )
         try:
+            bind_control(context, provider, invocation)
             result = provider.select(batch.payload["request"])
             # Validate again at the publication boundary, including custom providers.
             apply_selections(
@@ -752,7 +799,7 @@ def _select_batch(
 
 
 def _finalize_resolution_stage(
-    context: ProjectContext,
+    context: RunContext,
     run_id: str,
     base: ArtifactEnvelope,
     agreement: ArtifactEnvelope,
@@ -796,7 +843,7 @@ def _finalize_resolution_stage(
 
 @single_writer
 def resolve_review(
-    context: ProjectContext,
+    context: RunContext,
     decisions: Sequence[Mapping[str, Any]],
     *,
     run_id: str,
@@ -804,7 +851,7 @@ def resolve_review(
     ata_factory: AtaFactory | None = None,
     media_store_factory: MediaStoreFactory | None = None,
 ) -> dict[str, Any]:
-    context.registry.recover_running_source_runs()
+    context.registry.recover_running_source_runs(context.run_id)
     _check_run(context, run_id)
     queue = _require(context, run_id, "review_queue")
     if (
@@ -889,33 +936,15 @@ def resolve_review(
     return _execute(
         context,
         run_id,
-        _Factories(
+        ProviderFactories(
             media=media_store_factory or TosMediaObjectStore,
             ata=ata_factory or VolcengineAtaProvider,
         ),
     )
 
 
-def initialize_project(root: Path, display_name: str) -> ProjectContext:
-    return ProjectContext.create(root, display_name)
-
-
-def project_status(context: ProjectContext) -> dict[str, Any]:
-    project = context.registry.project()
-    runs = context.registry.runs(context.project_id)
-    latest = runs[-1] if runs else None
-    return {
-        "project_id": context.project_id,
-        "display_name": str(project["display_name"]),
-        "latest_run": dict(latest) if latest is not None else None,
-        "current_artifacts": [
-            dict(row) for row in context.registry.current_artifacts(context.project_id)
-        ],
-    }
-
-
 def _presign(
-    context: ProjectContext,
+    context: RunContext,
     media_object: ArtifactEnvelope,
     store_factory: MediaStoreFactory,
 ) -> str:
@@ -928,7 +957,7 @@ def _presign(
 
 
 def _bound_invocation_inputs(
-    context: ProjectContext, invocation_id: str
+    context: RunContext, invocation_id: str
 ) -> dict[str, list[ArtifactEnvelope]]:
     result: dict[str, list[ArtifactEnvelope]] = {}
     for row in context.registry.invocation_inputs(invocation_id):
@@ -946,7 +975,7 @@ def _one_bound(bound: Mapping[str, Sequence[ArtifactEnvelope]], role: str) -> Ar
 
 
 def _publish_job_input(
-    context: ProjectContext,
+    context: RunContext,
     *,
     source_asset_id: str,
     references: Sequence[ReferenceSpec],
@@ -961,12 +990,12 @@ def _publish_job_input(
 
 
 def _publish_payload_job_input(
-    context: ProjectContext, payload: Mapping[str, Any]
+    context: RunContext, payload: Mapping[str, Any]
 ) -> ArtifactEnvelope:
     envelope = ArtifactEnvelope.create(
         artifact_kind="job_input",
         scope_key="global",
-        producer=_deterministic_producer("job_input", {"format": "0.5.3"}),
+        producer=_deterministic_producer("job_input", {"format": "0.5.4"}),
         inputs=[InputRef(role="source_media", source_asset_id=str(payload["source_asset_id"]))],
         payload=payload,
     )
@@ -989,7 +1018,7 @@ def _publish_payload_job_input(
 
 
 def _upload_media(
-    context: ProjectContext,
+    context: RunContext,
     run_id: str,
     path: Path,
     timeline_audio: ArtifactEnvelope,
@@ -1009,7 +1038,8 @@ def _upload_media(
         idempotency_key=idempotency_key,
     )
     try:
-        ref = store.upload(path, object_name="timeline-audio.wav")
+        ref = persist_object(context, store, path, "media", object_name="timeline-audio.wav")
+        bind_object(context, ref)
         blob = cast(Mapping[str, Any], timeline_audio.payload["audio_blob"])
         if ref.content_hash != blob["content_hash"] or ref.byte_length != blob["byte_length"]:
             raise IntegrityError("uploaded MediaObject differs from frozen TimelineAudio bytes")
@@ -1057,7 +1087,7 @@ def _verify_media_object_for_timeline(
 
 
 def _whole_asr(
-    context: ProjectContext,
+    context: RunContext,
     run_id: str,
     artifact_kind: str,
     operation: str,
@@ -1081,6 +1111,7 @@ def _whole_asr(
         idempotency_key=idempotency_key,
     )
     try:
+        bind_control(context, provider, invocation)
         result = provider.transcribe(media_url, user_keywords=keywords)
         payload = _asr_payload(result, str(job_input.payload["source_asset_id"]), keywords)
         envelope = ArtifactEnvelope.create(
@@ -1121,7 +1152,7 @@ def _whole_asr(
 
 
 def _comparison(
-    context: ProjectContext, base: ArtifactEnvelope, peer: ArtifactEnvelope
+    context: RunContext, base: ArtifactEnvelope, peer: ArtifactEnvelope
 ) -> ArtifactEnvelope:
     hunks = compare_asr(
         str(base.payload["source_text"]),
@@ -1159,7 +1190,7 @@ def _comparison(
 
 
 def _ata_stage(
-    context: ProjectContext,
+    context: RunContext,
     run_id: str,
     media: MediaBundle,
     media_object: ArtifactEnvelope,
@@ -1182,6 +1213,7 @@ def _ata_stage(
     )
     result: AtaResponse | None = None
     try:
+        bind_control(context, provider, invocation)
         result = provider.align(media_url, str(transcript.payload["source_text"]))
         content_hash, byte_length, _ = context.store.publish_bytes(result.raw_response)
         envelope = ArtifactEnvelope.create(
@@ -1225,7 +1257,7 @@ def _ata_stage(
 
 
 def _publish_downstream(
-    context: ProjectContext,
+    context: RunContext,
     run_id: str,
     media: MediaBundle,
     transcript: ArtifactEnvelope,
@@ -1251,7 +1283,7 @@ def _publish_downstream(
             },
             [ata_response, transcript, media.timeline_audio],
         )
-    context.registry.activate_artifacts(context.project_id, [result.artifact_id])
+    context.registry.activate_artifacts(context.run_id, [result.artifact_id])
     render, output = publish_srt(
         context,
         run_id=run_id,
@@ -1309,14 +1341,27 @@ def _provider_producer(provider: str, model: str | None, config: Mapping[str, An
     return Producer(provider, COMPONENT_VERSION, provider, model, hash_json(config))
 
 
-def _fail_run(context: ProjectContext, run_id: str, exc: BaseException) -> None:
+def _fail_run(context: RunContext, run_id: str, exc: BaseException) -> None:
+    from cueflow.lifecycle import commit_result, result_snapshot
+
     try:
         row = context.registry.run(run_id)
         if row["status"] not in {"succeeded", "needs_review"}:
             context.registry.set_run_status(
                 run_id,
-                "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
+                "cancelled" if isinstance(exc, (KeyboardInterrupt, CancelledError)) else "failed",
                 error_message=str(exc) or type(exc).__name__,
             )
+            result = result_snapshot(context, committed=False)
+            result["error"] = {
+                "code": type(exc).__name__, "message": str(exc) or type(exc).__name__,
+                "retryable": isinstance(exc, ProviderError),
+                "delivery_state": "delivery_ambiguous" if any(
+                    item["status"] == "delivery_ambiguous"
+                    for item in context.registry.invocations_for_run(run_id)
+                    if item["execution_round"] == context.registry.round_number(run_id)
+                ) else None,
+            }
+            commit_result(context, result)
     except CueFlowError:
         return

@@ -16,6 +16,7 @@ from cueflow.errors import (
     ProviderError,
     ProviderUnavailableError,
 )
+from cueflow.provider_control import ProviderControl
 
 ATA_SUBMIT_URL = "https://openspeech.bytedance.com/api/v1/vc/ata/submit"
 ATA_QUERY_URL = "https://openspeech.bytedance.com/api/v1/vc/ata/query"
@@ -42,15 +43,18 @@ class VolcengineAtaProvider:
     model = "automatic-transcript-alignment"
 
     def __init__(
-        self, client: httpx.Client | None = None, config: CloudJobConfig | None = None
+        self, client: httpx.Client | None = None, config: CloudJobConfig | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> None:
         self._client = client
         self._owns_client = client is None
         self._config = config or CloudJobConfig()
+        self._environment = dict(os.environ if environment is None else environment)
+        self.control = ProviderControl()
 
     def align(self, media_url: str, transcript_text: str) -> AtaResponse:
-        appid = os.getenv("VOLCENGINE_ATA_APPID")
-        token = os.getenv("VOLCENGINE_ATA_ACCESS_TOKEN")
+        appid = self._environment.get("VOLCENGINE_ATA_APPID")
+        token = self._environment.get("VOLCENGINE_ATA_ACCESS_TOKEN")
         if not appid or not token:
             raise ProviderUnavailableError(
                 "ATA requires VOLCENGINE_ATA_APPID and VOLCENGINE_ATA_ACCESS_TOKEN"
@@ -61,18 +65,24 @@ class VolcengineAtaProvider:
         self._client = client
         started = time.monotonic()
         try:
-            try:
-                response = client.post(ATA_SUBMIT_URL, params=query, headers=headers, json=payload)
-            except httpx.RequestError as exc:
-                raise DeliveryAmbiguousError(
-                    "ATA submit may have been delivered; automatic retry is forbidden"
-                ) from exc
-            body = _checked_json(response, "ATA submit")
-            if type(body.get("code")) not in (int, str) or body["code"] not in (0, "0"):
-                raise ProviderError(f"ATA submit failed with code {body.get('code')}")
-            task_id = body.get("id")
-            if not isinstance(task_id, str) or not task_id:
-                raise ContractError("ATA submit returned no task id")
+            task_id = self.control.resume_task_id
+            if task_id is None:
+                self.control.checkpoint()
+                try:
+                    response = client.post(
+                        ATA_SUBMIT_URL, params=query, headers=headers, json=payload,
+                    )
+                except httpx.RequestError as exc:
+                    raise DeliveryAmbiguousError(
+                        "ATA submit may have been delivered; automatic retry is forbidden"
+                    ) from exc
+                body = _checked_json(response, "ATA submit")
+                if type(body.get("code")) not in (int, str) or body["code"] not in (0, "0"):
+                    raise ProviderError(f"ATA submit failed with code {body.get('code')}")
+                task_id = body.get("id")
+                if not isinstance(task_id, str) or not task_id:
+                    raise ContractError("ATA submit returned no task id")
+            self.control.receipt(task_id, "submitted")
             metadata = ProviderMetadata(
                 provider=self.provider,
                 requested_model=self.model,
@@ -107,9 +117,14 @@ class VolcengineAtaProvider:
         headers = {"Authorization": f"Bearer; {token}", "Resource-Id": ATA_RESOURCE_ID}
         params = {"appid": appid, "id": task_id, "blocking": "0"}
         while True:
+            self.control.checkpoint()
             response = client.get(ATA_QUERY_URL, params=params, headers=headers)
             body = _checked_json(response, "ATA query")
             status = body.get("code")
+            remote_status = "completed" if status in (0, "0") else (
+                "pending" if status in (2000, "2000") else "failed"
+            )
+            self.control.receipt(task_id, remote_status)
             if type(status) in (int, str) and status in (0, "0"):
                 return response.content
             if type(status) not in (int, str) or status not in (2000, "2000"):

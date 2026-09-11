@@ -19,6 +19,7 @@ from cueflow.errors import (
     ProviderError,
     ProviderUnavailableError,
 )
+from cueflow.provider_control import ProviderControl
 
 DOUBAO_SUBMIT_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit"
 DOUBAO_QUERY_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query"
@@ -45,22 +46,25 @@ class DoubaoFileAsrProvider:
     model = DOUBAO_ASR_MODEL
 
     def __init__(
-        self, client: httpx.Client | None = None, config: CloudJobConfig | None = None
+        self, client: httpx.Client | None = None, config: CloudJobConfig | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> None:
         self._client = client
         self._owns_client = client is None
         self._config = config or CloudJobConfig()
+        self._environment = dict(os.environ if environment is None else environment)
+        self.control = ProviderControl()
 
     def transcribe(self, media_url: str, *, user_keywords: Sequence[str]) -> AsrResult:
-        app_key = os.getenv("DOUBAO_APP_KEY")
-        access_key = os.getenv("DOUBAO_ACCESS_KEY")
-        api_key = os.getenv("DOUBAO_API_KEY")
+        app_key = self._environment.get("DOUBAO_APP_KEY")
+        access_key = self._environment.get("DOUBAO_ACCESS_KEY")
+        api_key = self._environment.get("DOUBAO_API_KEY")
         if not api_key and (not app_key or not access_key):
             raise ProviderUnavailableError(
                 "Doubao ASR requires DOUBAO_API_KEY or DOUBAO_APP_KEY and DOUBAO_ACCESS_KEY"
             )
         uid = app_key or "cueflow"
-        task_id = str(uuid.uuid4())
+        task_id = self.control.resume_task_id or str(uuid.uuid4())
         headers = {
             "X-Api-Resource-Id": DOUBAO_RESOURCE_ID,
             "X-Api-Request-Id": task_id,
@@ -76,17 +80,21 @@ class DoubaoFileAsrProvider:
         self._client = client
         started = time.monotonic()
         try:
-            try:
-                response = client.post(
-                    DOUBAO_SUBMIT_URL,
-                    headers=headers,
-                    json=build_doubao_request(media_url, user_keywords, uid=uid),
-                )
-            except httpx.RequestError as exc:
-                raise DeliveryAmbiguousError(
-                    "Doubao ASR submit may have been delivered; automatic retry is forbidden"
-                ) from exc
-            _validate_doubao_response(response, "Doubao ASR submit")
+            if self.control.resume_task_id is None:
+                self.control.checkpoint()
+                self.control.receipt(task_id, "submitting")
+                try:
+                    response = client.post(
+                        DOUBAO_SUBMIT_URL,
+                        headers=headers,
+                        json=build_doubao_request(media_url, user_keywords, uid=uid),
+                    )
+                except httpx.RequestError as exc:
+                    raise DeliveryAmbiguousError(
+                        "Doubao ASR submit may have been delivered; automatic retry is forbidden"
+                    ) from exc
+                _validate_doubao_response(response, "Doubao ASR submit")
+            self.control.receipt(task_id, "submitted")
             metadata = ProviderMetadata(
                 provider=self.provider,
                 requested_model=self.model,
@@ -124,10 +132,15 @@ class DoubaoFileAsrProvider:
     def _poll(self, client: httpx.Client, headers: Mapping[str, str]) -> Mapping[str, Any]:
         deadline = time.monotonic() + self._config.poll_timeout_seconds
         while True:
+            self.control.checkpoint()
             response = client.post(DOUBAO_QUERY_URL, headers=headers, json={})
             if not response.is_success:
                 _validate_doubao_response(response, "Doubao ASR query")
             status = response.headers.get("X-Api-Status-Code")
+            remote_status = "completed" if status == "20000000" else (
+                "pending" if status in {"20000001", "20000002", "20000003"} else "failed"
+            )
+            self.control.receipt(headers["X-Api-Request-Id"], remote_status)
             if status == "20000000":
                 return _json_object(response, "Doubao ASR query")
             if status not in {"20000001", "20000002", "20000003"}:

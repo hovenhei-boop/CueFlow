@@ -12,12 +12,12 @@ from cueflow.errors import (
     ProviderError,
     ProviderUnavailableError,
 )
-from cueflow.project import ProjectContext
+from cueflow.project import RunContext
 from cueflow.schema import ArtifactEnvelope
 
 
 def _checkpoint_args(
-    context: ProjectContext,
+    context: RunContext,
     run_id: str,
     stage: str,
     scope: str = "global",
@@ -32,19 +32,20 @@ def _checkpoint_args(
                 "stage": stage,
                 "scope": scope,
                 "config_hash": context.registry.run(run_id)["config_hash"],
+                "execution_round": context.registry.round_number(run_id, stage),
             }
         ),
     )
 
 
-def _bind(context: ProjectContext, run_id: str, artifact: ArtifactEnvelope) -> ArtifactEnvelope:
+def _bind(context: RunContext, run_id: str, artifact: ArtifactEnvelope) -> ArtifactEnvelope:
     args = _checkpoint_args(context, run_id, artifact.artifact_kind, artifact.scope_key)
     context.registry.bind_checkpoint(args[0], args[1], artifact.artifact_id, args[3], args[2])
     return artifact
 
 
 def _get(
-    context: ProjectContext,
+    context: RunContext,
     run_id: str,
     stage: str,
     scope: str = "global",
@@ -60,7 +61,7 @@ def _get(
     return artifact
 
 
-def _require(context: ProjectContext, run_id: str, stage: str) -> ArtifactEnvelope:
+def _require(context: RunContext, run_id: str, stage: str) -> ArtifactEnvelope:
     result = _get(context, run_id, stage)
     if result is None:
         raise IntegrityError(f"missing run checkpoint: {stage}")
@@ -68,7 +69,7 @@ def _require(context: ProjectContext, run_id: str, stage: str) -> ArtifactEnvelo
 
 
 def _stage(
-    context: ProjectContext,
+    context: RunContext,
     run_id: str,
     operation: str,
     kind: str,
@@ -84,7 +85,7 @@ def _stage(
 
 
 def _retry_identity(
-    context: ProjectContext,
+    context: RunContext,
     run_id: str,
     operation: str,
     scope: str,
@@ -94,12 +95,14 @@ def _retry_identity(
         row
         for row in context.registry.invocations_for_run(run_id)
         if row["logical_operation_key"] == f"{operation}:{scope}"
+        and row["execution_round"] == context.registry.round_number(run_id)
     ]
     latest = rows[-1] if rows else None
     if latest is not None:
         if latest["status"] == "succeeded":
             raise IntegrityError("successful invocation is missing its atomic checkpoint")
-        if latest["invocation_id"] != retry_of:
+        resumable_remote = latest["remote_job_id"] and latest["status"] == "delivery_ambiguous"
+        if latest["invocation_id"] != retry_of and not resumable_remote:
             raise ProviderError(f"{operation}/{scope} previously failed; explicit retry required")
         if latest["status"] not in {
             "explicit_failure",
@@ -114,7 +117,7 @@ def _retry_identity(
 
 
 def _new_invocation(
-    context: ProjectContext,
+    context: RunContext,
     run_id: str,
     operation: str,
     provider: str,
@@ -127,6 +130,21 @@ def _new_invocation(
     retry_of: str | None = None,
     idempotency_key: str | None = None,
 ) -> str:
+    from cueflow.lifecycle import check_cancellation
+
+    check_cancellation(context)
+    if retry_of is None and operation in {"qwen_asr", "doubao_asr", "ata"}:
+        candidates = context.registry.invocations_for_run(run_id)
+        for candidate in reversed(candidates):
+            if (candidate["operation"] != operation or not candidate["remote_job_id"]
+                    or candidate["status"] != "delivery_ambiguous"):
+                continue
+            bound = [(str(row["role"]), str(row["input_artifact_id"]))
+                     for row in context.registry.invocation_inputs(candidate["invocation_id"])]
+            if bound == list(inputs):
+                retry_of = str(candidate["invocation_id"])
+                idempotency_key = str(candidate["idempotency_key"])
+            break
     if retry_of:
         original = context.registry.invocation(retry_of)
         original_inputs = [
@@ -144,7 +162,7 @@ def _new_invocation(
             raise IntegrityError("targeted retry changed original request identity")
     invocation = context.registry.create_invocation(
         run_id=run_id,
-        project_id=context.project_id,
+        owner_run_id=context.run_id,
         operation=operation,
         logical_operation_key=f"{operation}:{logical_suffix}",
         provider=provider,
@@ -160,7 +178,7 @@ def _new_invocation(
 
 
 def _record_invocation_failure(
-    context: ProjectContext, invocation: str, exc: BaseException
+    context: RunContext, invocation: str, exc: BaseException
 ) -> None:
     if context.registry.invocation(invocation)["status"] == "succeeded":
         return
@@ -193,7 +211,7 @@ def _record_invocation_failure(
 
 
 def _succeed_with_metadata(
-    context: ProjectContext,
+    context: RunContext,
     invocation: str,
     envelope: ArtifactEnvelope | None,
     metadata: ProviderMetadata,

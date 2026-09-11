@@ -13,6 +13,7 @@ from cueflow.cloud_stream import CompletedResponseError, complete_json, openai_f
 from cueflow.config import GLM_SELECTION_MODEL, SelectionConfig
 from cueflow.conflict_selection import validate_decisions
 from cueflow.errors import ContractError, ProviderUnavailableError
+from cueflow.provider_control import ProviderControl
 
 PROMPT_VERSION = "transcript-candidate-selection-zh-v1"
 
@@ -45,12 +46,15 @@ class GlmSelectionProvider:
     provider = "zhipu-openai-compatible"
     model = GLM_SELECTION_MODEL
 
-    def __init__(self, client_factory: Callable[..., Any] | None = None) -> None:
+    def __init__(self, client_factory: Callable[..., Any] | None = None,
+                 environment: Mapping[str, str] | None = None) -> None:
         self._client_factory = client_factory
+        self._environment = dict(os.environ if environment is None else environment)
+        self.control = ProviderControl()
 
     def select(self, request: Mapping[str, Any]) -> SelectionResult:
-        api_key = os.getenv("ZHIPU_API_KEY")
-        base_url = os.getenv("ZHIPU_BASE_URL") or "https://open.bigmodel.cn/api/paas/v4"
+        api_key = self._environment.get("ZHIPU_API_KEY")
+        base_url = self._environment.get("ZHIPU_BASE_URL") or "https://open.bigmodel.cn/api/paas/v4"
         if not api_key:
             raise ProviderUnavailableError("GLM selection requires ZHIPU_API_KEY")
         config = SelectionConfig()
@@ -60,6 +64,7 @@ class GlmSelectionProvider:
         prompt, _ = load_selection_prompt()
         value, metadata, raw_text = complete_json(
             self._client_factory or openai_factory(),
+            checkpoint=self.control.checkpoint,
             api_key=api_key,
             base_url=base_url,
             provider=self.provider,

@@ -1,8 +1,8 @@
-# CueFlow v0.5.3 Schema Contracts
+# CueFlow v0.5.4 Schema Contracts
 
 ## Envelope
 
-当前 schema_version=11.0.0。Envelope 保存 kind、scope、Producer、ordered inputs、payload、
+当前 schema_version=12.0.0。Envelope 保存 kind、scope、Producer、ordered inputs、payload、
 RFC 8785 + SHA-256 内容身份和创建时间；创建时间与本地路径不参与语义哈希。
 
 合法 kind：
@@ -21,7 +21,7 @@ correction_transcript 的 scope 等于 arm（qwen/kimi）；selection_batch 和 
 
 - JobInput 保存有序 References 和最多 100 个非空、exact unique 的 UserKeywords。
 - BaseAsr/PeerAsr 保存原文、timed units、关键词和 Provider metadata。
-- CorrectionTranscript 保存完整、非空 corrected_text。v0.5.3 的 BaseTranscript 必须非空，
+- CorrectionTranscript 保存完整、非空 corrected_text。v0.5.4 的 BaseTranscript 必须非空，
   因此空 corrected_text 是已完成但无效的 Provider 返回。
 - MediaObject 绑定 timeline_audio_artifact_id，且 hash/长度必须与该 Frozen TimelineAudio blob 相同。
 - MergePlan 保存四份原始版本、精确 patches、case 候选和 source_intervals。Schema 从四份全文
@@ -56,21 +56,21 @@ ReviewQueue 绑定 run、final、稳定 review_id 和冻结的 Base `[start,end)
 
 ## Registry 与事务
 
-PRAGMA user_version=13，表为 projects、source_assets、artifacts、artifact_dependencies、
-current_pointers、runs、invocations、invocation_inputs、run_checkpoints。
-空库初始化当前版本；非空旧版本或表结构不符均拒绝，不迁移、不改写。
+PRAGMA user_version=15。表为 projects、runs、execution_rounds、source_assets、run_inputs、
+reference_preparations、artifacts、artifact_dependencies、current_pointers、invocations、
+invocation_inputs、run_checkpoints、object_transfers、progress_events。
 
-source_assets 以 `(project_id, normalized_absolute_locator)` 唯一。同名不同路径是不同 SourceAsset；
-重新打开只验证 exact path，不按 filename、hash、mtime 或 size 搜索替代文件。
+Registry 15 的 Run/轮次状态 CHECK 包含 interrupted。开发期 Registry 14 在打开时明确拒绝，
+不会进入运行或恢复路径；不迁移、不改写旧库。
 
-invocations 按每次实际请求分别记录状态、模型身份、response ID、usage、prompt、retry ancestry
-和已完成无效返回的 diagnostic_json。
-invocation_inputs 按 ordinal 保存原始 Artifact ID；定向重试复用这些输入和原 idempotency key。
-run_checkpoints 的键是 (run_id,stage,scope_key)，input_digest 绑定 run/config/prompt，实际上游
-有序依赖保存在 Artifact 与 invocation inputs。
+Project 为可选组织容器。SourceAsset/artifact 的 owner_run_id 与 Run 显式绑定。
+媒体输入保留原路径的内容 hash/长度；标准媒体对象另与 TimelineAudio 精确绑定。
+Reference requested membership 与每轮 preparation 记录分开；有效集合恢复不改变原始输入。
 
-成功结果、current pointer、invocation success 与 checkpoint 同一个 SQLite transaction 提交。
-文件先按内容地址原子发布；未被数据库引用的残留文件不代表付费调用成功，也不授权自动重发。
-最终 resolution 与 review queue 成组提交。人工封存后的结果不能被晚到的 GLM retry 覆盖。
+共享 checkpoint 使用 execution_round=0，后半段使用当前轮次，键为
+(run_id,execution_round,stage,scope_key)。保留 input_digest 与 artifact schema/hash 校验。
+成功结果、current pointer、invocation 和 checkpoint 在短事务中提交；网络、轮询、FFmpeg、
+Office 转换在写事务之外。TOS 上传以 intent/receipt 恢复，不声称与 SQLite 有分布式原子事务。
 
-只接受当前版本，任何其他版本均不读取或转换为本版项目。旧文件不改写，用户应新建项目。
+result/job contract 使用 contract_version="1.0"，独立于 Artifact schema_version。
+只接受当前 Registry 和 Artifact；没有迁移或旧版兼容入口，不改写已有旧数据库。

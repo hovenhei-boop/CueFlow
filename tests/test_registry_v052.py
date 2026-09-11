@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 
 from cueflow.errors import IntegrityError, SourceMissingError
-from cueflow.project import ProjectContext
+from cueflow.project import RunContext
 from cueflow.registry import REGISTRY_SCHEMA_VERSION, Registry
 
 
-@pytest.mark.parametrize("version", [6, 8, 9, 10, 11, 12])
+@pytest.mark.parametrize("version", [6, 8, 9, 10, 11, 12, 13, 14])
 def test_old_registry_is_rejected_without_migration(tmp_path: Path, version: int) -> None:
     database = tmp_path / "registry.sqlite3"
     connection = sqlite3.connect(database)
@@ -19,15 +19,19 @@ def test_old_registry_is_rejected_without_migration(tmp_path: Path, version: int
     connection.commit()
     connection.close()
     before = database.read_bytes()
-    with pytest.raises(IntegrityError, match="does not migrate older projects"):
+    with pytest.raises(
+        IntegrityError,
+        match=f"incompatible Registry schema: expected 15, found {version}; .*does not migrate",
+    ):
         Registry(database)
     assert database.read_bytes() == before
 
 
 def test_new_registry_contains_only_current_contract_tables(tmp_path: Path) -> None:
-    context = ProjectContext.create(tmp_path / "project", "fixture")
+    context = RunContext.create(tmp_path / "project", "fixture")
     try:
-        assert REGISTRY_SCHEMA_VERSION == 13
+        assert REGISTRY_SCHEMA_VERSION == 15
+        assert context.registry.connection.execute("PRAGMA user_version").fetchone()[0] == 15
         assert "run_checkpoints" in context.registry._table_names()
         names = context.registry._table_names()
         assert "lexicon_entries" not in names
@@ -52,7 +56,7 @@ def test_source_identity_is_normalized_absolute_path_not_filename(
     second = second_dir / "video.mp4"
     first.write_bytes(b"same")
     second.write_bytes(b"same")
-    context = ProjectContext.create(tmp_path / "project", "fixture")
+    context = RunContext.create(tmp_path / "project", "fixture")
     monkeypatch.chdir(tmp_path)
     try:
         first_row = context.register_external_asset(
@@ -75,7 +79,7 @@ def test_windows_source_identity_is_case_insensitive(
         pytest.skip("Windows path identity contract")
     source = tmp_path / "Video.MP4"
     source.write_bytes(b"media")
-    context = ProjectContext.create(tmp_path / "project", "fixture")
+    context = RunContext.create(tmp_path / "project", "fixture")
     try:
         first = context.register_external_asset(source, asset_kind="media")
         second = context.register_external_asset(Path(str(source).swapcase()), asset_kind="media")
@@ -95,7 +99,7 @@ def test_missing_registered_path_is_not_replaced_by_same_filename_elsewhere(
     alternate = alternate_dir / "video.mp4"
     registered.write_bytes(b"first")
     alternate.write_bytes(b"second")
-    context = ProjectContext.create(tmp_path / "project", "fixture")
+    context = RunContext.create(tmp_path / "project", "fixture")
     try:
         row = context.register_external_asset(registered, asset_kind="media")
         registered.unlink()
@@ -119,6 +123,8 @@ def test_current_version_with_wrong_columns_is_rejected(tmp_path: Path) -> None:
         "invocations",
         "invocation_inputs",
         "run_checkpoints",
+        "execution_rounds", "run_inputs", "reference_preparations", "object_transfers",
+        "progress_events",
     ):
         connection.execute(f"CREATE TABLE {table}(wrong TEXT)")
     connection.execute(f"PRAGMA user_version={REGISTRY_SCHEMA_VERSION}")

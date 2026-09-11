@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 import wave
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 import httpx
 import pytest
 
+from cueflow.api import Workspace
 from cueflow.asr_contracts import AsrResult, ProviderMetadata, TimedUnit
 from cueflow.ata_provider import AtaResponse
 from cueflow.canonical import hash_json
@@ -19,12 +21,35 @@ from cueflow.errors import ProviderError
 from cueflow.glm_selection_provider import SelectionResult
 from cueflow.media import MediaBundle, ProbeResult
 from cueflow.media_object_store import MediaObjectRef
-from cueflow.orchestrator import initialize_project, resolve_review, retry_invocation, run_project
+from cueflow.orchestrator import resolve_review, retry_invocation, run_project
 from cueflow.schema import ArtifactEnvelope, InputRef, Producer
 
 
 class FakeMediaStore:
     provider = "fake-object-store"
+    objects: dict[str, bytes] = {}
+
+    def plan_upload(self, path: Path, object_name: str) -> MediaObjectRef:
+        content = path.read_bytes()
+        return MediaObjectRef(self.provider, "bucket", uuid.uuid4().hex + "/" + object_name,
+                              "sha256:" + hashlib.sha256(content).hexdigest(), len(content))
+
+    def put(self, path: Path, ref: MediaObjectRef) -> MediaObjectRef:
+        content = path.read_bytes()
+        assert ref.object_key not in self.objects
+        if ref.object_key.endswith("timeline-audio.wav"):
+            assert content.startswith(b"RIFF")
+        self.objects[ref.object_key] = content
+        return ref
+
+    def head(self, ref: MediaObjectRef) -> MediaObjectRef | None:
+        return ref if ref.object_key in self.objects else None
+
+    def materialize(self, ref: MediaObjectRef, destination: Path) -> None:
+        destination.write_bytes(self.objects[ref.object_key])
+
+    def delete(self, ref: MediaObjectRef) -> None:
+        del self.objects[ref.object_key]
 
     def upload(self, path: Path, *, object_name: str | None = None) -> MediaObjectRef:
         content = path.read_bytes()
@@ -33,7 +58,6 @@ class FakeMediaStore:
         return MediaObjectRef(self.provider, "bucket", object_name, digest, len(content))
 
     def presign_get(self, ref: MediaObjectRef) -> str:
-        assert ref.object_key == "timeline-audio.wav"
         return "https://media.example/source.wav?signature=private"
 
     def close(self) -> None:
@@ -158,7 +182,8 @@ def _project_with_fake_media(
 
     media_path = tmp_path / "source.wav"
     media_path.write_bytes(b"source")
-    context = initialize_project(tmp_path / "project", "fixture")
+    workspace = Workspace(tmp_path / "workspace")
+    context = workspace.context(workspace.registry.create_run())
 
     def fake_probe(_path: Path, _runtime: RuntimeConfig) -> ProbeResult:
         return ProbeResult(
@@ -339,7 +364,7 @@ def test_explicit_correction_retry_preserves_identity_and_resumes_pipeline(
                 kimi_correction_factory=FakeKimiCorrection,
                 ata_factory=FakeAta,
             )
-        run_id = str(context.registry.runs(context.project_id)[-1]["run_id"])
+        run_id = str(context.registry.run(context.run_id)["run_id"])
         failed = next(
             row
             for row in context.registry.invocations_for_run(run_id)
@@ -430,7 +455,7 @@ def test_doubao_http_failure_retry_reuses_completed_stages(
                     glm_selection_factory=unexpected,
                     ata_factory=unexpected,
                 )
-            run_id = str(context.registry.runs(context.project_id)[-1]["run_id"])
+            run_id = str(context.registry.run(context.run_id)["run_id"])
             failed = context.registry.invocations_for_run(run_id)[-1]
             assert failed["operation"] == "doubao_asr"
             assert failed["status"] == "explicit_failure"

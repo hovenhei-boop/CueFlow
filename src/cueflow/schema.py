@@ -4,7 +4,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlsplit
 
 from cueflow.canonical import artifact_content_hash
 from cueflow.config import MAX_USER_KEYWORDS, SCHEMA_VERSION
@@ -34,7 +33,6 @@ ARTIFACT_KINDS = frozenset(
 )
 SCOPED_KINDS = frozenset({"correction_transcript", "selection_batch", "selection_result"})
 TEXT_REFERENCE_FORMATS = frozenset({"txt", "md", "csv", "json"})
-URL_REFERENCE_KINDS = frozenset({"pdf_url", "image_url"})
 
 
 def utc_now() -> str:
@@ -408,12 +406,13 @@ def validate_job_input_payload(payload: Mapping[str, Any]) -> None:
             raise ContractError("Reference ordinals must be contiguous")
         kind = item.get("kind")
         _string(item.get("display_name"), "reference.display_name")
-        if kind in URL_REFERENCE_KINDS:
-            parsed = urlsplit(_string(item.get("url"), "reference.url"))
-            if parsed.scheme != "https" or not parsed.netloc:
-                raise ContractError("PDF and image References require an absolute HTTPS URL")
-            if item.get("locator_semantics") != "mutable_remote_locator":
-                raise ContractError("URL Reference must declare mutable locator semantics")
+        if kind in {"pdf_object", "image_object"}:
+            obj = _mapping(item.get("object"), "reference.object")
+            for field in ("provider", "bucket", "object_key", "content_hash"):
+                _string(obj.get(field), f"reference.object.{field}")
+            _positive_int(obj.get("byte_length"), "reference.object.byte_length")
+            if "url" in item:
+                raise ContractError("Reference must not persist a signed URL")
         elif kind == "text":
             if item.get("format") not in TEXT_REFERENCE_FORMATS:
                 raise ContractError("unsupported text Reference format")

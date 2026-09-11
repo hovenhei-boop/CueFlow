@@ -15,6 +15,7 @@ from cueflow.errors import (
     ProviderError,
     ProviderUnavailableError,
 )
+from cueflow.provider_control import ProviderControl
 
 QWEN_SUBMIT_URL = "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription"
 QWEN_TASK_URL = "https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
@@ -41,38 +42,45 @@ class QwenFiletransProvider:
     model = QWEN_ASR_MODEL
 
     def __init__(
-        self, client: httpx.Client | None = None, config: CloudJobConfig | None = None
+        self, client: httpx.Client | None = None, config: CloudJobConfig | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> None:
         self._client = client
         self._owns_client = client is None
         self._config = config or CloudJobConfig()
+        self._environment = dict(os.environ if environment is None else environment)
+        self.control = ProviderControl()
 
     def transcribe(self, media_url: str, *, user_keywords: Sequence[str]) -> AsrResult:
-        api_key = os.getenv("DASHSCOPE_API_KEY")
+        api_key = self._environment.get("DASHSCOPE_API_KEY")
         if not api_key:
             raise ProviderUnavailableError("Qwen ASR requires DASHSCOPE_API_KEY")
         client = self._client or httpx.Client(timeout=self._config.request_timeout_seconds)
         self._client = client
         started = time.monotonic()
         try:
-            try:
-                response = client.post(
-                    QWEN_SUBMIT_URL,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "X-DashScope-Async": "enable",
-                        "Content-Type": "application/json",
-                    },
-                    json=build_qwen_request(media_url, user_keywords),
-                )
-            except httpx.RequestError as exc:
-                raise DeliveryAmbiguousError(
-                    "Qwen ASR submit may have been delivered; automatic retry is forbidden"
-                ) from exc
-            _raise_http(response, "Qwen ASR submit")
-            body = _json_object(response, "Qwen ASR submit")
-            output = _object(body.get("output"), "Qwen ASR submit.output")
-            task_id = _nonempty(output.get("task_id"), "Qwen ASR task_id")
+            task_id = self.control.resume_task_id
+            if task_id is None:
+                self.control.checkpoint()
+                try:
+                    response = client.post(
+                        QWEN_SUBMIT_URL,
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "X-DashScope-Async": "enable",
+                            "Content-Type": "application/json",
+                        },
+                        json=build_qwen_request(media_url, user_keywords),
+                    )
+                except httpx.RequestError as exc:
+                    raise DeliveryAmbiguousError(
+                        "Qwen ASR submit may have been delivered; automatic retry is forbidden"
+                    ) from exc
+                _raise_http(response, "Qwen ASR submit")
+                body = _json_object(response, "Qwen ASR submit")
+                output = _object(body.get("output"), "Qwen ASR submit.output")
+                task_id = _nonempty(output.get("task_id"), "Qwen ASR task_id")
+            self.control.receipt(task_id, "submitted")
             metadata = ProviderMetadata(
                 provider=self.provider,
                 requested_model=self.model,
@@ -112,6 +120,7 @@ class QwenFiletransProvider:
     def _poll(self, client: httpx.Client, api_key: str, task_id: str) -> Mapping[str, Any]:
         deadline = time.monotonic() + self._config.poll_timeout_seconds
         while True:
+            self.control.checkpoint()
             response = client.get(
                 QWEN_TASK_URL.format(task_id=task_id),
                 headers={"Authorization": f"Bearer {api_key}"},
@@ -120,6 +129,10 @@ class QwenFiletransProvider:
             body = _json_object(response, "Qwen ASR query")
             output = _object(body.get("output"), "Qwen ASR query.output")
             status = _nonempty(output.get("task_status"), "Qwen ASR task_status")
+            remote_status = "completed" if status == "SUCCEEDED" else (
+                "failed" if status in {"FAILED", "CANCELED", "UNKNOWN"} else "pending"
+            )
+            self.control.receipt(task_id, remote_status)
             if status == "SUCCEEDED":
                 return body
             if status in {"FAILED", "CANCELED", "UNKNOWN"}:

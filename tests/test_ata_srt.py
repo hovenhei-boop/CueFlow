@@ -113,9 +113,9 @@ def test_raw_result_checkpoint_and_invocation_are_atomic(tmp_path: Path, monkeyp
     try:
         with pytest.raises(RuntimeError, match="raw commit"):
             _run(context, path, provider)
-        run_id = context.registry.runs(context.project_id)[-1]["run_id"]
+        run_id = context.registry.run(context.run_id)["run_id"]
         assert context.registry.checkpoint(run_id, "ata_response") is None
-        pointer = context.registry.current_pointer(context.project_id, "ata_response", "global")
+        pointer = context.registry.current_pointer(context.run_id, "ata_response", "global")
         assert pointer is None
         invocation = context.registry.invocations_for_run(run_id)[-1]
         assert invocation["status"] == "delivery_ambiguous"
@@ -163,11 +163,11 @@ def test_cli_local_ata_failure_never_suggests_an_earlier_paid_retry(
     }]}).encode()
     provider = _ata(raw)
     path, context = _project_with_fake_media(tmp_path, monkeypatch)
-    root = str(context.root)
+    root = str(context.registry.path.parent.parent)
     try:
         with pytest.raises(ContractError if malformed else SrtSerializationError):
             _run(context, path, provider, qwen_correction_factory=OnceInvalidCorrection)
-        run_id = context.registry.runs(context.project_id)[-1]["run_id"]
+        run_id = context.registry.run(context.run_id)["run_id"]
         assert OnceInvalidCorrection.calls == 2
         assert any(
             row["status"] == "explicit_failure"
@@ -209,12 +209,13 @@ def test_unserializable_times_are_persisted_but_never_written(
     ]}).encode()
     path, context = _project_with_fake_media(tmp_path, monkeypatch)
     provider = _ata(raw)
-    destination = context.root / "output" / "subtitles.srt"
+    destination = context.root / "attempts" / "1" / "final.srt"
+    destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(b"previous export must survive")
     try:
         with pytest.raises(SrtSerializationError):
             _run(context, path, provider)
-        run_id = context.registry.runs(context.project_id)[-1]["run_id"]
+        run_id = context.registry.run(context.run_id)["run_id"]
         artifact = context.current_artifact("ata_response")
         blob = artifact.payload["response_blob"]
         assert context.store.blob_path(blob["content_hash"]).read_bytes() == raw
@@ -229,7 +230,7 @@ def test_unserializable_times_are_persisted_but_never_written(
             resume_run(context, run_id)
         assert provider.calls == 1
         assert destination.read_bytes() == b"previous export must survive"
-        assert context.registry.current_pointer(context.project_id, "srt_render", "global") is None
+        assert context.registry.current_pointer(context.run_id, "srt_render", "global") is None
     finally:
         context.close()
 
@@ -281,11 +282,11 @@ def test_resume_after_result_commit_only_retries_atomic_file_projection(
     try:
         with pytest.raises(OSError):
             _run(context, path, provider)
-        run_id = context.registry.runs(context.project_id)[-1]["run_id"]
+        run_id = context.registry.run(context.run_id)["run_id"]
         original_result = context.current_artifact("ata_result").artifact_id
         assert context.registry.checkpoint(run_id, "ata_result") is not None
         monkeypatch.setattr(exporter, "_atomic_text_projection", original)
-        result = resume_run(context, run_id)
+        result = resume_run(context, run_id, media_store_factory=FakeMediaStore)
         assert result["status"] == "succeeded" and provider.calls == 1
         assert result["ata_result_artifact_id"] == original_result
         expected = b"1\n00:00:00,000 --> 00:00:00,001\nATA\n"
@@ -324,9 +325,7 @@ def test_export_retains_state_and_provenance_checks(
             else:
                 blob_path.write_bytes(b"tampered")
         else:
-            second = _run(context, path, FakeAta)
-            args = _export_args(context, second["run_id"])
-            args["run_id"] = result["run_id"]
+            args["run_id"] = context.registry.create_run()
         with pytest.raises((ExportBlockedError, IntegrityError, OSError)):
             publish_srt(context, **args)
     finally:

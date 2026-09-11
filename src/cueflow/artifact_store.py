@@ -125,10 +125,10 @@ class ArtifactStore:
 
 
 class ArtifactPublisher:
-    def __init__(self, registry: Registry, store: ArtifactStore, project_id: str) -> None:
+    def __init__(self, registry: Registry, store: ArtifactStore, owner_run_id: str) -> None:
         self.registry = registry
         self.store = store
-        self.project_id = project_id
+        self.owner_run_id = owner_run_id
 
     def publish(
         self,
@@ -142,7 +142,7 @@ class ArtifactPublisher:
     ) -> ArtifactEnvelope:
         path = self.store.write_envelope(envelope)
         self.registry.publish_artifact(
-            project_id=self.project_id,
+            owner_run_id=self.owner_run_id,
             envelope=envelope,
             storage_locator=str(path.resolve()),
             make_current=make_current,

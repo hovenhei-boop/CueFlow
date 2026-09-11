@@ -22,7 +22,7 @@ from cueflow.config import (
     RuntimeConfig,
 )
 from cueflow.errors import ContractError, ProviderUnavailableError
-from cueflow.project import ProjectContext
+from cueflow.project import RunContext
 from cueflow.schema import ArtifactEnvelope, InputRef, Producer
 
 
@@ -324,7 +324,7 @@ def scan_packet_continuity(
 
 
 def prepare_media(
-    context: ProjectContext,
+    context: RunContext,
     source_asset: Mapping[str, Any],
     probe: ProbeResult,
     runtime: RuntimeConfig,
@@ -377,7 +377,7 @@ def prepare_media(
         for envelope in complete:
             context.publisher.publish(envelope, make_current=False)
         context.registry.activate_artifacts(
-            context.project_id,
+            context.run_id,
             [item.artifact_id for item in complete],
             stale_targets=[
                 *[
@@ -576,7 +576,7 @@ def _blob(content_hash: str, byte_length: int, media_type: str) -> dict[str, Any
     return {"content_hash": content_hash, "byte_length": byte_length, "media_type": media_type}
 
 
-def _temp_path(context: ProjectContext, suffix: str) -> Path:
+def _temp_path(context: RunContext, suffix: str) -> Path:
     descriptor, raw_path = tempfile.mkstemp(
         prefix="media-", suffix=suffix, dir=context.store.temp_root
     )

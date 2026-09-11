@@ -9,7 +9,7 @@ from typing import Any
 from cueflow.canonical import hash_json
 from cueflow.config import COMPONENT_VERSION
 from cueflow.errors import ContractError, ExportBlockedError, SrtSerializationError
-from cueflow.project import ProjectContext
+from cueflow.project import RunContext
 from cueflow.run_runtime import _get
 from cueflow.schema import ArtifactEnvelope, InputRef, Producer
 
@@ -27,7 +27,7 @@ def render_srt(utterances: Sequence[Mapping[str, Any]]) -> str:
 
 
 def publish_srt(
-    context: ProjectContext,
+    context: RunContext,
     *,
     run_id: str,
     timeline_audio: ArtifactEnvelope,
@@ -60,13 +60,14 @@ def publish_srt(
         },
     )
     context.publisher.publish(envelope)
-    destination = context.root / "output" / "subtitles.srt"
+    directory = context.root / "attempts" / str(context.registry.round_number(run_id))
+    destination = directory / "final.srt"
     _atomic_text_projection(text, destination)
     return envelope, destination
 
 
 def validate_export_gate(
-    context: ProjectContext,
+    context: RunContext,
     *,
     run_id: str,
     timeline_audio: ArtifactEnvelope,
@@ -75,7 +76,7 @@ def validate_export_gate(
     ata_result: ArtifactEnvelope,
 ) -> None:
     """Validate ownership and provenance, never subtitle quality."""
-    if context.registry.run(run_id)["project_id"] != context.project_id:
+    if run_id != context.run_id:
         raise ExportBlockedError("Run belongs to another project")
     for envelope in (timeline_audio, transcript, ata_response, ata_result):
         _require_current(context, envelope)
@@ -156,9 +157,9 @@ def _require_inputs(envelope: ArtifactEnvelope, expected: list[tuple[str, str]])
         raise ExportBlockedError("ATA dependency edges differ from its provenance")
 
 
-def _require_current(context: ProjectContext, envelope: ArtifactEnvelope) -> None:
+def _require_current(context: RunContext, envelope: ArtifactEnvelope) -> None:
     pointer = context.registry.current_pointer(
-        context.project_id, envelope.artifact_kind, envelope.scope_key
+        context.run_id, envelope.artifact_kind, envelope.scope_key
     )
     if (
         pointer is None
