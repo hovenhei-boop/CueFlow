@@ -78,3 +78,27 @@ class AccountMigrationError(AccountError):
 
 class AccountMigrationLockedError(AccountMigrationError):
     """Another process owns the Account database migration lock."""
+
+
+class AuthenticationError(AccountError):
+    """A public authentication attempt did not prove the requested identity."""
+
+
+class AuthenticationRateLimitedError(AuthenticationError):
+    """An authentication policy requires a temporary cooldown."""
+
+    def __init__(self, message: str, *, retry_after_seconds: int) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
+class PhoneBlockedError(AuthenticationError):
+    """The supplied phone is explicitly blocked by Phone Reputation policy."""
+
+
+class SmsProviderUnavailableError(AuthenticationError):
+    """The SMS provider could not accept a verification request."""
+
+
+class PhoneReputationIntegrityError(AccountError):
+    """Long-lived Phone Reputation data failed closed integrity validation."""

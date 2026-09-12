@@ -1,5 +1,13 @@
 # CueFlow Roadmap
 
+## v0.6.1
+
+Phone + Password Authentication：统一“手机号继续”的验证码登录/注册，首次注册强制密码，
+密码登录/修改/重置，原子手机号换绑，15 分钟 Access、30 天滑动 Refresh、180 天 Family 上限，
+以及独立长期 Phone Reputation 和双事件流处罚账本。Migration 002 对非空 v1 开发库明确
+fail closed；Auth HTTP 使用 Starlette ASGI、Secure/HttpOnly/Strict Cookie、Origin 与 CSRF。
+细节见 [v0.6.1 冻结设计](v0.6.1-phone-password-authentication-design.md)。
+
 ## v0.6.0
 
 独立 Account Core：一个 User 绑定多个 AuthIdentity，每个 User 恰好一个 active E.164 手机；
@@ -16,9 +24,9 @@ migration、迁移锁/备份/ledger、审计和彻底注销。产品版本与 18
 持久取消、远端回执、usage 留痕、TOS 业务资产与本地 artifacts 分离、结果契约。
 细节见 [冻结设计](v0.5.4-design.md)。真实平台和长媒体验收完成前不宣布发布。
 
-## v0.6.1+
+## v0.6.2+
 
-手机号验证码登录、其他身份绑定、HTTP、Worker 调度、上传适配、权限和支付等 Web 产品层。
+其他身份绑定、Worker 调度、上传适配、权限和支付等 Web 产品层。
 浏览器媒体处理和分布式执行
 需要单独设计及验证，不借 0.5.4 改动现有音频/字幕算法。
 

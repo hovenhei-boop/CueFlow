@@ -1,6 +1,7 @@
 # CueFlow
 
-CueFlow v0.6.0 在 v0.5.4 字幕主链上新增独立 Account Core；字幕算法与 Artifact ID 保持不变。
+CueFlow v0.6.1 在 v0.5.4 字幕主链上加入完整 Phone + Password Authentication；字幕算法与
+Artifact ID 保持不变。
 字幕主链从双路 ASR 恢复逐字稿，再由火山 ATA 对齐并输出 SRT。
 Qwen ASR 是冻结 Base，豆包 ASR 是独立 Peer。千问与 Kimi 分别返回完整纠错文稿；
 本地接受一致修改和单路修改，仅将两路修改不同的区间交给 GLM 在已有候选中选择。
@@ -99,11 +100,11 @@ Python 接口见 `cueflow.api.Workspace`。`run()` 是同步便捷入口；需�
 `get_result(run_id, execution_round=N)` 可读取历史轮次，`events` 命令可读取持久进度事件。
 取消是协作式停止，不保证撤销远端任务或免除费用。未知 usage 始终为 null。
 
-## Account Core
+## Account 与 Authentication
 
-0.6.0 将一个账户主体 `User` 与多个登录身份 `AuthIdentity` 分离。每个 User 必须恰好有一个
-active E.164 手机号，email/wechat/qq/apple 是可附加身份。Account 数据库由服务器使用绝对
-路径显式注入，不属于任何 Workspace：
+v0.6.1 中一个正式 User 必须同时具有 active E.164 phone identity、Argon2id password
+credential 和长期 Phone Reputation。手机号是主登录标识但不是数据库主键；密码和短信只是
+两种认证方法。Account 数据库由服务器使用绝对路径显式注入，不属于任何 Workspace：
 
 ```python
 from pathlib import Path
@@ -118,19 +119,22 @@ migrate_account_database(database, backups)
 accounts = AccountService(AccountStore(database))
 ```
 
-账户 schema 使用 forward-only migration、独立 OS migration lock 和迁移前备份。Session
-支持 family、rotation/reuse 撤销机制；每个 User 最多 5 个 active families，第 6 个原子淘汰
-最老 family。Account DB 和备份属于敏感数据，0.6.0 不提供字段级 PII 加密，静态加密和文件
-权限由部署负责。
-Refresh token 的生成、HMAC secret 和 digest 计算属于后续 Auth/token 层；Account Core 只接收
-并持久化 `hmac-sha256:<key-id>:<64 lowercase hex>`，不接触 raw token 或 server secret。
+Migration 002 对非空 v1 开发库明确拒绝并保留已校验备份；空库可以升级。Session 支持 30 天
+滑动 Refresh、180 天 Family 绝对上限、reuse 撤销和最多 5 个 active families。数据库只保存
+密码 PHC 与 token HMAC digest，不保存 raw password/token/code。
+
+每个正式使用过的手机号拥有长期 Phone Reputation。账户注销删除 User、Identity、Password、
+Session 和 Account Audit，但不会删除稳定假名化手机号、AEAD 加密 E.164 或手机号处罚账本；
+这些记录不是匿名数据。Phone block 是明确公开的业务状态，会阻止认证并撤销现有 Session。
 
 当前 Artifact Schema 为 **12.0.0**，Registry 为 **15**。非当前数据库（包括开发期 Registry 14）拒绝打开且不改写，不提供迁移。
 上述“不迁移”仅适用于可重建的 Workspace Registry；Account schema 独立向前迁移。
-本版不包含具体登录、注册、验证码、OAuth callback、HTTP、支付、权限或分布式 Worker。
+本版提供 SmsProvider 边界和 Starlette ASGI Auth 接口，但不绑定短信厂商或 ASGI Server；仍不
+包含 OAuth callback、支付、RBAC 或分布式 Worker。
 真实 Provider/TOS 与长媒体发布验收仍须单独通过。
 
-完整边界见 [0.6.0 Account Core 设计](docs/v0.6.0-account-core-design.md)、
+完整边界见 [v0.6.1 Authentication 冻结设计](docs/v0.6.1-phone-password-authentication-design.md)、
+[0.6.0 Account Core 设计](docs/v0.6.0-account-core-design.md)、
 [0.5.4 字幕主链设计](docs/v0.5.4-design.md)、[Architecture](docs/architecture.md)、
 [Reference Inputs](docs/reference-inputs.md)、[Schema Contracts](docs/schema-contracts.md)、
 [Failure Model](docs/failure-model.md) 与 [Roadmap](docs/roadmap.md)。

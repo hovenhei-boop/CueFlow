@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Barrier
 
@@ -9,17 +10,18 @@ import pytest
 
 from cueflow.account import (
     ACCOUNT_ERASURE_ORDER,
-    ADMINISTRATIVE_PHONE_REPLACEMENT_REASONS,
     MAX_ACTIVE_SESSION_FAMILIES,
+    SESSION_FAMILY_ABSOLUTE_TTL_MS,
     AccountService,
+    AuthIdentity,
     IdentityProvider,
+    User,
     UserStatus,
     VerifiedIdentityClaim,
 )
 from cueflow.account_migrations import (
     ACCOUNT_OWNED_TABLES,
     SESSION_REVOCATION_REASONS,
-    migrate_account_database,
 )
 from cueflow.account_store import AccountStore
 from cueflow.errors import (
@@ -29,17 +31,15 @@ from cueflow.errors import (
     IdentityConflictError,
     SessionStateError,
 )
+from tests.account_helpers import AuthStack, Clock, make_auth_stack, make_test_account
+
+_STACKS: dict[int, AuthStack] = {}
 
 
-class Clock:
-    def __init__(self, value: int = 10_000) -> None:
-        self.value = value
-
-    def __call__(self) -> int:
-        return self.value
-
-    def tick(self, milliseconds: int = 1) -> None:
-        self.value += milliseconds
+@dataclass(frozen=True)
+class _TestAccount:
+    user: User
+    phone: AuthIdentity
 
 
 def _claim(provider: IdentityProvider, subject: str, verified_at: int = 1) -> VerifiedIdentityClaim:
@@ -51,34 +51,33 @@ def _digest(index: int) -> str:
 
 
 def _open_service(tmp_path: Path) -> tuple[Path, Path, AccountStore, AccountService, Clock]:
-    database = (tmp_path / "account.sqlite3").resolve()
-    backups = (tmp_path / "backups").resolve()
-    migrate_account_database(database, backups, now_ms=1)
-    store = AccountStore(database)
-    clock = Clock()
-    return database, backups, store, AccountService(store, clock=clock), clock
+    stack = make_auth_stack(tmp_path)
+    _STACKS[id(stack.store)] = stack
+    return stack.database, stack.backups, stack.store, stack.account, stack.clock
 
 
-def test_user_has_exactly_one_e164_phone_and_can_replace_it_atomically(
+def _make_account(service: AccountService, claim: VerifiedIdentityClaim) -> _TestAccount:
+    if claim.provider is not IdentityProvider.PHONE:
+        raise ContractError("test accounts require a phone claim")
+    phone = claim.provider_subject
+    stack = _STACKS[id(service.store)]
+    user = make_test_account(stack, phone)
+    identity = service.find_active_identity(IdentityProvider.PHONE, phone)
+    assert identity is not None
+    return _TestAccount(user, identity)
+
+
+def test_complete_account_has_exactly_one_e164_phone_and_can_attach_identity(
     tmp_path: Path,
 ) -> None:
-    _, _, store, service, clock = _open_service(tmp_path)
+    _, _, store, service, _ = _open_service(tmp_path)
     try:
         with pytest.raises(ContractError, match="E.164"):
-            service.provision_user_with_phone(_claim(IdentityProvider.PHONE, "13812345678"))
-        account = service.provision_user_with_phone(
-            _claim(IdentityProvider.PHONE, "+8613812345678")
-        )
+            _make_account(service, _claim(IdentityProvider.PHONE, "13812345678"))
+        account = _make_account(service, _claim(IdentityProvider.PHONE, "+8613812345678"))
         service.attach_identity(
             account.user.user_id, _claim(IdentityProvider.EMAIL, "person@example.com")
         )
-        clock.tick()
-
-        replacement = service.replace_phone(
-            account.user.user_id, _claim(IdentityProvider.PHONE, "+8613912345678")
-        )
-
-        assert replacement.provider_subject == "+8613912345678"
         active = service.list_identities(account.user.user_id)
         all_identities = service.list_identities(account.user.user_id, include_detached=True)
         assert "identity_linked" in {
@@ -88,26 +87,15 @@ def test_user_has_exactly_one_e164_phone_and_can_replace_it_atomically(
             event.event_type for event in service.list_audit_events(account.user.user_id)
         }
         assert [identity.provider for identity in active].count(IdentityProvider.PHONE) == 1
-        assert len(all_identities) == 3
-        old_phone = next(
-            identity
-            for identity in all_identities
-            if identity.provider_subject == "+8613812345678"
-        )
-        assert old_phone.status.value == "detached"
-        assert old_phone.replaced_by_identity_id == replacement.identity_id
+        assert len(all_identities) == 2
     finally:
         store.close()
 
 
 def test_two_independent_connections_cannot_bind_one_identity_twice(tmp_path: Path) -> None:
     database, _, store, service, _ = _open_service(tmp_path)
-    first = service.provision_user_with_phone(
-        _claim(IdentityProvider.PHONE, "+8613810000001")
-    )
-    second = service.provision_user_with_phone(
-        _claim(IdentityProvider.PHONE, "+8613810000002")
-    )
+    first = _make_account(service, _claim(IdentityProvider.PHONE, "+8613810000001"))
+    second = _make_account(service, _claim(IdentityProvider.PHONE, "+8613810000002"))
     store.close()
     barrier = Barrier(2)
 
@@ -141,9 +129,7 @@ def test_sixth_session_evicts_oldest_family_and_the_transition_is_atomic(
 ) -> None:
     _, _, store, service, clock = _open_service(tmp_path)
     try:
-        user = service.provision_user_with_phone(
-            _claim(IdentityProvider.PHONE, "+8613810000010")
-        ).user
+        user = _make_account(service, _claim(IdentityProvider.PHONE, "+8613810000010")).user
         sessions = []
         for index in range(MAX_ACTIVE_SESSION_FAMILIES):
             sessions.append(
@@ -162,13 +148,9 @@ def test_sixth_session_evicts_oldest_family_and_the_transition_is_atomic(
             BEGIN SELECT RAISE(ABORT, 'test audit failure'); END"""
         )
         with pytest.raises(SessionStateError):
-            service.create_session(
-                user.user_id, refresh_token_hash=_digest(5), expires_at=100_000
-            )
+            service.create_session(user.user_id, refresh_token_hash=_digest(5), expires_at=100_000)
         assert service.get_session(sessions[0].session_id).revoked_at is None
-        assert store.connection.execute(
-            "SELECT COUNT(*) FROM session_families"
-        ).fetchone()[0] == 5
+        assert store.connection.execute("SELECT COUNT(*) FROM session_families").fetchone()[0] == 5
         store.connection.execute("DROP TRIGGER fail_eviction_audit")
 
         newest = service.create_session(
@@ -198,9 +180,7 @@ def test_two_connections_cannot_exceed_the_active_session_family_limit(
     tmp_path: Path,
 ) -> None:
     database, _, store, service, clock = _open_service(tmp_path)
-    user = service.provision_user_with_phone(
-        _claim(IdentityProvider.PHONE, "+8613810000015")
-    ).user
+    user = _make_account(service, _claim(IdentityProvider.PHONE, "+8613810000015")).user
     original_sessions = []
     for index in range(4):
         original_sessions.append(
@@ -263,9 +243,7 @@ def test_suspension_blocks_sessions_and_reactivation_never_revives_old_sessions(
 ) -> None:
     _, _, store, service, clock = _open_service(tmp_path)
     try:
-        user = service.provision_user_with_phone(
-            _claim(IdentityProvider.PHONE, "+8613810000020")
-        ).user
+        user = _make_account(service, _claim(IdentityProvider.PHONE, "+8613810000020")).user
         old = service.create_session(
             user.user_id, refresh_token_hash=_digest(20), expires_at=100_000
         )
@@ -274,9 +252,7 @@ def test_suspension_blocks_sessions_and_reactivation_never_revives_old_sessions(
 
         assert service.get_session(old.session_id).revoked_at == clock.value
         with pytest.raises(AccountStateError, match="suspended"):
-            service.create_session(
-                user.user_id, refresh_token_hash=_digest(21), expires_at=100_000
-            )
+            service.create_session(user.user_id, refresh_token_hash=_digest(21), expires_at=100_000)
         with pytest.raises(SessionStateError, match="cannot be rotated"):
             service.rotate_session(
                 old.session_id,
@@ -293,9 +269,12 @@ def test_suspension_blocks_sessions_and_reactivation_never_revives_old_sessions(
                 new_refresh_token_hash=_digest(23),
                 new_expires_at=100_000,
             )
-        assert service.create_session(
-            user.user_id, refresh_token_hash=_digest(24), expires_at=100_000
-        ).revoked_at is None
+        assert (
+            service.create_session(
+                user.user_id, refresh_token_hash=_digest(24), expires_at=100_000
+            ).revoked_at
+            is None
+        )
     finally:
         store.close()
 
@@ -303,13 +282,9 @@ def test_suspension_blocks_sessions_and_reactivation_never_revives_old_sessions(
 def test_reused_rotated_token_can_revoke_the_whole_family(tmp_path: Path) -> None:
     _, _, store, service, clock = _open_service(tmp_path)
     try:
-        user = service.provision_user_with_phone(
-            _claim(IdentityProvider.PHONE, "+8613810000030")
-        ).user
+        user = _make_account(service, _claim(IdentityProvider.PHONE, "+8613810000030")).user
         old_hash = _digest(30)
-        old = service.create_session(
-            user.user_id, refresh_token_hash=old_hash, expires_at=100_000
-        )
+        old = service.create_session(user.user_id, refresh_token_hash=old_hash, expires_at=100_000)
         clock.tick()
         current = service.rotate_session(
             old.session_id,
@@ -328,9 +303,7 @@ def test_reused_rotated_token_can_revoke_the_whole_family(tmp_path: Path) -> Non
             BEGIN SELECT RAISE(ABORT, 'test reuse audit failure'); END"""
         )
         with pytest.raises(sqlite3.IntegrityError, match="test reuse audit failure"):
-            service.revoke_session_family(
-                reused.session_family_id, reason="refresh_token_reuse"
-            )
+            service.revoke_session_family(reused.session_family_id, reason="refresh_token_reuse")
         assert store.session_family(current.session_family_id)["revoked_at"] is None
         assert service.get_session(current.session_id).revoked_at is None
         assert not any(
@@ -352,9 +325,7 @@ def test_reused_rotated_token_can_revoke_the_whole_family(tmp_path: Path) -> Non
         assert sum(event.event_type == "session_family_revoked" for event in first_events) == 1
 
         assert (
-            service.revoke_session_family(
-                reused.session_family_id, reason="refresh_token_reuse"
-            )
+            service.revoke_session_family(reused.session_family_id, reason="refresh_token_reuse")
             == 0
         )
         repeated_events = service.list_audit_events(user.user_id)
@@ -367,9 +338,7 @@ def test_reused_rotated_token_can_revoke_the_whole_family(tmp_path: Path) -> Non
 def test_session_expiry_boundary_is_now_greater_than_or_equal(tmp_path: Path) -> None:
     _, _, store, service, clock = _open_service(tmp_path)
     try:
-        user = service.provision_user_with_phone(
-            _claim(IdentityProvider.PHONE, "+8613810000035")
-        ).user
+        user = _make_account(service, _claim(IdentityProvider.PHONE, "+8613810000035")).user
         with pytest.raises(ContractError, match="future"):
             service.create_session(
                 user.user_id, refresh_token_hash=_digest(35), expires_at=clock.value
@@ -390,14 +359,36 @@ def test_session_expiry_boundary_is_now_greater_than_or_equal(tmp_path: Path) ->
         store.close()
 
 
+def test_session_family_absolute_deadline_is_part_of_the_shared_validity_predicate(
+    tmp_path: Path,
+) -> None:
+    _, _, store, service, clock = _open_service(tmp_path)
+    try:
+        user = _make_account(service, _claim(IdentityProvider.PHONE, "+8613810000038")).user
+        session = service.create_session(
+            user.user_id,
+            refresh_token_hash=_digest(380),
+            expires_at=clock.value + SESSION_FAMILY_ABSOLUTE_TTL_MS + 1,
+        )
+        clock.tick(SESSION_FAMILY_ABSOLUTE_TTL_MS)
+        assert not service.session_is_active(session.session_id)
+        assert service.find_active_session_by_refresh_hash(session.refresh_token_hash) is None
+        with pytest.raises(SessionStateError, match="cannot be rotated"):
+            service.rotate_session(
+                session.session_id,
+                new_refresh_token_hash=_digest(381),
+                new_expires_at=clock.value + 1,
+            )
+    finally:
+        store.close()
+
+
 def test_session_validity_has_one_authoritative_four_condition_predicate(
     tmp_path: Path,
 ) -> None:
     _, _, store, service, clock = _open_service(tmp_path)
     try:
-        user = service.provision_user_with_phone(
-            _claim(IdentityProvider.PHONE, "+8613810000036")
-        ).user
+        user = _make_account(service, _claim(IdentityProvider.PHONE, "+8613810000036")).user
         valid = service.create_session(
             user.user_id, refresh_token_hash=_digest(360), expires_at=100_000
         )
@@ -437,8 +428,8 @@ def test_session_validity_has_one_authoritative_four_condition_predicate(
         assert service.find_active_session_by_refresh_hash(expired.refresh_token_hash) is None
         assert not service.session_is_active(expired.session_id)
 
-        suspended_user = service.provision_user_with_phone(
-            _claim(IdentityProvider.PHONE, "+8613810000037")
+        suspended_user = _make_account(
+            service, _claim(IdentityProvider.PHONE, "+8613810000037")
         ).user
         suspended_session = service.create_session(
             suspended_user.user_id,
@@ -474,7 +465,7 @@ def test_active_account_erasure_removes_every_owned_row_and_makes_identities_reu
     _, backups, store, service, clock = _open_service(tmp_path)
     try:
         phone = "+8613810000040"
-        account = service.provision_user_with_phone(_claim(IdentityProvider.PHONE, phone))
+        account = _make_account(service, _claim(IdentityProvider.PHONE, phone))
         service.attach_identity(
             account.user.user_id, _claim(IdentityProvider.APPLE, "apple_subject")
         )
@@ -493,14 +484,19 @@ def test_active_account_erasure_removes_every_owned_row_and_makes_identities_reu
         with pytest.raises(AccountNotFoundError):
             service.get_user(account.user.user_id)
         for table in ACCOUNT_ERASURE_ORDER:
-            assert store.connection.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE user_id=?", (account.user.user_id,)
-            ).fetchone()[0] == 0
+            assert (
+                store.connection.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE user_id=?", (account.user.user_id,)
+                ).fetchone()[0]
+                == 0
+            )
         assert set(backups.glob("*.sqlite3")) == backups_before
         assert service.find_session_by_refresh_hash(_digest(40)) is None
-        assert service.provision_user_with_phone(
-            _claim(IdentityProvider.PHONE, phone)
-        ).phone.provider_subject == phone
+        assert _STACKS[id(store)].reputations.find_by_phone(phone) is not None
+        assert (
+            _make_account(service, _claim(IdentityProvider.PHONE, phone)).phone.provider_subject
+            == phone
+        )
     finally:
         store.close()
 
@@ -517,24 +513,18 @@ def test_reason_codes_are_finite_and_arbitrary_text_is_rejected(tmp_path: Path) 
         "session_limit_eviction",
         "administrative_revoke",
         "logout_all",
+        "password_changed",
+        "password_reset",
+        "phone_changed",
     }
-    assert ADMINISTRATIVE_PHONE_REPLACEMENT_REASONS == {"account_recovery"}
     _, _, store, service, _ = _open_service(tmp_path)
     try:
-        user = service.provision_user_with_phone(
-            _claim(IdentityProvider.PHONE, "+8613810000045")
-        ).user
+        user = _make_account(service, _claim(IdentityProvider.PHONE, "+8613810000045")).user
         session = service.create_session(
             user.user_id, refresh_token_hash=_digest(450), expires_at=100_000
         )
         with pytest.raises(ContractError, match="reason is not allowed"):
             service.revoke_session(session.session_id, reason="+8613812345678")
-        with pytest.raises(ContractError, match="reason is not allowed"):
-            service.administrative_replace_phone(
-                user.user_id,
-                _claim(IdentityProvider.PHONE, "+8613810000046"),
-                reason="operator note with pii",
-            )
     finally:
         store.close()
 
@@ -565,9 +555,7 @@ def test_account_core_rejects_noncanonical_refresh_token_digests(
 ) -> None:
     _, _, store, service, _ = _open_service(tmp_path)
     try:
-        user = service.provision_user_with_phone(
-            _claim(IdentityProvider.PHONE, "+8613810000050")
-        ).user
+        user = _make_account(service, _claim(IdentityProvider.PHONE, "+8613810000050")).user
         with pytest.raises(ContractError, match="digest"):
             service.create_session(
                 user.user_id, refresh_token_hash=invalid_digest, expires_at=100_000
