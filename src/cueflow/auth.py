@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import cast
 
-from cueflow.account import E164_PATTERN
+from cueflow.account import E164_PATTERN, SESSION_FAMILY_ABSOLUTE_TTL_MS, session_is_active
 from cueflow.account_store import AccountStore
 from cueflow.auth_crypto import (
     HmacKeyring,
@@ -40,7 +40,6 @@ def epoch_ms() -> int:
 class AuthPolicy:
     access_ttl_ms: int = 15 * 60 * 1000
     refresh_ttl_ms: int = 30 * 24 * 60 * 60 * 1000
-    family_absolute_ttl_ms: int = 180 * 24 * 60 * 60 * 1000
     sms_code_ttl_ms: int = 5 * 60 * 1000
     grant_ttl_ms: int = 10 * 60 * 1000
     security_event_ttl_ms: int = 30 * 24 * 60 * 60 * 1000
@@ -437,16 +436,30 @@ class AuthService:
         with self.store.transaction() as tx:
             old = tx.execute(
                 """SELECT s.*, f.created_at AS family_created_at, f.revoked_at AS family_revoked_at,
-                    u.status AS user_status
+                    u.status AS user_status, i.phone_reputation_id,
+                    r.status AS phone_status
                 FROM sessions s
                 JOIN session_families f ON f.session_family_id=s.session_family_id
                 JOIN users u ON u.user_id=s.user_id
+                JOIN auth_identities i ON i.user_id=s.user_id
+                    AND i.provider='phone' AND i.status='active'
+                JOIN phone_reputations r ON r.phone_reputation_id=i.phone_reputation_id
                 WHERE s.refresh_token_hash=?""",
                 (digest,),
             ).fetchone()
             if old is None:
                 raise AuthenticationError("refresh token is invalid")
-            if not self._session_row_active(old, now):
+            self.phone_reputations.validate_one(str(old["phone_reputation_id"]), connection=tx)
+            if not session_is_active(
+                session_revoked_at=old["revoked_at"],
+                session_replaced_by_session_id=old["replaced_by_session_id"],
+                session_expires_at=int(old["expires_at"]),
+                family_revoked_at=old["family_revoked_at"],
+                family_created_at=int(old["family_created_at"]),
+                user_status=str(old["user_status"]),
+                phone_status=str(old["phone_status"]),
+                now=now,
+            ):
                 if old["replaced_by_session_id"] is not None:
                     self._revoke_family_tx(
                         tx,
@@ -460,16 +473,6 @@ class AuthService:
                 else:
                     raise AuthenticationError("refresh token is invalid")
             else:
-                phone_row = tx.execute(
-                    """SELECT provider_subject FROM auth_identities
-                    WHERE user_id=? AND provider='phone' AND status='active'""",
-                    (old["user_id"],),
-                ).fetchone()
-                if phone_row is None:
-                    raise AccountStateError("User does not have exactly one active phone")
-                self.phone_reputations.require_normal(
-                    str(phone_row["provider_subject"]), connection=tx
-                )
                 session = self._rotate_login_state_tx(tx, old, now)
                 return session
         if reuse_detected:
@@ -493,24 +496,32 @@ class AuthService:
                 s.replaced_by_session_id AS session_replaced_by_session_id,
                 s.expires_at AS session_expires_at,
                 f.created_at AS family_created_at, f.revoked_at AS family_revoked_at,
-                u.status AS user_status, i.provider_subject
+                u.status AS user_status, i.phone_reputation_id,
+                r.status AS phone_status
             FROM access_tokens a
             JOIN sessions s ON s.session_id=a.session_id
             JOIN session_families f ON f.session_family_id=s.session_family_id
             JOIN users u ON u.user_id=a.user_id
             JOIN auth_identities i ON i.user_id=a.user_id
                 AND i.provider='phone' AND i.status='active'
+            JOIN phone_reputations r ON r.phone_reputation_id=i.phone_reputation_id
             WHERE a.token_hash=?""",
             (digest,),
         ).fetchone()
-        if (
-            row is None
-            or row["revoked_at"] is not None
-            or now >= int(row["expires_at"])
-            or not self._session_row_active(row, now, prefix="session_")
+        if row is None or row["revoked_at"] is not None or now >= int(row["expires_at"]):
+            raise AuthenticationError("access token is invalid")
+        self.phone_reputations.validate_one(str(row["phone_reputation_id"]), connection=tx)
+        if not session_is_active(
+            session_revoked_at=row["session_revoked_at"],
+            session_replaced_by_session_id=row["session_replaced_by_session_id"],
+            session_expires_at=int(row["session_expires_at"]),
+            family_revoked_at=row["family_revoked_at"],
+            family_created_at=int(row["family_created_at"]),
+            user_status=str(row["user_status"]),
+            phone_status=str(row["phone_status"]),
+            now=now,
         ):
             raise AuthenticationError("access token is invalid")
-        self.phone_reputations.require_normal(str(row["provider_subject"]), connection=tx)
         return cast(sqlite3.Row, row)
 
     def change_password(
@@ -932,22 +943,12 @@ class AuthService:
                   AND s.expires_at>?
               )
             ORDER BY f.created_at, f.session_family_id""",
-            (user_id, self.policy.family_absolute_ttl_ms, now, now),
+            (user_id, SESSION_FAMILY_ABSOLUTE_TTL_MS, now, now),
         ).fetchall()
         while len(rows) >= 5:
             family_id = str(rows.pop(0)["session_family_id"])
             self._revoke_family_tx(tx, family_id, user_id, now, "session_limit_eviction")
             _audit(tx, user_id, "session_family_evicted", family_id, None, now)
-
-    def _session_row_active(self, row: sqlite3.Row, now: int, *, prefix: str = "") -> bool:
-        return (
-            row[prefix + "revoked_at"] is None
-            and row[prefix + "replaced_by_session_id"] is None
-            and now < int(row[prefix + "expires_at"])
-            and row["family_revoked_at"] is None
-            and now < int(row["family_created_at"]) + self.policy.family_absolute_ttl_ms
-            and row["user_status"] == "active"
-        )
 
     def _require_effective_user_tx(self, tx: sqlite3.Connection, user_id: str, phone: str) -> None:
         row = self.store.user(user_id, tx)

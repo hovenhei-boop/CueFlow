@@ -123,6 +123,12 @@ Migration 002 对非空 v1 开发库明确拒绝并保留已校验备份；空�
 滑动 Refresh、180 天 Family 绝对上限、reuse 撤销和最多 5 个 active families。数据库只保存
 密码 PHC 与 token HMAC digest，不保存 raw password/token/code。
 
+Session 有效性及 180 天边界只有一份 Account/Auth 共用的权威实现。Phone Reputation service
+构造时自动校验数据库 key ids；正常按手机号查询只尝试 current/compatible stable keys，跨 key
+重复命中会 fail closed。单手机号 deep validation 批量读取并重放该号码自己的事件历史，不扫描
+全体手机号。仅当事务准备创建一条全新 reputation 时，才强制绕过启动缓存再次检查数据库 key
+ids，并在 INSERT 前按 known keys 二次确认，防止新旧进程并存时绕过手机号封禁。
+
 每个正式使用过的手机号拥有长期 Phone Reputation。账户注销删除 User、Identity、Password、
 Session 和 Account Audit，但不会删除稳定假名化手机号、AEAD 加密 E.164 或手机号处罚账本；
 这些记录不是匿名数据。Phone block 是明确公开的业务状态，会阻止认证并撤销现有 Session。
@@ -130,7 +136,9 @@ Session 和 Account Audit，但不会删除稳定假名化手机号、AEAD 加�
 当前 Artifact Schema 为 **12.0.0**，Registry 为 **15**。非当前数据库（包括开发期 Registry 14）拒绝打开且不改写，不提供迁移。
 上述“不迁移”仅适用于可重建的 Workspace Registry；Account schema 独立向前迁移。
 本版提供 SmsProvider 边界和 Starlette ASGI Auth 接口，但不绑定短信厂商或 ASGI Server；仍不
-包含 OAuth callback、支付、RBAC 或分布式 Worker。
+包含 OAuth callback、支付、RBAC 或分布式 Worker。内置 password blocklist 仅有 3 条机制验证用
+seed 数据，不是完整 NIST compromised-password blocklist。`starlette<1` 是有意的兼容上界；
+升级 Starlette major version 或 httpx 2.x 必须重跑 Auth HTTP compatibility tests。
 真实 Provider/TOS 与长媒体发布验收仍须单独通过。
 
 完整边界见 [v0.6.1 Authentication 冻结设计](docs/v0.6.1-phone-password-authentication-design.md)、

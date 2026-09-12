@@ -364,13 +364,24 @@ def test_session_family_absolute_deadline_is_part_of_the_shared_validity_predica
 ) -> None:
     _, _, store, service, clock = _open_service(tmp_path)
     try:
+        clock.value = SESSION_FAMILY_ABSOLUTE_TTL_MS + 10_000
         user = _make_account(service, _claim(IdentityProvider.PHONE, "+8613810000038")).user
         session = service.create_session(
             user.user_id,
             refresh_token_hash=_digest(380),
             expires_at=clock.value + SESSION_FAMILY_ABSOLUTE_TTL_MS + 1,
         )
-        clock.tick(SESSION_FAMILY_ABSOLUTE_TTL_MS)
+        with store.transaction() as tx:
+            tx.execute(
+                "UPDATE session_families SET created_at=? WHERE session_family_id=?",
+                (clock.value - SESSION_FAMILY_ABSOLUTE_TTL_MS + 1, session.session_family_id),
+            )
+        assert service.session_is_active(session.session_id)
+        with store.transaction() as tx:
+            tx.execute(
+                "UPDATE session_families SET created_at=? WHERE session_family_id=?",
+                (clock.value - SESSION_FAMILY_ABSOLUTE_TTL_MS, session.session_family_id),
+            )
         assert not service.session_is_active(session.session_id)
         assert service.find_active_session_by_refresh_hash(session.refresh_token_hash) is None
         with pytest.raises(SessionStateError, match="cannot be rotated"):
@@ -383,7 +394,7 @@ def test_session_family_absolute_deadline_is_part_of_the_shared_validity_predica
         store.close()
 
 
-def test_session_validity_has_one_authoritative_four_condition_predicate(
+def test_session_validity_has_one_authoritative_predicate(
     tmp_path: Path,
 ) -> None:
     _, _, store, service, clock = _open_service(tmp_path)

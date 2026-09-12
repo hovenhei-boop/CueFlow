@@ -261,7 +261,16 @@ class AccountService:
         phone_status = _active_phone_reputation_status(self.store.connection, str(row["user_id"]))
         return (
             _session(row)
-            if _session_row_is_active(row, user, family, phone_status, self._clock())
+            if session_is_active(
+                session_revoked_at=row["revoked_at"],
+                session_replaced_by_session_id=row["replaced_by_session_id"],
+                session_expires_at=int(row["expires_at"]),
+                family_revoked_at=family["revoked_at"],
+                family_created_at=int(family["created_at"]),
+                user_status=str(user["status"]),
+                phone_status=phone_status,
+                now=self._clock(),
+            )
             else None
         )
 
@@ -270,7 +279,16 @@ class AccountService:
         user = self.store.user(str(row["user_id"]))
         family = self.store.session_family(str(row["session_family_id"]))
         phone_status = _active_phone_reputation_status(self.store.connection, str(row["user_id"]))
-        return _session_row_is_active(row, user, family, phone_status, self._clock())
+        return session_is_active(
+            session_revoked_at=row["revoked_at"],
+            session_replaced_by_session_id=row["replaced_by_session_id"],
+            session_expires_at=int(row["expires_at"]),
+            family_revoked_at=family["revoked_at"],
+            family_created_at=int(family["created_at"]),
+            user_status=str(user["status"]),
+            phone_status=phone_status,
+            now=self._clock(),
+        )
 
     def rotate_session(
         self,
@@ -290,7 +308,16 @@ class AccountService:
                 user = self.store.user(str(old["user_id"]), tx)
                 family = self.store.session_family(str(old["session_family_id"]), tx)
                 phone_status = _active_phone_reputation_status(tx, str(old["user_id"]))
-                if not _session_row_is_active(old, user, family, phone_status, now):
+                if not session_is_active(
+                    session_revoked_at=old["revoked_at"],
+                    session_replaced_by_session_id=old["replaced_by_session_id"],
+                    session_expires_at=int(old["expires_at"]),
+                    family_revoked_at=family["revoked_at"],
+                    family_created_at=int(family["created_at"]),
+                    user_status=str(user["status"]),
+                    phone_status=phone_status,
+                    now=now,
+                ):
                     raise SessionStateError("Session cannot be rotated")
                 tx.execute("UPDATE sessions SET revoked_at=? WHERE session_id=?", (now, session_id))
                 tx.execute(
@@ -446,20 +473,26 @@ def _session_by_refresh_hash(
     )
 
 
-def _session_row_is_active(
-    session: sqlite3.Row,
-    user: sqlite3.Row,
-    family: sqlite3.Row,
+def session_is_active(
+    *,
+    session_revoked_at: int | None,
+    session_replaced_by_session_id: str | None,
+    session_expires_at: int,
+    family_revoked_at: int | None,
+    family_created_at: int,
+    user_status: str,
     phone_status: str | None,
     now: int,
 ) -> bool:
+    """Return the sole authoritative v0.6.1 Session validity decision."""
+
     return (
-        session["revoked_at"] is None
-        and session["replaced_by_session_id"] is None
-        and now < int(session["expires_at"])
-        and family["revoked_at"] is None
-        and now < int(family["created_at"]) + SESSION_FAMILY_ABSOLUTE_TTL_MS
-        and user["status"] == UserStatus.ACTIVE.value
+        session_revoked_at is None
+        and session_replaced_by_session_id is None
+        and now < session_expires_at
+        and family_revoked_at is None
+        and now < family_created_at + SESSION_FAMILY_ABSOLUTE_TTL_MS
+        and user_status == UserStatus.ACTIVE.value
         and phone_status == "normal"
     )
 

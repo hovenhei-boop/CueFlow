@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from cueflow.auth_crypto import HmacKeyring, SecretKey
 from cueflow.errors import AccountStateError, PhoneReputationIntegrityError
-from cueflow.phone_reputation import SanctionActor
+from cueflow.phone_reputation import PhoneReputationCrypto, PhoneReputationService, SanctionActor
 from cueflow.sms import SmsPurpose
 from tests.account_helpers import make_auth_stack, make_test_account
 
@@ -247,23 +248,129 @@ def test_aead_tampering_fails_closed_instead_of_looking_like_no_reputation(
         stack.store.close()
 
 
-def test_unknown_stable_lookup_key_fails_closed_instead_of_creating_a_second_record(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("column", "message"),
+    (
+        ("reputation_key_id", "unknown stable lookup key"),
+        ("phone_encryption_key_id", "unknown encryption key"),
+    ),
+)
+def test_service_creation_fails_closed_when_database_references_unknown_key(
+    tmp_path: Path, column: str, message: str
 ) -> None:
     stack = make_auth_stack(tmp_path)
     try:
         phone = "+8613810000205"
         make_test_account(stack, phone)
         with stack.store.transaction() as tx:
-            tx.execute("UPDATE phone_reputations SET reputation_key_id='unknown-key'")
-        with pytest.raises(PhoneReputationIntegrityError, match="unknown stable lookup key"):
-            stack.reputations.find_by_phone(phone)
-        with pytest.raises(PhoneReputationIntegrityError, match="unknown stable lookup key"):
-            with stack.store.transaction() as tx:
-                stack.reputations.ensure_phone_tx(tx, phone, now=stack.clock())
+            tx.execute(f"UPDATE phone_reputations SET {column}='unknown-key'")
+        fresh_crypto = PhoneReputationCrypto(
+            stack.reputations.crypto.reputation_keys,
+            stack.reputations.crypto.encryption_keys,
+        )
+        with pytest.raises(PhoneReputationIntegrityError, match=message):
+            PhoneReputationService(stack.store, fresh_crypto)
         assert (
             stack.store.connection.execute("SELECT COUNT(*) FROM phone_reputations").fetchone()[0]
             == 1
         )
     finally:
+        stack.store.close()
+
+
+def test_keyring_preflight_runs_once_per_database_and_find_uses_only_exact_keys(
+    tmp_path: Path,
+) -> None:
+    stack = make_auth_stack(tmp_path)
+    try:
+        phone = "+8613810000206"
+        make_test_account(stack, phone)
+        fresh_crypto = PhoneReputationCrypto(
+            stack.reputations.crypto.reputation_keys,
+            stack.reputations.crypto.encryption_keys,
+        )
+        statements: list[str] = []
+        stack.store.connection.set_trace_callback(statements.append)
+        first = PhoneReputationService(stack.store, fresh_crypto)
+        PhoneReputationService(stack.store, fresh_crypto)
+        assert sum("SELECT DISTINCT reputation_key_id" in sql for sql in statements) == 1
+
+        statements.clear()
+        assert first.find_by_phone(phone) is not None
+        assert not any("SELECT DISTINCT reputation_key_id" in sql for sql in statements)
+    finally:
+        stack.store.connection.set_trace_callback(None)
+        stack.store.close()
+
+
+def test_find_by_phone_rejects_duplicate_identity_across_compatible_keys(tmp_path: Path) -> None:
+    stack = make_auth_stack(tmp_path)
+    try:
+        phone = "+8613810000207"
+        other_phone = "+8613810000208"
+        make_test_account(stack, phone)
+        make_test_account(stack, other_phone)
+        other_reputation = stack.reputations.find_by_phone(other_phone)
+        assert other_reputation is not None
+
+        previous_key = SecretKey("reputation-previous", b"p" * 32)
+        crypto = PhoneReputationCrypto(
+            HmacKeyring(
+                stack.reputations.crypto.reputation_keys.active,
+                previous=(previous_key,),
+            ),
+            stack.reputations.crypto.encryption_keys,
+        )
+        service = PhoneReputationService(stack.store, crypto)
+        key_id, phone_key = crypto.lookup_key(phone, key_id=previous_key.key_id)
+        encryption_key_id, nonce, ciphertext = crypto.encrypt(
+            other_reputation.phone_reputation_id, phone
+        )
+        with stack.store.transaction() as tx:
+            tx.execute(
+                """UPDATE phone_reputations
+                SET reputation_key_id=?, phone_key=?, phone_encryption_key_id=?,
+                    phone_encryption_nonce=?, encrypted_phone=?
+                WHERE phone_reputation_id=?""",
+                (
+                    key_id,
+                    phone_key,
+                    encryption_key_id,
+                    nonce,
+                    ciphertext,
+                    other_reputation.phone_reputation_id,
+                ),
+            )
+        with pytest.raises(PhoneReputationIntegrityError, match="duplicate stable identities"):
+            service.find_by_phone(phone)
+    finally:
+        stack.store.close()
+
+
+def test_validate_one_bulk_loads_event_details_without_n_plus_one_queries(tmp_path: Path) -> None:
+    stack = make_auth_stack(tmp_path)
+    try:
+        phone = "+8613810000209"
+        user = make_test_account(stack, phone)
+        reputation = stack.reputations.apply_qualifying_ban(
+            user.user_id,
+            operation_id="bulk-validation-ban",
+            actor=SanctionActor("admin", "admin-bulk-validation"),
+            reason_code="terms_violation",
+            now=stack.clock(),
+        )
+        statements: list[str] = []
+        stack.store.connection.set_trace_callback(statements.append)
+        stack.reputations.validate_one(reputation.phone_reputation_id)
+        normalized = [" ".join(sql.split()) for sql in statements]
+        assert sum("FROM phone_sanction_events detail" in sql for sql in normalized) == 1
+        assert sum("FROM phone_status_events detail" in sql for sql in normalized) == 1
+        assert not any(
+            "FROM phone_sanction_events WHERE event_id=" in sql
+            or "FROM phone_status_events WHERE event_id=" in sql
+            or "SELECT generation FROM phone_reputation_event_log WHERE event_id=" in sql
+            for sql in normalized
+        )
+    finally:
+        stack.store.connection.set_trace_callback(None)
         stack.store.close()

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import uuid
 from dataclasses import dataclass, field
 from typing import cast
@@ -24,6 +25,12 @@ from cueflow.errors import (
 
 _E164 = re.compile(r"^\+[1-9][0-9]{1,14}$")
 _AAD_PREFIX = b"cueflow:phone-reputation:v1:"
+
+
+class _KeyringPreflightCache:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.database_files: set[tuple[str, int, int]] = set()
 
 
 @dataclass(frozen=True)
@@ -49,11 +56,21 @@ class AeadKeyring:
                 "Phone Reputation references an unknown encryption key"
             ) from exc
 
+    @property
+    def key_ids(self) -> tuple[str, ...]:
+        return tuple(self._keys)
+
 
 @dataclass(frozen=True)
 class PhoneReputationCrypto:
     reputation_keys: HmacKeyring
     encryption_keys: AeadKeyring
+    _preflight_cache: _KeyringPreflightCache = field(
+        default_factory=_KeyringPreflightCache,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def lookup_key(self, phone: str, *, key_id: str | None = None) -> tuple[str, bytes]:
         _validate_e164(phone)
@@ -124,22 +141,45 @@ class PhoneReputationService:
     def __init__(self, store: AccountStore, crypto: PhoneReputationCrypto) -> None:
         self.store = store
         self.crypto = crypto
+        self._ensure_keyrings_cover_database()
+
+    def _ensure_keyrings_cover_database(self) -> None:
+        try:
+            stat = self.store.path.stat()
+        except OSError as exc:
+            raise PhoneReputationIntegrityError(
+                "Phone Reputation database identity cannot be verified"
+            ) from exc
+        database_file = (str(self.store.path.resolve()), int(stat.st_dev), int(stat.st_ino))
+        cache = self.crypto._preflight_cache
+        with cache.lock:
+            if database_file in cache.database_files:
+                return
+            self._assert_keyrings_cover_database(self.store.connection)
+            cache.database_files.add(database_file)
+
+    def _assert_keyrings_cover_database(self, tx: sqlite3.Connection) -> None:
+        stored_keys = tx.execute(
+            """SELECT DISTINCT reputation_key_id, phone_encryption_key_id
+            FROM phone_reputations"""
+        ).fetchall()
+        lookup_key_ids = set(self.crypto.reputation_keys.key_ids)
+        encryption_key_ids = set(self.crypto.encryption_keys.key_ids)
+        if any(str(row["reputation_key_id"]) not in lookup_key_ids for row in stored_keys):
+            raise PhoneReputationIntegrityError(
+                "Phone Reputation references an unknown stable lookup key"
+            )
+        if any(
+            str(row["phone_encryption_key_id"]) not in encryption_key_ids for row in stored_keys
+        ):
+            raise PhoneReputationIntegrityError(
+                "Phone Reputation references an unknown encryption key"
+            )
 
     def find_by_phone(
         self, phone: str, *, connection: sqlite3.Connection | None = None
     ) -> PhoneReputation | None:
         tx = connection or self.store.connection
-        stored_key_ids = {
-            str(row[0])
-            for row in tx.execute(
-                "SELECT DISTINCT reputation_key_id FROM phone_reputations"
-            ).fetchall()
-        }
-        unknown_key_ids = stored_key_ids - set(self.crypto.reputation_keys.key_ids)
-        if unknown_key_ids:
-            raise PhoneReputationIntegrityError(
-                "Phone Reputation references an unknown stable lookup key"
-            )
         matches: list[sqlite3.Row] = []
         for key_id in self.crypto.reputation_keys.key_ids:
             _, phone_key = self.crypto.lookup_key(phone, key_id=key_id)
@@ -168,6 +208,10 @@ class PhoneReputationService:
         return reputation
 
     def ensure_phone_tx(self, tx: sqlite3.Connection, phone: str, *, now: int) -> PhoneReputation:
+        existing = self.find_by_phone(phone, connection=tx)
+        if existing is not None:
+            return existing
+        self._assert_keyrings_cover_database(tx)
         existing = self.find_by_phone(phone, connection=tx)
         if existing is not None:
             return existing
@@ -656,17 +700,32 @@ class PhoneReputationService:
             WHERE phone_reputation_id=? ORDER BY generation, sequence_no""",
             (phone_reputation_id,),
         ).fetchall()
+        sanction_details = {
+            str(detail["event_id"]): detail
+            for detail in tx.execute(
+                """SELECT detail.* FROM phone_sanction_events detail
+                JOIN phone_reputation_event_log head ON head.event_id=detail.event_id
+                WHERE head.phone_reputation_id=?""",
+                (phone_reputation_id,),
+            ).fetchall()
+        }
+        status_details = {
+            str(detail["event_id"]): detail
+            for detail in tx.execute(
+                """SELECT detail.* FROM phone_status_events detail
+                JOIN phone_reputation_event_log head ON head.event_id=detail.event_id
+                WHERE head.phone_reputation_id=?""",
+                (phone_reputation_id,),
+            ).fetchall()
+        }
+        heads_by_id = {str(head["event_id"]): head for head in heads}
         by_operation: dict[str, list[sqlite3.Row]] = {}
         generation_heads: dict[int, list[sqlite3.Row]] = {}
         for head in heads:
             generation_heads.setdefault(int(head["generation"]), []).append(head)
             by_operation.setdefault(str(head["operation_id"]), []).append(head)
-            sanction = tx.execute(
-                "SELECT * FROM phone_sanction_events WHERE event_id=?", (head["event_id"],)
-            ).fetchone()
-            status = tx.execute(
-                "SELECT * FROM phone_status_events WHERE event_id=?", (head["event_id"],)
-            ).fetchone()
+            sanction = sanction_details.get(str(head["event_id"]))
+            status = status_details.get(str(head["event_id"]))
             if head["stream_type"] == "sanction":
                 valid_pair = sanction is not None and status is None
             else:
@@ -719,10 +778,7 @@ class PhoneReputationService:
             seen_overturned: set[str] = set()
             for index, head in enumerate(items):
                 if head["stream_type"] == "sanction":
-                    detail = tx.execute(
-                        "SELECT * FROM phone_sanction_events WHERE event_id=?",
-                        (head["event_id"],),
-                    ).fetchone()
+                    detail = sanction_details.get(str(head["event_id"]))
                     assert detail is not None
                     event_type = str(detail["event_type"])
                     if event_type == "generation_started":
@@ -736,10 +792,7 @@ class PhoneReputationService:
                         seen_applied.add(str(head["event_id"]))
                     else:
                         target = str(detail["target_event_id"])
-                        target_head = tx.execute(
-                            "SELECT generation FROM phone_reputation_event_log WHERE event_id=?",
-                            (target,),
-                        ).fetchone()
+                        target_head = heads_by_id.get(target)
                         if (
                             target not in seen_applied
                             or target in seen_overturned
@@ -757,9 +810,7 @@ class PhoneReputationService:
                             "Phone Reputation sanction count became negative"
                         )
                 else:
-                    detail = tx.execute(
-                        "SELECT * FROM phone_status_events WHERE event_id=?", (head["event_id"],)
-                    ).fetchone()
+                    detail = status_details.get(str(head["event_id"]))
                     assert detail is not None
                     event_type = str(detail["event_type"])
                     if event_type == "generation_started":

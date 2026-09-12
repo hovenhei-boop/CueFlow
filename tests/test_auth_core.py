@@ -4,12 +4,16 @@ from pathlib import Path
 
 import pytest
 
+from cueflow.account import SESSION_FAMILY_ABSOLUTE_TTL_MS
+from cueflow.account_store import AccountStore
 from cueflow.auth import PhoneContinueKind, VerificationGrant
 from cueflow.auth_crypto import (
     FAST_TEST_ARGON2_CONFIG,
     PRODUCTION_ARGON2_CONFIG,
+    HmacKeyring,
     PasswordHashService,
     PasswordVerification,
+    SecretKey,
 )
 from cueflow.errors import (
     AuthenticationError,
@@ -17,9 +21,14 @@ from cueflow.errors import (
     ContractError,
     IdentityConflictError,
     PhoneBlockedError,
+    PhoneReputationIntegrityError,
     SmsProviderUnavailableError,
 )
-from cueflow.phone_reputation import SanctionActor
+from cueflow.phone_reputation import (
+    PhoneReputationCrypto,
+    PhoneReputationService,
+    SanctionActor,
+)
 from cueflow.sms import SmsPurpose
 from tests.account_helpers import Clock, make_auth_stack, make_test_account
 
@@ -500,8 +509,73 @@ def test_final_registration_transaction_rechecks_phone_block_status(tmp_path: Pa
         stack.store.close()
 
 
+def test_registration_fails_closed_when_another_process_writes_blocked_phone_with_new_key(
+    tmp_path: Path,
+) -> None:
+    stack = make_auth_stack(tmp_path)
+    second_store: AccountStore | None = None
+    try:
+        phone = "+8613810000112"
+        grant = _registration_grant(stack, phone)
+
+        second_store = AccountStore(stack.database)
+        new_lookup_key = SecretKey("reputation-new", b"n" * 32)
+        second_crypto = PhoneReputationCrypto(
+            HmacKeyring(
+                new_lookup_key,
+                previous=(stack.reputations.crypto.reputation_keys.active,),
+            ),
+            stack.reputations.crypto.encryption_keys,
+        )
+        second_reputations = PhoneReputationService(second_store, second_crypto)
+        with second_store.transaction() as tx:
+            second_reputations.ensure_phone_tx(tx, phone, now=stack.clock())
+        blocked = second_reputations.administrative_block_phone(
+            phone,
+            operation_id="new-process-block",
+            actor=SanctionActor("admin", "admin-key-rotation"),
+            reason_code="manual_abuse_review",
+            now=stack.clock(),
+        )
+        assert blocked.status == "blocked"
+
+        with pytest.raises(PhoneReputationIntegrityError, match="unknown stable lookup key"):
+            stack.auth.complete_registration(phone=phone, grant=grant, password=PASSWORD)
+
+        assert (
+            stack.store.connection.execute("SELECT COUNT(*) FROM phone_reputations").fetchone()[0]
+            == 1
+        )
+        stored = stack.store.connection.execute(
+            "SELECT reputation_key_id, status FROM phone_reputations"
+        ).fetchone()
+        assert tuple(stored) == (new_lookup_key.key_id, "blocked")
+        for table in (
+            "users",
+            "auth_identities",
+            "password_credentials",
+            "session_families",
+            "sessions",
+            "access_tokens",
+        ):
+            assert (
+                stack.store.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+            )
+        assert (
+            stack.store.connection.execute(
+                "SELECT consumed_at FROM phone_verification_grants WHERE grant_id=?",
+                (grant.grant_id,),
+            ).fetchone()[0]
+            is None
+        )
+    finally:
+        if second_store is not None:
+            second_store.close()
+        stack.store.close()
+
+
 def test_refresh_rotation_and_family_absolute_deadline(tmp_path: Path) -> None:
-    clock = Clock()
+    clock = Clock(SESSION_FAMILY_ABSOLUTE_TTL_MS + 10_000)
     stack = make_auth_stack(tmp_path, clock=clock)
     try:
         phone = "+8613810000110"
@@ -526,7 +600,17 @@ def test_refresh_rotation_and_family_absolute_deadline(tmp_path: Path) -> None:
             client_id="deadline-client",
             ip_address="203.0.113.8",
         )
-        clock.tick(stack.auth.policy.family_absolute_ttl_ms)
+        with stack.store.transaction() as tx:
+            tx.execute(
+                "UPDATE session_families SET created_at=? WHERE session_family_id=?",
+                (clock.value - SESSION_FAMILY_ABSOLUTE_TTL_MS + 1, fresh.session_family_id),
+            )
+        assert stack.auth.authenticate_access_token(fresh.access_token) == fresh.user_id
+        with stack.store.transaction() as tx:
+            tx.execute(
+                "UPDATE session_families SET created_at=? WHERE session_family_id=?",
+                (clock.value - SESSION_FAMILY_ABSOLUTE_TTL_MS, fresh.session_family_id),
+            )
         with pytest.raises(AuthenticationError):
             stack.auth.refresh_session(fresh.refresh_token)
         with pytest.raises(AuthenticationError):
