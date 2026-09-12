@@ -11,15 +11,13 @@ from cueflow.sms import SmsPurpose
 from tests.account_helpers import make_auth_stack, make_test_account
 
 
-def _erase_banned_account(stack: object, user_id: str, phone: str) -> None:
+def _erase_banned_account(stack: object, phone: str) -> None:
     auth = stack.auth  # type: ignore[attr-defined]
     sms = stack.sms  # type: ignore[attr-defined]
-    receipt = auth.request_phone_code(
-        phone,
-        purpose=SmsPurpose.ACCOUNT_ERASURE,
+    receipt = auth.request_account_erasure_code(
+        phone=phone,
         client_id="erasure-client",
         ip_address="203.0.113.20",
-        user_id=user_id,
     )
     grant = auth.verify_phone_code(
         challenge_id=receipt.challenge_id,
@@ -27,7 +25,7 @@ def _erase_banned_account(stack: object, user_id: str, phone: str) -> None:
         code=sms.last_code(),
         purpose=SmsPurpose.ACCOUNT_ERASURE,
     )
-    auth.erase_qualifying_banned_account(user_id=user_id, phone=phone, grant=grant)
+    auth.erase_qualifying_banned_account(phone=phone, grant=grant)
 
 
 def test_three_distinct_accounts_block_phone_and_reputation_survives_each_erasure(
@@ -67,7 +65,7 @@ def test_three_distinct_accounts_block_phone_and_reputation_survives_each_erasur
                     reason_code="terms_violation",
                     now=stack.clock(),
                 )
-            _erase_banned_account(stack, user.user_id, phone)
+            _erase_banned_account(stack, phone)
             assert (
                 stack.store.connection.execute(
                     "SELECT COUNT(*) FROM phone_reputations WHERE phone_reputation_id=?",
@@ -100,7 +98,7 @@ def test_unblock_preserves_count_and_next_distinct_ban_blocks_again(tmp_path: Pa
                 reason_code="terms_violation",
                 now=stack.clock(),
             )
-            _erase_banned_account(stack, user.user_id, phone)
+            _erase_banned_account(stack, phone)
         unblocked = stack.reputations.administrative_unblock_phone(
             phone,
             operation_id="unblock-1",

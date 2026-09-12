@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cueflow"
-version = "0.6.0"
-description = "Content-addressed subtitle engine with an account core"
+version = "0.6.1"
+description = "Content-addressed subtitle engine with phone and password authentication"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -13,6 +13,7 @@ dependencies = [
   "cryptography>=43,<47",
   "httpx>=0.27,<1",
   "rfc8785>=0.1,<1",
+  "starlette>=0.47,<1",
 ]
 
 [project.optional-dependencies]

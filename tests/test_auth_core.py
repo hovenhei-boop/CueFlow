@@ -9,6 +9,7 @@ from cueflow.auth_crypto import (
     FAST_TEST_ARGON2_CONFIG,
     PRODUCTION_ARGON2_CONFIG,
     PasswordHashService,
+    PasswordVerification,
 )
 from cueflow.errors import (
     AuthenticationError,
@@ -229,6 +230,31 @@ def test_password_failures_are_generic_and_progressively_rate_limited(tmp_path: 
             ).fetchone()[0]
             == stack.auth.policy.password_phone_limit
         )
+    finally:
+        stack.store.close()
+
+
+def test_unknown_phone_password_login_executes_dummy_argon_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stack = make_auth_stack(tmp_path)
+    calls: list[str | None] = []
+    original = stack.hasher.verify_password_or_dummy
+
+    def recording_verify(encoded_hash: str | None, password: str) -> PasswordVerification:
+        calls.append(encoded_hash)
+        return original(encoded_hash, password)
+
+    monkeypatch.setattr(stack.hasher, "verify_password_or_dummy", recording_verify)
+    try:
+        with pytest.raises(AuthenticationError, match="phone or password"):
+            stack.auth.login_with_password(
+                phone="+8613810000199",
+                password="an unknown password value",
+                client_id="unknown-phone-client",
+                ip_address="203.0.113.99",
+            )
+        assert calls == [None]
     finally:
         stack.store.close()
 

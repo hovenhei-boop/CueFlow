@@ -80,6 +80,7 @@ class PasswordHashService:
             salt_len=config.salt_len,
             type=Type.ID,
         )
+        self._dummy_hash = self._hasher.hash("cueflow dummy credential for constant work")
 
     def normalize_and_validate(self, password: str) -> str:
         normalized = unicodedata.normalize("NFC", password)
@@ -106,6 +107,14 @@ class PasswordHashService:
             self._hasher.hash(normalized) if self._hasher.check_needs_rehash(encoded_hash) else None
         )
         return PasswordVerification(True, replacement)
+
+    def verify_password_or_dummy(
+        self, encoded_hash: str | None, password: str
+    ) -> PasswordVerification:
+        if encoded_hash is None:
+            self.verify_password(self._dummy_hash, password)
+            return PasswordVerification(False)
+        return self.verify_password(encoded_hash, password)
 
 
 @dataclass(frozen=True)

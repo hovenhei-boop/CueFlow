@@ -381,17 +381,10 @@ class AuthService:
                 WHERE i.provider='phone' AND i.provider_subject=? AND i.status='active'""",
                 (phone,),
             ).fetchone()
-            verification = (
-                None
-                if row is None
-                else self.password_hasher.verify_password(str(row["password_hash"]), password)
+            verification = self.password_hasher.verify_password_or_dummy(
+                None if row is None else str(row["password_hash"]), password
             )
-            if (
-                row is None
-                or verification is None
-                or not verification.valid
-                or row["status"] != "active"
-            ):
+            if row is None or not verification.valid or row["status"] != "active":
                 for bucket_type, key_id, bucket_key, limit in (
                     ("phone", phone_key_id, phone_key, self.policy.password_phone_limit),
                     ("client", client_key_id, client_key, self.policy.password_client_limit),
@@ -687,14 +680,42 @@ class AuthService:
             self._revoke_all_tx(tx, user_id, now, "logout_all")
             _audit(tx, user_id, "all_sessions_revoked", None, "logout_all", now)
 
-    def erase_qualifying_banned_account(
-        self, *, user_id: str, phone: str, grant: VerificationGrant
-    ) -> None:
+    def request_account_erasure_code(
+        self,
+        *,
+        phone: str,
+        client_id: str,
+        ip_address: str,
+    ) -> SmsChallengeReceipt:
+        _validate_phone(phone)
+        row = self.store.connection.execute(
+            """SELECT u.user_id FROM users u
+            JOIN auth_identities i ON i.user_id=u.user_id
+                AND i.provider='phone' AND i.status='active'
+            JOIN account_qualifying_bans b ON b.user_id=u.user_id
+                AND b.overturned_at IS NULL
+            WHERE i.provider_subject=? AND u.status='suspended'""",
+            (phone,),
+        ).fetchone()
+        if row is None:
+            raise AuthenticationError("account is not eligible for dedicated erasure")
+        return self.request_phone_code(
+            phone,
+            purpose=SmsPurpose.ACCOUNT_ERASURE,
+            client_id=client_id,
+            ip_address=ip_address,
+            user_id=str(row["user_id"]),
+        )
+
+    def erase_qualifying_banned_account(self, *, phone: str, grant: VerificationGrant) -> None:
         if grant.purpose is not SmsPurpose.ACCOUNT_ERASURE:
             raise AuthenticationError("account erasure grant is invalid or expired")
         now = self._clock()
         with self.store.transaction() as tx:
-            self._verify_grant_tx(tx, grant, phone, now, user_id=user_id)
+            grant_row = self._verify_grant_tx(tx, grant, phone, now)
+            if grant_row["user_id"] is None:
+                raise AuthenticationError("account erasure grant is invalid or expired")
+            user_id = str(grant_row["user_id"])
             user = self.store.user(user_id, tx)
             if (
                 user["status"] != "suspended"
@@ -805,6 +826,7 @@ class AuthService:
             row["consumed_at"] is None
             and now < int(row["expires_at"])
             and row["purpose"] == grant.purpose.value
+            and int(row["expires_at"]) == grant.expires_at
             and row["phone_key_id"] == phone_key_id
             and row["grant_key_id"] == key_id
             and hmac.compare_digest(bytes(row["phone_key"]), phone_key)

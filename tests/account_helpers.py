@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -100,6 +101,25 @@ def make_auth_stack(tmp_path: Path, *, clock: Clock | None = None) -> AuthStack:
         sms,
         chosen_clock,
     )
+
+
+def make_request_auth_service_factory(stack: AuthStack) -> Callable[[], AuthService]:
+    """Return request-scoped AuthService instances with independent SQLite connections."""
+
+    def factory() -> AuthService:
+        store = AccountStore(stack.database)
+        reputations = PhoneReputationService(store, stack.reputations.crypto)
+        return AuthService(
+            store,
+            password_hasher=stack.hasher,
+            secrets=stack.auth.secrets,
+            sms_provider=stack.sms,
+            phone_reputations=reputations,
+            clock=stack.clock,
+            policy=stack.auth.policy,
+        )
+
+    return factory
 
 
 def make_test_account(
