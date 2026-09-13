@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cueflow"
-version = "0.6.1"
+version = "0.6.2"
 description = "Content-addressed subtitle engine with phone and password authentication"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,6 +21,12 @@ cloud = [
   "openai>=2,<3",
   "tos>=2.9,<3",
 ]
+trial = [
+  "openai>=2,<3",
+  "python-multipart>=0.0.32,<1",
+  "tos>=2.9,<3",
+  "uvicorn>=0.52,<1",
+]
 dev = [
   "build>=1.2,<2",
   "mypy>=1.15,<2",
@@ -30,6 +36,7 @@ dev = [
 
 [project.scripts]
 cueflow = "cueflow.cli:main"
+cueflow-trial = "cueflow.trial_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -38,7 +45,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-cueflow = ["py.typed", "prompts/*.txt"]
+cueflow = ["py.typed", "prompts/*.txt", "static/trial/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

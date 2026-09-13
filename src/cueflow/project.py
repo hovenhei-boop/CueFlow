@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
-from typing import Any, ParamSpec, TypeVar
+from typing import Any, ParamSpec, Protocol, TypeVar
 
 from cueflow.artifact_store import ArtifactPublisher, ArtifactStore
 from cueflow.errors import ContractError, IntegrityError, SourceMissingError
@@ -15,6 +15,15 @@ from cueflow.schema import ArtifactEnvelope, utc_now
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+
+class RunExecutionControl(Protocol):
+    def before_invocation(self, run_id: str, operation: str) -> None: ...
+
+
+class AllowAllExecutionControl:
+    def before_invocation(self, run_id: str, operation: str) -> None:
+        del run_id, operation
 
 
 def single_writer(function: Callable[P, R]) -> Callable[P, R]:
@@ -63,6 +72,7 @@ class RunContext:
     registry: Registry
     store: ArtifactStore
     run_id: str
+    execution_control: RunExecutionControl = AllowAllExecutionControl()
 
     @property
     def publisher(self) -> ArtifactPublisher:

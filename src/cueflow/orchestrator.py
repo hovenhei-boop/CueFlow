@@ -94,6 +94,7 @@ class ProviderFactories:
     qwen_correction: CorrectionFactory = QwenCorrectionProvider
     kimi_correction: CorrectionFactory = KimiCorrectionProvider
     ata: AtaFactory = VolcengineAtaProvider
+    result_media: MediaStoreFactory | None = None
 
     def __post_init__(self) -> None:
         environment = dict(os.environ)
@@ -109,6 +110,8 @@ class ProviderFactories:
                     return chosen(environment=environment)
 
                 object.__setattr__(self, name, factory)
+        if self.result_media is None:
+            object.__setattr__(self, "result_media", self.media)
 
 
 def _config_hash() -> str:
@@ -172,6 +175,7 @@ def run_project(
     qwen_correction_factory: CorrectionFactory | None = None,
     kimi_correction_factory: CorrectionFactory | None = None,
     ata_factory: AtaFactory | None = None,
+    result_media_store_factory: MediaStoreFactory | None = None,
 ) -> dict[str, Any]:
     context.registry.recover_running_source_runs(context.run_id)
     run_id = _initialize_inputs(context, media_path, references, keywords)
@@ -183,6 +187,7 @@ def run_project(
         qwen_correction_factory or QwenCorrectionProvider,
         kimi_correction_factory or KimiCorrectionProvider,
         ata_factory or VolcengineAtaProvider,
+        result_media_store_factory,
     )
     return _execute(context, run_id, factories, runtime=runtime)
 
@@ -226,6 +231,7 @@ def retry_run(
     qwen_correction_factory: CorrectionFactory | None = None,
     kimi_correction_factory: CorrectionFactory | None = None,
     ata_factory: AtaFactory | None = None,
+    result_media_store_factory: MediaStoreFactory | None = None,
 ) -> dict[str, Any]:
     from cueflow.lifecycle import begin_retry
 
@@ -238,6 +244,7 @@ def retry_run(
         doubao_asr_factory or DoubaoFileAsrProvider, glm_selection_factory or GlmSelectionProvider,
         qwen_correction_factory or QwenCorrectionProvider,
         kimi_correction_factory or KimiCorrectionProvider, ata_factory or VolcengineAtaProvider,
+        result_media_store_factory,
     ), runtime=runtime)
 
 
@@ -254,6 +261,7 @@ def resume_run(
     qwen_correction_factory: CorrectionFactory | None = None,
     kimi_correction_factory: CorrectionFactory | None = None,
     ata_factory: AtaFactory | None = None,
+    result_media_store_factory: MediaStoreFactory | None = None,
 ) -> dict[str, Any]:
     context.registry.recover_running_source_runs(context.run_id)
     if run_id == context.run_id and context.registry.run(run_id)["status"] == "succeeded":
@@ -272,6 +280,7 @@ def resume_run(
             qwen_correction_factory or QwenCorrectionProvider,
             kimi_correction_factory or KimiCorrectionProvider,
             ata_factory or VolcengineAtaProvider,
+            result_media_store_factory,
         ),
         runtime=runtime,
     )
@@ -289,6 +298,7 @@ def retry_invocation(
     qwen_correction_factory: CorrectionFactory | None = None,
     kimi_correction_factory: CorrectionFactory | None = None,
     ata_factory: AtaFactory | None = None,
+    result_media_store_factory: MediaStoreFactory | None = None,
 ) -> dict[str, Any]:
     context.registry.recover_running_source_runs(context.run_id)
     row = context.registry.invocation(invocation_id)
@@ -321,6 +331,7 @@ def retry_invocation(
             qwen_correction_factory or QwenCorrectionProvider,
             kimi_correction_factory or KimiCorrectionProvider,
             ata_factory or VolcengineAtaProvider,
+            result_media_store_factory,
         ),
         retry_of=invocation_id,
     )
@@ -520,7 +531,8 @@ def _execute(
         progress(context, "export")
         result = _publish_downstream(context, run_id, media, transcript, ata_response)
         check_cancellation(context)
-        return {**result, **publish_result(context, factories.media, Path(result["output_path"]))}
+        result_media = factories.result_media or factories.media
+        return {**result, **publish_result(context, result_media, Path(result["output_path"]))}
     except BaseException as exc:
         _fail_run(context, run_id, exc)
         publish_terminal_snapshot(context, factories.media)
@@ -852,6 +864,7 @@ def resolve_review(
     expected_review_queue_artifact_id: str,
     ata_factory: AtaFactory | None = None,
     media_store_factory: MediaStoreFactory | None = None,
+    result_media_store_factory: MediaStoreFactory | None = None,
 ) -> dict[str, Any]:
     context.registry.recover_running_source_runs(context.run_id)
     _check_run(context, run_id)
@@ -941,6 +954,7 @@ def resolve_review(
         ProviderFactories(
             media=media_store_factory or TosMediaObjectStore,
             ata=ata_factory or VolcengineAtaProvider,
+            result_media=result_media_store_factory,
         ),
     )
 
@@ -1372,15 +1386,20 @@ def _provider_producer(
 
 
 def _fail_run(context: RunContext, run_id: str, exc: BaseException) -> None:
+    from cueflow.errors import TrialExecutionStopped
     from cueflow.lifecycle import commit_result, result_snapshot
 
     try:
         row = context.registry.run(run_id)
         if row["status"] not in {"succeeded", "needs_review"}:
+            if isinstance(exc, TrialExecutionStopped):
+                status = "interrupted"
+            elif isinstance(exc, (KeyboardInterrupt, CancelledError)):
+                status = "cancelled"
+            else:
+                status = "failed"
             context.registry.set_run_status(
-                run_id,
-                "cancelled" if isinstance(exc, (KeyboardInterrupt, CancelledError)) else "failed",
-                error_message=str(exc) or type(exc).__name__,
+                run_id, status, error_message=str(exc) or type(exc).__name__
             )
             result = result_snapshot(context, committed=False)
             result["error"] = {

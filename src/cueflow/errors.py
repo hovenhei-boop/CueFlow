@@ -52,6 +52,31 @@ class SrtSerializationError(CueFlowError):
     """ATA values cannot be represented by the SRT serializer."""
 
 
+class TrialError(CueFlowError):
+    """Base error for anonymous Trial operation."""
+
+
+class TrialExecutionStopped(TrialError):
+    """Trial control stopped a Run before a new Provider invocation was created."""
+
+
+class TrialAdmissionError(TrialError):
+    """A Trial request was rejected before execution began."""
+
+    def __init__(self, message: str, *, reason: str, status_code: int) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.status_code = status_code
+
+
+class TrialNotFoundError(TrialError):
+    """A Trial resource is absent or not owned by the current visitor."""
+
+
+class TrialStoreError(TrialError):
+    """The dedicated Trial database is absent, outdated, or inconsistent."""
+
+
 class AccountError(CueFlowError):
     """Base error for the product-level Account Core."""
 

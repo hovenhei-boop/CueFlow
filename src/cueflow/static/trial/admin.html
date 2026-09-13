@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>CueFlow Trial · 运营台</title>
+  <link rel="stylesheet" href="/trial/static/styles.css">
+  <script src="/trial/static/admin.js" defer></script>
+</head>
+<body class="admin-body">
+  <header class="site-header admin-header"><a class="brand" href="/trial"><span class="brand-mark">C</span><span>CueFlow</span></a><span class="status-chip">Trial Operations</span></header>
+  <main class="admin-main">
+    <section id="operator-gate" class="operator-gate">
+      <p class="eyebrow">Operator access</p><h1>试运营控制台</h1>
+      <p>Bearer 只保存在当前浏览器标签页，不写入 Cookie。</p>
+      <form id="operator-form"><label for="operator-secret">Operator bearer</label><input id="operator-secret" type="password" autocomplete="off" required><button class="primary-button" type="submit">进入控制台</button><p id="operator-error" class="form-status error" role="alert"></p></form>
+    </section>
+
+    <div id="dashboard" class="dashboard" hidden>
+      <div class="dashboard-title"><div><p class="eyebrow">Anonymous Trial · Live</p><h1>运营概览</h1><p id="updated-at">尚未刷新</p></div><button id="refresh-dashboard" class="secondary-button">刷新数据</button></div>
+      <section class="metric-grid" aria-label="关键指标">
+        <article><p>当前在线</p><strong data-metric="online_now">—</strong><span>近 5 分钟 Cookie UV</span></article>
+        <article><p>今日访客</p><strong data-metric="today_cookie_uv">—</strong><span>新增 <b data-metric="new_visitors_today">—</b> · 回访 <b data-metric="returning_visitors_today">—</b></span></article>
+        <article><p>今日运行</p><strong data-metric="today_user_runs">—</strong><span><b data-metric="today_audio_minutes">—</b> 音频分钟</span></article>
+        <article><p>实验成功率</p><strong data-percent="success_rate">—</strong><span>分母 <b data-metric="quality_denominator">—</b>，不含主动停止</span></article>
+        <article class="accent-metric"><p>今日已计算 API 成本</p><strong data-money="today_calculated_cost_micros">—</strong><span>不等同 Provider 最终发票</span></article>
+        <article><p>活动预算占位</p><strong data-money="active_budget_occupancy_micros">—</strong><span>未知估算 <b data-money="estimated_unknown_cost_micros">—</b></span></article>
+      </section>
+
+      <section class="admin-panels">
+        <article class="control-panel"><div class="section-heading"><div><p class="step">控制</p><h2>服务与预算</h2></div><span id="service-state" class="job-status">—</span></div>
+          <label for="control-reason">操作原因</label><input id="control-reason" placeholder="必填，会进入 append-only 审计">
+          <div class="button-row"><button id="pause-service" class="danger-button">暂停新任务</button><button id="resume-service" class="secondary-button">恢复服务</button></div>
+          <label for="budget-yuan">当日预算覆盖（元）</label><div class="inline-form"><input id="budget-yuan" type="number" min="0.01" step="0.01"><button id="set-budget" class="secondary-button">设置</button><button id="clear-budget" class="text-button">清除覆盖</button></div>
+          <p id="control-status" class="form-status" role="status"></p>
+        </article>
+        <article class="quality-panel"><div class="section-heading"><div><p class="step">质量</p><h2>处理与费用样本</h2></div></div>
+          <dl><div><dt>处理耗时 P50 / P95</dt><dd><span data-duration="processing_ms_p50">—</span> / <span data-duration="processing_ms_p95">—</span></dd></div><div><dt>成本覆盖率</dt><dd data-percent="cost_coverage">—</dd></div><div><dt>单任务成本 P50 / P95</dt><dd><span data-money="cost_per_job_p50_micros">—</span> / <span data-money="cost_per_job_p95_micros">—</span></dd></div><div><dt>第二活跃日比例</dt><dd data-percent="second_active_day_rate">—</dd></div><div><dt>历史在线峰值</dt><dd data-metric="peak_online">—</dd></div></dl>
+        </article>
+      </section>
+
+      <section class="request-panel"><div class="section-heading"><div><p class="step">最近</p><h2>请求记录</h2></div></div><div class="table-wrap"><table><thead><tr><th>时间</th><th>任务</th><th>动作</th><th>状态</th><th>音频</th><th>成本质量</th></tr></thead><tbody id="request-rows"></tbody></table></div></section>
+    </div>
+  </main>
+</body>
+</html>

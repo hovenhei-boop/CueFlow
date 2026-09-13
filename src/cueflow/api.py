@@ -6,7 +6,7 @@ from typing import Any
 
 from cueflow.artifact_store import ArtifactStore
 from cueflow.config import RuntimeConfig
-from cueflow.errors import CancelledError, ContractError
+from cueflow.errors import CancelledError, ContractError, TrialExecutionStopped
 from cueflow.job_inputs import ReferenceSpec
 from cueflow.lifecycle import request_cancel, result_snapshot
 from cueflow.orchestrator import (
@@ -16,7 +16,7 @@ from cueflow.orchestrator import (
     retry_invocation,
     retry_run,
 )
-from cueflow.project import RunContext
+from cueflow.project import AllowAllExecutionControl, RunContext, RunExecutionControl
 from cueflow.publication import project_result
 from cueflow.registry import Registry
 
@@ -24,9 +24,12 @@ from cueflow.registry import Registry
 class Workspace:
     """One local Registry, optional Projects, explicit independent Run directories."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self, root: Path, *, execution_control: RunExecutionControl | None = None
+    ) -> None:
         self.root = root.resolve()
         self.registry = Registry(self.root / ".cueflow" / "registry.sqlite3")
+        self.execution_control = execution_control or AllowAllExecutionControl()
 
     def close(self) -> None:
         self.registry.close()
@@ -47,7 +50,9 @@ class Workspace:
     def context(self, run_id: str) -> RunContext:
         self.registry.run(run_id)
         root = self.root / "runs" / run_id
-        context = RunContext(root, self.registry, ArtifactStore(root), run_id)
+        context = RunContext(
+            root, self.registry, ArtifactStore(root), run_id, self.execution_control
+        )
         if not (root / ".cueflow" / "execution.json").exists():
             context._write_locator()
         return context
@@ -101,10 +106,14 @@ class Workspace:
         context = self.context(run_id)
         try:
             resume_run(context, run_id, runtime=runtime, **_arguments(factories))
-        except (Exception, KeyboardInterrupt):
+        except (Exception, KeyboardInterrupt) as exc:
             # The executor persists a failure. A lock/contract rejection must not change a live Run.
-            if self.registry.run(run_id)["status"] not in {"failed", "cancelled"}:
+            if self.registry.run(run_id)["status"] not in {
+                "failed", "cancelled", "interrupted"
+            }:
                 raise
+            if isinstance(exc, TrialExecutionStopped):
+                return result_snapshot(context)
         return result_snapshot(context)
 
     def retry_run(
@@ -162,4 +171,5 @@ def _arguments(factories: ProviderFactories | None) -> dict[str, Any]:
         "qwen_correction_factory": factories.qwen_correction,
         "kimi_correction_factory": factories.kimi_correction,
         "ata_factory": factories.ata,
+        "result_media_store_factory": factories.result_media,
     }

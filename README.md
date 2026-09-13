@@ -1,7 +1,7 @@
 # CueFlow
 
-CueFlow v0.6.1 在 v0.5.4 字幕主链上加入完整 Phone + Password Authentication；字幕算法与
-Artifact ID 保持不变。
+CueFlow v0.6.2 在独立 `trial-operation` 分支加入一个月匿名免费试运营层；v0.6.1 的
+Phone + Password Authentication 与 v0.5.4 字幕算法、Artifact ID 保持不变。
 字幕主链从双路 ASR 恢复逐字稿，再由火山 ATA 对齐并输出 SRT。
 Qwen ASR 是冻结 Base，豆包 ASR 是独立 Peer。千问与 Kimi 分别返回完整纠错文稿；
 本地接受一致修改和单路修改，仅将两路修改不同的区间交给 GLM 在已有候选中选择。
@@ -100,6 +100,46 @@ Python 接口见 `cueflow.api.Workspace`。`run()` 是同步便捷入口；需�
 `get_result(run_id, execution_round=N)` 可读取历史轮次，`events` 命令可读取持久进度事件。
 取消是协作式停止，不保证撤销远端任务或免除费用。未知 usage 始终为 null。
 
+## Anonymous Trial 入口
+
+试运营 Web 服务使用独立可选依赖；纯 Core/CLI 安装不会带入 ASGI Server 或 multipart
+解析器：
+
+```powershell
+python -m pip install -e ".[trial,dev]"
+cueflow-trial init D:\cueflow-trial\trial.sqlite3
+cueflow-trial check
+cueflow-trial serve --host 127.0.0.1 --port 8000
+```
+
+`cueflow[trial]` 包含 Trial 运行所需的 Uvicorn、multipart、OpenAI-compatible SDK 和 TOS
+SDK。若未安装该 extra，`cueflow-trial serve` 会明确提示安装 `cueflow[trial]`，不会在纯 Core
+安装中隐式增加服务端依赖。Trial 只支持单 Uvicorn worker；全局并发、SQLite 原子准入和
+进程内执行器均以这一部署边界为前提。
+
+启动前必须注入：
+
+- `TRIAL_DATABASE_PATH`、`TRIAL_WORK_ROOT`、`TRIAL_PUBLIC_ORIGIN`；
+- 至少 32 字符的 `TRIAL_IP_HMAC_SECRET`、`TRIAL_FINGERPRINT_HMAC_SECRET`、
+  `TRIAL_OPERATOR_SECRET`；
+- `TRIAL_PRICING_PATH`，指向版本化、只追加价格 JSON；
+- 上文的全部 Provider 与 TOS 凭据。
+
+价格文件顶层为 `{"versions": [...]}`；每个版本固定 `pricing_version`、`effective_at`、
+`currency: "CNY"`、保守的 `estimate_micros_per_audio_minute` 和按 provider/operation/model
+匹配的 `rules`。token 规则使用每百万 token 的整数微元费率，时长规则使用每音频分钟整数
+微元费率。部署者必须按已核验价目表填写；仓库测试 fixture 不是生产价目表。
+
+`cueflow-trial check` 会只读检查 bucket/lifecycle，并用可删除的微型 canary 验证三个前缀的
+PUT、HEAD 和 presign 权限；canary 删除失败会判定 not ready。对象规则必须满足
+`trial/source`、`trial/work` 最多 7 天，`trial/result` 不被过期规则覆盖。任务准入还要求
+磁盘使用率小于 85%，且剩余空间覆盖尚可进入的全局并发 × 500 MB × workspace expansion
+factor + safety margin。默认 expansion factor 为 3。
+
+公开页面为 `/trial`，operator 页面为 `/trial/admin`。反向代理必须只把可信客户端地址交给
+ASGI `request.client`；应用不采信客户端可伪造的 `X-Forwarded-For`。最终 SRT 长期对象按每次
+下载重新签发 10 分钟精确 URL，跳转响应使用 `Cache-Control: no-store`。
+
 ## Account 与 Authentication
 
 v0.6.1 中一个正式 User 必须同时具有 active E.164 phone identity、Argon2id password
@@ -141,7 +181,8 @@ seed 数据，不是完整 NIST compromised-password blocklist。`starlette<1` �
 升级 Starlette major version 或 httpx 2.x 必须重跑 Auth HTTP compatibility tests。
 真实 Provider/TOS 与长媒体发布验收仍须单独通过。
 
-完整边界见 [v0.6.1 Authentication 冻结设计](docs/v0.6.1-phone-password-authentication-design.md)、
+完整边界见 [v0.6.2 Anonymous Trial 设计](docs/v0.6.2-anonymous-trial-operation-design.md)、
+[v0.6.1 Authentication 冻结设计](docs/v0.6.1-phone-password-authentication-design.md)、
 [0.6.0 Account Core 设计](docs/v0.6.0-account-core-design.md)、
 [0.5.4 字幕主链设计](docs/v0.5.4-design.md)、[Architecture](docs/architecture.md)、
 [Reference Inputs](docs/reference-inputs.md)、[Schema Contracts](docs/schema-contracts.md)、

@@ -133,6 +133,7 @@ def _new_invocation(
     from cueflow.lifecycle import check_cancellation
 
     check_cancellation(context)
+    context.execution_control.before_invocation(run_id, operation)
     if retry_of is None and operation in {"qwen_asr", "doubao_asr", "ata"}:
         candidates = context.registry.invocations_for_run(run_id)
         for candidate in reversed(candidates):

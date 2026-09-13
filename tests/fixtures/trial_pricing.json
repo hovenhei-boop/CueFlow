@@ -1,0 +1,37 @@
+{
+  "versions": [
+    {
+      "pricing_version": "test-2026-09-01",
+      "effective_at": "2026-09-01T00:00:00Z",
+      "currency": "CNY",
+      "estimate_micros_per_audio_minute": 1000000,
+      "rules": [
+        {
+          "operation": "qwen_asr",
+          "provider": "dashscope",
+          "resolved_model": "qwen-test",
+          "billing_unit": "tokens",
+          "rates": {
+            "input_micros_per_million": 1000000,
+            "cached_input_micros_per_million": 200000,
+            "output_micros_per_million": 2000000
+          }
+        },
+        {
+          "operation": "doubao_asr",
+          "provider": "volcengine",
+          "resolved_model": "*",
+          "billing_unit": "audio_minute",
+          "rates": {"micros_per_minute": 120000}
+        },
+        {
+          "operation": "ata",
+          "provider": "volcengine-ata",
+          "resolved_model": "*",
+          "billing_unit": "audio_minute",
+          "rates": {"micros_per_minute": 30000}
+        }
+      ]
+    }
+  ]
+}

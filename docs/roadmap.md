@@ -1,5 +1,24 @@
 # CueFlow Roadmap
 
+## v0.6.2（trial-operation 实验分支）
+
+一个月零收费、零注册、零登录公开试运营。v0.6.2 是资源保护和实验数据层，不是正式
+账户、支付或反欺诈系统。它使用长期匿名 visitor Cookie、IP HMAC 和粗粒度 fingerprint，
+提供任务/分钟/并发限额、独立 Workspace、周期 stale slot 回收、Provider invocation
+执行栅栏、磁盘水位、全局预算、usage/cost 统计、长期字幕结果和简易 operator 后台。
+
+并发占用与预算占用明确分离：stale request 可释放并发槽位，但在费用确认或 24 小时
+unknown 期限到达前继续占用预算。estimated unknown cost 是事后估算，必须与当时已知的
+calculated cost 和实时 budget occupancy 分开展示。
+
+对象存储按前缀管理：原媒体和工作对象最多七天，final.srt 与必要的小型 result.json
+不设自动删除规则；每次下载重新生成短期单对象签名 URL。详细契约见
+[v0.6.2 冻结设计](v0.6.2-anonymous-trial-operation-design.md)。
+
+该版本从 v0.6.1 的 1934a98 创建 trial-operation 分支。试运营后根据实际 UV、复访、
+成本和稳定性决定哪些适配层合并回 main。即使不合并，main 后续发布也不得复用 v0.6.2
+版本号。
+
 ## v0.6.1
 
 Phone + Password Authentication：统一“手机号继续”的验证码登录/注册，首次注册强制密码，
@@ -24,9 +43,9 @@ migration、迁移锁/备份/ledger、审计和彻底注销。产品版本与 18
 持久取消、远端回执、usage 留痕、TOS 业务资产与本地 artifacts 分离、结果契约。
 细节见 [冻结设计](v0.5.4-design.md)。真实平台和长媒体验收完成前不宣布发布。
 
-## v0.6.2+
+## v0.6.3+
 
-其他身份绑定、Worker 调度、上传适配、权限和支付等 Web 产品层。
+试运营验证后再决定其他身份绑定、Worker 调度、正式权限、套餐和支付等 Web 产品层。
 浏览器媒体处理和分布式执行
 需要单独设计及验证，不借 0.5.4 改动现有音频/字幕算法。
 

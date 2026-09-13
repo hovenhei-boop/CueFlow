@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="CueFlow 匿名字幕试运营">
+  <title>CueFlow 匿名试用</title>
+  <link rel="stylesheet" href="/trial/static/styles.css">
+  <script src="/trial/static/app.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/trial" aria-label="CueFlow 首页">
+      <span class="brand-mark" aria-hidden="true">C</span>
+      <span>CueFlow</span>
+    </a>
+    <span class="status-chip"><span class="status-dot" aria-hidden="true"></span>匿名试运营</span>
+  </header>
+
+  <main>
+    <section class="hero" aria-labelledby="hero-title">
+      <p class="eyebrow">Anonymous preview · v0.6.2</p>
+      <h1 id="hero-title">把音视频，整理成<br><span>可继续编辑的字幕。</span></h1>
+      <p class="hero-copy">无需注册与登录。上传一份音频或视频，CueFlow 会完成双路识别、文本纠错与时间轴对齐。</p>
+      <div class="trust-row" aria-label="试用说明">
+        <span>零收费</span><span>零账号</span><span>单次少于 60 分钟</span>
+      </div>
+    </section>
+
+    <section class="workspace-grid" aria-label="创建字幕任务">
+      <form id="job-form" class="upload-card">
+        <div class="section-heading">
+          <div><p class="step">01</p><h2>上传媒体</h2></div>
+          <p>最大 500 MB</p>
+        </div>
+
+        <label class="drop-zone" for="media">
+          <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>
+          <strong>选择音频或视频</strong>
+          <span id="media-name">也可以把文件拖到这里</span>
+          <input id="media" name="media" type="file" accept="audio/*,video/*" required>
+        </label>
+
+        <details class="optional-block">
+          <summary>添加辅助材料和关键词 <span>可选</span></summary>
+          <div class="optional-content">
+            <label for="references">辅助材料</label>
+            <input id="references" name="references" type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.png,.jpg,.jpeg,.webp,.doc,.docx,.ppt,.pptx,.xls,.xlsx">
+            <p class="field-help">最多 20 份，总计少于 100 MB。</p>
+            <label for="keywords">关键词</label>
+            <textarea id="keywords" rows="3" placeholder="每行一个关键词，例如：产品名、嘉宾姓名"></textarea>
+          </div>
+        </details>
+
+        <div class="consent-note">提交即表示你有权处理这些文件。工作文件会按试运营规则自动清理。</div>
+        <button id="submit-button" class="primary-button" type="submit">
+          <span>开始生成字幕</span><span aria-hidden="true">→</span>
+        </button>
+        <p id="form-status" class="form-status" role="status" aria-live="polite"></p>
+      </form>
+
+      <aside class="process-card" aria-labelledby="process-title">
+        <div class="section-heading"><div><p class="step">02</p><h2 id="process-title">处理流程</h2></div></div>
+        <ol class="process-list">
+          <li><span>1</span><div><strong>媒体准备</strong><p>检查时长并生成标准音频。</p></div></li>
+          <li><span>2</span><div><strong>双路识别</strong><p>比较两份独立转写结果。</p></div></li>
+          <li><span>3</span><div><strong>语义纠错</strong><p>结合材料和关键词修正文本。</p></div></li>
+          <li><span>4</span><div><strong>时间轴对齐</strong><p>发布最终 SRT 下载结果。</p></div></li>
+        </ol>
+        <div class="privacy-note"><strong>匿名不等于无保护</strong><p>Cookie、网络摘要和粗粒度设备摘要只用于限额与稳定性，不保存原始 IP。</p></div>
+      </aside>
+    </section>
+
+    <section class="history" aria-labelledby="history-title">
+      <div class="section-heading"><div><p class="step">你的记录</p><h2 id="history-title">最近任务</h2></div><button id="refresh-jobs" class="text-button" type="button">刷新</button></div>
+      <div id="job-list" class="job-list"><p class="empty-state">这个浏览器还没有提交任务。</p></div>
+    </section>
+  </main>
+
+  <footer><span>CueFlow Anonymous Preview</span><span>结果链接每次访问时重新签发</span></footer>
+</body>
+</html>
