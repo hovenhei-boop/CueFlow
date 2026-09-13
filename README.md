@@ -1,6 +1,7 @@
 # CueFlow
 
-CueFlow v0.6.2 在独立 `trial-operation` 分支加入一个月匿名免费试运营层；v0.6.1 的
+CueFlow v0.6.3 在独立 `trial-operation` 分支完善匿名试运营 UI，提供简洁的字幕工作台与
+运营控制台，沿用 v0.6.2 的一个月匿名免费试运营底座；v0.6.1 的
 Phone + Password Authentication 与 v0.5.4 字幕算法、Artifact ID 保持不变。
 字幕主链从双路 ASR 恢复逐字稿，再由火山 ATA 对齐并输出 SRT。
 Qwen ASR 是冻结 Base，豆包 ASR 是独立 Peer。千问与 Kimi 分别返回完整纠错文稿；
@@ -140,6 +141,32 @@ factor + safety margin。默认 expansion factor 为 3。
 ASGI `request.client`；应用不采信客户端可伪造的 `X-Forwarded-For`。最终 SRT 长期对象按每次
 下载重新签发 10 分钟精确 URL，跳转响应使用 `Cache-Control: no-store`。
 
+v0.6.3 的用户页支持单媒体选择或拖入、可选辅助材料与关键词、任务状态和 SRT 下载。
+任务列表首次展示 100 条，可继续展开已获取的更早任务，并显示已展示数与真实总数；
+这不是后端分页。隐藏页面暂停任务轮询与 heartbeat，返回页面后恢复更新。
+需要人工复核的任务明确提示当前 Trial 暂不支持在线复核。UI 暂不提供 retry/resume。
+运营台仅手动刷新；暂停新任务的按钮固定在滚动视口顶部，操作原因必填。
+
+本轮 UI 规则、部署限制与后续边界见 [v0.6.3 UI 设计](docs/v0.6.3-trial-ui-design.md)。
+只看模拟页面、不连接 Trial 服务或 Provider，可运行：
+
+```powershell
+.venv\Scripts\python tests/trial_ui_preview.py
+```
+
+打开 `http://127.0.0.1:8763/trial?sample=1` 查看用户页，`/trial/admin` 查看运营页，
+模拟管理密钥为 `preview`；`/__checks` 可运行浏览器交互检查。全部数据均在浏览器内模拟，
+不会处理真实媒体。此预览只绑定本机回环地址，不用于部署。
+前端单元验证使用 `node --test tests/trial_ui.test.cjs`（Node 18+，无 npm 依赖）。
+完整验证结果见 [v0.6.3 实施报告](docs/v0.6.3-implementation-report.md)。
+
+0.6.3 唯一正式产物目录为 `dist/v0.6.3/`，发布时只选择其中的
+`cueflow-0.6.3-py3-none-any.whl` 和 `cueflow-0.6.3.tar.gz`；同目录的
+`release-manifest.json` 记录文件大小和 SHA-256，供上传前核对。
+本轮旧验证构建已归档至 `.tmp/`，其他版本的历史包保留。
+轻量验证摘要在 [v0.6.3.json](docs/validation/v0.6.3.json)，纳入源码分发，记录执行范围、
+源文件指纹和复验命令。截图与完整日志继续保留在本地，不将未实测项目计为通过。
+
 ## Account 与 Authentication
 
 v0.6.1 中一个正式 User 必须同时具有 active E.164 phone identity、Argon2id password
@@ -181,7 +208,8 @@ seed 数据，不是完整 NIST compromised-password blocklist。`starlette<1` �
 升级 Starlette major version 或 httpx 2.x 必须重跑 Auth HTTP compatibility tests。
 真实 Provider/TOS 与长媒体发布验收仍须单独通过。
 
-完整边界见 [v0.6.2 Anonymous Trial 设计](docs/v0.6.2-anonymous-trial-operation-design.md)、
+完整边界见 [v0.6.3 UI 设计](docs/v0.6.3-trial-ui-design.md)、
+[v0.6.2 Anonymous Trial 设计](docs/v0.6.2-anonymous-trial-operation-design.md)、
 [v0.6.1 Authentication 冻结设计](docs/v0.6.1-phone-password-authentication-design.md)、
 [0.6.0 Account Core 设计](docs/v0.6.0-account-core-design.md)、
 [0.5.4 字幕主链设计](docs/v0.5.4-design.md)、[Architecture](docs/architecture.md)、

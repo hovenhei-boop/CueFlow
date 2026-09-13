@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-APP_VERSION = "0.6.2"
+APP_VERSION = "0.6.3"
 SCHEMA_VERSION = "12.0.0"
 
 QWEN_ASR_MODEL = "qwen-audio-3.0-asr-flash-filetrans"

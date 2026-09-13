@@ -8,12 +8,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from cueflow.config import TrialConfig
+from cueflow.config import APP_VERSION, TrialConfig
 from cueflow.trial_migrations import initialize_trial_database
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cueflow-trial", description="CueFlow v0.6.2 Trial")
+    parser = argparse.ArgumentParser(
+        prog="cueflow-trial", description=f"CueFlow v{APP_VERSION} Trial"
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init", help="initialize an empty TrialStore")
     init.add_argument("database", type=Path)

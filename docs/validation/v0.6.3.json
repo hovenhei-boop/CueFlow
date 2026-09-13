@@ -1,0 +1,241 @@
+{
+  "record_format": 1,
+  "version": "0.6.3",
+  "branch": "trial-operation",
+  "recorded_at_utc": "2026-09-13T10:41:36.335546+00:00",
+  "base_commit": "b31bcebcf74d86e30240581dba6e74d0dd993772",
+  "revision_scope": "Working tree content recorded before commit; this is not a release signature or independent attestation.",
+  "environment": {
+    "platform": "Windows",
+    "python": "3.10.11",
+    "node": "v24.16.0"
+  },
+  "source_files": {
+    "hash_algorithm": "sha256 after normalizing CRLF to LF",
+    "selection": "git ls-files --cached --others --exclude-standard -- src tests MANIFEST.in pyproject.toml",
+    "sha256": {
+      "MANIFEST.in": "872b02431571fc89be266e029b8811bb2332ee1df126af5c3dd3dc2c9c78a9b4",
+      "pyproject.toml": "36ac2df84716801ffa5d6cc9d82748fea7462713cb5727acbb61a5bb69f2d8d9",
+      "src/cueflow/__init__.py": "6f000d31e5c1e3bb4abc4d2984b31d762818908c1cbcbcb35176829e32952041",
+      "src/cueflow/__main__.py": "e1fae7db6fa01ec62f1b6d70520944f3f1f2b2854f27be792bbf2b841c83fb85",
+      "src/cueflow/account.py": "0b91b16132fb01e907ee0163e6ecbf6703ab613e97d2b18562c3861fa3a7094e",
+      "src/cueflow/account_migration_lock.py": "33d96bd43e94ca6d88388c61eec26b147474798d53f0777406452a1b824aef00",
+      "src/cueflow/account_migrations.py": "6b24ff0749b9a8f389e2c24de7998c02da3133c0a9a61498d9aa9c2334deac7f",
+      "src/cueflow/account_store.py": "d7646fc8c051315b06bcfaab1d7833274fea16db4bc8531fda33b51669c4f58d",
+      "src/cueflow/api.py": "cb3ac0b48e86b83f17089db519e2ce247cef421da7d322482b0a413b4958ccbb",
+      "src/cueflow/artifact_store.py": "28ab5e2ae201303ed79113428ffd22fd5e08ed6a1c9098534172dff2bf834038",
+      "src/cueflow/artifact_versions.py": "ee74ac81be45e0344cab84ee8811e3e50103160d021b7d400c6b1eba06d3af0d",
+      "src/cueflow/asr_comparison.py": "44f4cc974d3067989c4b1835e2b190fce294b767b80853390bd5f4652d0583b9",
+      "src/cueflow/asr_contracts.py": "f5a57a7256ad6b7d45ab256ddd9353eb9405ea980cdb454931310dc01a548016",
+      "src/cueflow/ata_provider.py": "f1e423bf0b7f9b0f051d5d3e179db0f5e1f360303b8428e7075e4e801350ed59",
+      "src/cueflow/ata_result.py": "b3dd904e62da70817e7e1970c1e706768df5f11904c6111eaf4bcb120cb046c7",
+      "src/cueflow/auth.py": "93c08bca02403f6f83be576c96e17b56ea8bb762d4a1c862c7c70694cd84b3e2",
+      "src/cueflow/auth_crypto.py": "35bcbbbdfd67a3cb569b748b66cb97d2a28d57c36b04e68eebe9c3f88a279e0b",
+      "src/cueflow/auth_http.py": "cc40cc2e93d142f33bb8de2a367a28c989a7cfdd5a1aa3a8b73a748277818cad",
+      "src/cueflow/base_asr_provider.py": "042af0a50110ac4e6960e3bd7d3c162631e04e5e5fb30593597402ed0c0ad26f",
+      "src/cueflow/canonical.py": "823a31d4c2294f811b966bb2273f64f8536102280de9a401d38db6cb337d5534",
+      "src/cueflow/cli.py": "cadeb502da79847e1ee4c16e9584524f57caa5dd3e4bc19d6b953c907506276c",
+      "src/cueflow/cloud_stream.py": "3a4f644d86df60828273a1990a941c79388643436b9b668cb5f04d533fca2788",
+      "src/cueflow/config.py": "e265b19678e164ed823854d0d5c7021488961b81bf94424e05952bd41886f1ff",
+      "src/cueflow/conflict_selection.py": "93482c80a23839247b11d439096784586d1ad0cb963d74a9e24770b2ae042bb6",
+      "src/cueflow/correction_provider.py": "f60d8d2873adcc81e694ffc343e8198125c7bfa6b5cad888ea015ce24a6a4f41",
+      "src/cueflow/doubao_asr_provider.py": "c17aacfa99ba4a44b34c13e06acf322743e377c4079267957643d416fba3ac8e",
+      "src/cueflow/edit_resolution.py": "7397d06c865b07850117d59b4e8fc7c1db2458813d9bea8c44af4f74103efa54",
+      "src/cueflow/errors.py": "598792f81b011504e837ab76176a635d6de2fe6a8c27e074d447564ff406469b",
+      "src/cueflow/export.py": "d71c0d5a98eaa7b3da04e414c128d1bbb12307bfb4fef8320b7972ff1761251a",
+      "src/cueflow/glm_selection_provider.py": "75a2405607c413c5e1d54f898721e51c95404f419653b853b8c8453f46127913",
+      "src/cueflow/job_inputs.py": "63b08ad5d61382c5875f253111e348fecabfddd2346ac9d02c616a67076468e9",
+      "src/cueflow/lifecycle.py": "432806376b8cefa5db590f3ce0f58e0b7f266c76c6756fa0cf31792f7b8569f3",
+      "src/cueflow/media.py": "75ead9db09f70632c852d81781af769cfb6dbf00f7cd50d45037af9fcaf946f2",
+      "src/cueflow/media_object_store.py": "e630e67a2aa80b0f9425ad6bef6da63959d95803b2e6475d3d65d3bfd21fed03",
+      "src/cueflow/object_storage.py": "30f1046d2df5a5e46fdb949ef91bac0d4e3e2b8a51628f8e81a021abae380ba9",
+      "src/cueflow/orchestrator.py": "0b92e58b4e921e188c367d7214f25dbf2dd9bb1e6e8025b57e0f65b1684d293e",
+      "src/cueflow/phone_reputation.py": "aae046e86a69adc72582aee8fe93732504347549a22953afa7d048a1f2bd1cfa",
+      "src/cueflow/project.py": "8ab7eb02218d7946336a3b8e14ea36640ab2393413ee63671b25f4f2e94d3c94",
+      "src/cueflow/prompts/transcript_candidate_selection_zh_v1.txt": "01a39d42c5a509aef94b7c431e20d257a4e29fe641aa27743749029b489571f9",
+      "src/cueflow/prompts/transcript_recovery_fulltext_zh_v1.txt": "347eee670705230f21614dad31c69e4a30f8adb1206f8db2e43e7f7fdeb38b96",
+      "src/cueflow/provider_control.py": "3781ffd95b7b1b0991d8cb8c55eac965b2469772df20f4de88093bf7e6a6a86b",
+      "src/cueflow/publication.py": "38d544164b3821894cfe1c80bc387fd55cfd0795bb5590f658e753a4f12835f1",
+      "src/cueflow/py.typed": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "src/cueflow/reference_preparation.py": "8eff84bf972992a88a068eab96dd737586dbe18433f6540f3a32042248486ba0",
+      "src/cueflow/registry.py": "5746cede0675a83e0decf51b0beefa8337cbb4cfeea84f8efb3cee361ac39846",
+      "src/cueflow/run_runtime.py": "4c959a907208a70360a62930ea8ffea71f9d1a7797c93790eed3c67c06c99cde",
+      "src/cueflow/schema.py": "c3ce1eaf9e4f78b403857f6991db95f19fec0559803a255d3754a74903620bdc",
+      "src/cueflow/sms.py": "bfde411f172ff47657dad0d3ff3be4cd9c4da50ed0aabff437e15cbe9ea96bf0",
+      "src/cueflow/static/trial/admin.html": "c74e6edef454d152bd8fe55bcc7e4ac637c7b78849137970daa2b4c12e0948a8",
+      "src/cueflow/static/trial/admin.js": "68213fde89a318d557b6e8fe2188a1cb662ae7fce1385c474fad6e2b2911b525",
+      "src/cueflow/static/trial/app.js": "e457e06f22ec52ac3c6e88ce2b42864458a5df14ee85368f8dc45bc559bdbe81",
+      "src/cueflow/static/trial/index.html": "f7cd15a100ae6bf41d5624f8e507987b07285bc9b7f6e621db939aa3655e191a",
+      "src/cueflow/static/trial/styles.css": "54abeb0045ef1ed89d667e1f7da37ca36c284897d015fe1dee428f56fe5ebbf3",
+      "src/cueflow/text_diff.py": "672f4aa0524ed28539a4e245cda94015ad37e671ac91571978712c4a09cca622",
+      "src/cueflow/trial_cli.py": "e07f4595d121684228a39b0b5e3faf4bd03cb367973b47c1d6a97bde72b07d30",
+      "src/cueflow/trial_execution.py": "6d301e3846dda79a58ef4573c95d64ead04a5e91c04d54e0d917305631f259a1",
+      "src/cueflow/trial_http.py": "e6e6b3eaace0b9f11e23dffec26d2a2aa52240d2c3a67418d78e80ff60f414b0",
+      "src/cueflow/trial_migrations.py": "c063f17668b1dab309e72e9e4ca807f92f0f51e9aeba9c2f3b26626c4d62551b",
+      "src/cueflow/trial_pricing.py": "f1e44e588bbd62bb4b956ce3edb3bae4af8aa38944fec7fd56b42d0472f5c427",
+      "src/cueflow/trial_service.py": "e55a26a81a44e72f6bebedaa5920ad464f401911278370a83d8456933bd94600",
+      "src/cueflow/trial_storage.py": "3bb3cd943bd1ec513e047853c06745b02dcaaa9c5e748de6adcb9eee2490acc3",
+      "src/cueflow/trial_store.py": "666955976d277e4e0e121257b2d2500d1f534bae06f1c0e858014acbaa676d43",
+      "tests/_artifact_golden_harness.py": "be8f78031f3e30e1ab87400cb4491d0f79a16f94cab8c5b363fbe89dea33261a",
+      "tests/account_helpers.py": "5f4945f798959f46ddc1d857e2973268e1630c8171fbff2e6b0159d08ea1802c",
+      "tests/fixtures/trial_pricing.json": "0cabb26f6eb2af60a07560a50e5725e210cc8ea3bf3135e6d366e30cb7e1662c",
+      "tests/fixtures/v054_artifact_id_golden.json": "cf26863170d4b781c5659cfca2ce823737612ec8aaf3830d185e1520c1af013b",
+      "tests/integration/test_live_asr_contracts.py": "a0e35d05761fc2771f4c30500ee059655531900c2eb685309da3034800d1a67e",
+      "tests/test_account_core.py": "c8e5b2f5a71a43a578b75f7692ad1ea5c4d11d406d3eb3380c1af60150907a19",
+      "tests/test_account_migrations.py": "af6aec816a65e1502f313309aa92b2ecaf7818b659abdca92746a5583028ead2",
+      "tests/test_artifact_identity_compatibility.py": "877057cb2e72cfe45f7162c4ff0d28c1fc810212184009d0c6078b8c0591dc48",
+      "tests/test_ata_query_contract.py": "fa82128dd1bcd07a6ca88b821a6544690ff1e22836c4e613a282c282e6754ac4",
+      "tests/test_ata_srt.py": "86440a6ea9dc7ebd060f0b170cc1cfec09b2e75f66503c7b43fc61f171cdeee2",
+      "tests/test_auth_core.py": "2c8c625d53f0cdee369562080811e6e9a5f6e547c8f2207130ac456ad2605a75",
+      "tests/test_auth_http.py": "98315806b06cfa66743942c5c9989badffec713cecaafccb0fb08157e7a559d7",
+      "tests/test_base_asr_provider.py": "95222c06c77c21fb20234f7a2885facab6038d07ef59f276598dd08c44702445",
+      "tests/test_cli_v052.py": "8a9bcf144dfac65002d6d1d643d2ea9c91ea9a803e7eed5c7054642a01b2368d",
+      "tests/test_comparison_and_edits.py": "51afbb85374ecd988a080cd93b871959895997b6ae09f4303eaac29e48e764a2",
+      "tests/test_conflict_selection.py": "f46d047758276c77ae75f5dfdb11f9c2ddf6a70e09e49da65757280a5052ebe8",
+      "tests/test_correction_contract.py": "c9582fc6353fbb62bb885f3295cb9d0b0710310bf63df37bab4afb0635b46ce4",
+      "tests/test_doubao_asr_provider.py": "457b42e75f55c4a02e700556143369d78ebaa2fefd80feabd8253604b0533a8d",
+      "tests/test_job_inputs.py": "3c4a394c4ed6f182710823e1ae8fb20d7497d9e9e002569bee488e13ebbdc59f",
+      "tests/test_job_inputs_v052.py": "0f0787988acbbebdf47115e99dcc0dc9fe32f876cdae35fed4ffced3f0fa7d7f",
+      "tests/test_lexical_projection.py": "a267cce3271113412cb9f7f7f9cd72285f1054a51b14ff39350323f9c97e8224",
+      "tests/test_lifecycle_v054.py": "1ca57af938fab29b57db4425de2daac8f608035166a5624571b73fe2bd3c38d4",
+      "tests/test_orchestrator_v052.py": "988d88ca9ca57354c377435418655606a828fd6fb921e7c3826863f00c1dd7f3",
+      "tests/test_phone_reputation.py": "cd5d5e2d1b7f9c769c01990db57e94a49c2439934cbf4d12480a07d04db0526d",
+      "tests/test_post_correction_pipeline.py": "4e619e1720b9051b965ca80d5d4664328216a64eec85d3e2471ae04da6037624",
+      "tests/test_provider_contracts.py": "81cfabbcb21ff106e44aa3781d064f9ba5818371e26f2d68bcd3264a6d2f7186",
+      "tests/test_registry_v052.py": "6022a652baa222bd1788faac91819ba4a69a275dc5bfbf916c3ba76880b55fd9",
+      "tests/test_selection_provider.py": "2f100ad9d3f16023a01029f3746642b1dc2f3d54e2d982b14daff8cdbb0a8af6",
+      "tests/test_storage_and_remote_v054.py": "fcda7c9c6f9e729aa584d67366b8eeeadd13515b4a3753d6d85e4244c2efda84",
+      "tests/test_trial_cli.py": "15ae4785865d334b5ae464f2a2f2be106826905d1313eb5ebcd815b73b986052",
+      "tests/test_trial_execution.py": "295f0e7495fb922d5bf6387974f7ae47c3637dc8ac5d2df16d230e20e46bcdaa",
+      "tests/test_trial_http.py": "abcd801f8d6858241eb26a5fe5c09d29df5bb874a7ffcb2d754770f0d041b16e",
+      "tests/test_trial_migrations.py": "33c2ca33d980edc3ca220a6f3610fd2f456b5878f2fbf85c7d4c4b9b4a5ba7a3",
+      "tests/test_trial_pricing.py": "2c42a02e5b262e4f2865e9d07917d6bf2863e1bfa2fd91900548bbf78297e968",
+      "tests/test_trial_service.py": "860062572dfcfc19aa4464cc885aecc05c0683fabcf657e50f8097904c019a66",
+      "tests/test_trial_storage.py": "e8368e3e68c2db924e6515a09af8eb7a77e9f2f734fd6289f22e851763887198",
+      "tests/test_trial_store.py": "b7687c23ea166b39b85bebe4ca0bb092216406137afa87edc9fb2e37552bc3ab",
+      "tests/test_trial_ui_assets.py": "7aabbc9a63f9e2f8524679fa212d5d86a8c7bcfb58e0aff40f2bff75cd9f96cc",
+      "tests/trial_helpers.py": "996fbf2253b62133c0f3578d2ae3c74e198639909e6e0b4ba1463051ccbc16d9",
+      "tests/trial_ui.test.cjs": "a3cf6f2a368a5fb9b5b39bdadf950ee83e13afd99e51c113df37a325e1d60be0",
+      "tests/trial_ui_browser_checks.html": "97cc125a0f6f2ab487a9cfb39f15f0749efb575b71fbbb6d62c9931f9ea5ee10",
+      "tests/trial_ui_browser_checks.js": "e521d6f4f3a31b12ea67bcdd050e86702793ca001a4774ce7012242e125c1af2",
+      "tests/trial_ui_fixture.js": "b7e3bb46aafe019e010150b0cfd4cc6cee2b20543c223f8431e96a12f5b29f1b",
+      "tests/trial_ui_preview.py": "380daefc65c773f3f0803b07975dd951eddbb226ba63c0d7974dfc20f9d98c24"
+    }
+  },
+  "checks": {
+    "pytest": {
+      "execution": "rerun_after_clock_fix",
+      "command": ".venv/Scripts/python -m pytest --basetemp=.tmp/v063-clock-audit-full --junitxml=reports/v0.6.3-ui/pytest-clock-fixed.xml",
+      "passed": 323,
+      "failed": 0,
+      "skipped": 2,
+      "seconds": 84.707,
+      "skip_scope": "Two paid live ASR probes were not enabled."
+    },
+    "node": {
+      "execution": "rerun_after_clock_fix",
+      "command": "node --test tests/trial_ui.test.cjs",
+      "passed": 21,
+      "failed": 0
+    },
+    "ruff": {
+      "execution": "rerun_after_clock_fix",
+      "command": ".venv/Scripts/python -m ruff check src tests",
+      "result": "passed"
+    },
+    "mypy": {
+      "execution": "rerun_after_clock_fix",
+      "command": ".venv/Scripts/python -m mypy src/cueflow",
+      "result": "passed",
+      "source_files": 52
+    },
+    "browser": {
+      "execution": "prior_local_ui_run_not_repeated_in_clock_fix_followup",
+      "passed": 19,
+      "failed": 0,
+      "reuse_basis": "Runtime UI files and trial_ui test files were compared byte-for-byte against the previously validated sdist/wheel and are unchanged.",
+      "reproduce": [
+        "python tests/trial_ui_preview.py",
+        "Open http://127.0.0.1:8763/__checks and click the run button."
+      ],
+      "test_names": [
+        "Initial 100 of 205 tasks; more tasks stay reachable",
+        "Refresh preserves expanded tasks and focused download node",
+        "Needs-review is independent; durations are truthful",
+        "Refreshing a failed list preserves successful data",
+        "Empty history has an explicit zero count and recovers on refresh",
+        "Drop rejects multiple files without selecting the first",
+        "Long and hostile filenames render as text",
+        "HTML 413 keeps form input and clear feedback",
+        "HTML 429 keeps form input and clear feedback",
+        "HTML 502 keeps form input and clear feedback",
+        "HTML 503 keeps form input and clear feedback",
+        "HTML 504 keeps form input and clear feedback",
+        "Unknown submission never automatically resends",
+        "Malformed successful submission retains input for reconciliation",
+        "Successful upload locks duplicate submits and sends ordered auxiliary inputs",
+        "Operator page emits no visitor heartbeat or jobs request",
+        "Operator costs keep unknown separate and explain request count",
+        "Pause requires a reason and sends one request",
+        "Network errors retain dashboard; authentication errors return to gate"
+      ]
+    },
+    "manual_local_ui": {
+      "execution": "prior_local_ui_run_not_repeated_in_clock_fix_followup",
+      "observed": [
+        "Desktop and 320px viewport layout",
+        "Sticky operator action at 320px",
+        "Native file selection and removal focus",
+        "Keyboard dialog open, Escape close and focus restoration",
+        "Supplemental CSS zoom=2 layout",
+        "640x360 short viewport dialog"
+      ]
+    }
+  },
+  "not_verified": [
+    "Windows forced-colors runtime",
+    "OS reduced-motion runtime",
+    "Screen reader behavior",
+    "Native browser menu 200 percent zoom",
+    "Real Provider/TOS integration and production deployment"
+  ],
+  "known_warning": "Existing Starlette TestClient deprecation for httpx; dependency versions were not changed.",
+  "clock_fix": {
+    "test": "tests/test_trial_execution.py::test_interrupted_gate_prevents_new_registry_invocation",
+    "change": "Monkeypatch cueflow.trial_execution.now_utc to the admission fixture UTC timestamp; assert last_alive_at, stale sweep result and interrupted status.",
+    "production_gate_and_stale_logic_changed": false
+  },
+  "local_only_evidence": [
+    {
+      "path": "reports/v0.6.3-ui/pytest-clock-fixed.xml",
+      "sha256": "868b1cc6efe7738dad355f9f69a242680e54614bc7cba5cdc2d3722ce9769abf",
+      "included_in_git": false
+    },
+    {
+      "path": "reports/v0.6.3-ui/browser-checks.txt",
+      "sha256": "e5f600d14d5f9267148e03053f3256159cf0c656686adf4926af21edabda4694",
+      "included_in_git": false
+    },
+    {
+      "path": "reports/v0.6.3-ui/admin-desktop.jpg",
+      "sha256": "79d5d3bb9044e911d9b9b30281923011ecd8895111edf690abe809549ad60100",
+      "included_in_git": false
+    },
+    {
+      "path": "reports/v0.6.3-ui/admin-mobile.jpg",
+      "sha256": "509d09665387f6cb45007426d32ed111610a4c3660d8e6ce9ca2cd60204303af",
+      "included_in_git": false
+    },
+    {
+      "path": "reports/v0.6.3-ui/public-desktop.jpg",
+      "sha256": "fda0db3f17a3b1276d62c06d3a553fa3f899bfaa6246414f981baf959c399bc2",
+      "included_in_git": false
+    }
+  ],
+  "distribution": {
+    "canonical_directory": "dist/v0.6.3",
+    "package_integrity_record": "dist/v0.6.3/release-manifest.json",
+    "package_integrity_record_in_git": false,
+    "note": "Build packages after this source summary; record package hashes separately to avoid a self-referential sdist checksum."
+  }
+}

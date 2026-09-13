@@ -13,10 +13,14 @@ from cueflow.trial_execution import TrialExecutionGate
 from cueflow.trial_store import TrialStore
 
 
-def test_interrupted_gate_prevents_new_registry_invocation(tmp_path: Path) -> None:
+def test_interrupted_gate_prevents_new_registry_invocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config = trial_config(tmp_path)
     store = initialized_store(config)
     item = admission()
+    # The gate and stale sweep must share the fixture's UTC timeline.
+    monkeypatch.setattr("cueflow.trial_execution.now_utc", lambda: item.created_at)
     context = RunContext.create(tmp_path / "core", "trial")
     try:
         store.touch_visitor(
@@ -35,15 +39,17 @@ def test_interrupted_gate_prevents_new_registry_invocation(tmp_path: Path) -> No
         counted = TrialStore(config.database_path)
         try:
             assert counted.request(item.request_id)["provider_invocation_count"] == 1
+            assert counted.request(item.request_id)["last_alive_at"] == item.created_at
         finally:
             counted.close()
 
         sweep = TrialStore(config.database_path)
         try:
-            sweep.sweep_stale(
+            assert sweep.sweep_stale(
                 stale_before="2026-09-13T02:00:00.000000Z",
                 now="2026-09-13T03:00:00.000000Z",
-            )
+            ) == [item.request_id]
+            assert sweep.request(item.request_id)["execution_status"] == "interrupted"
         finally:
             sweep.close()
         with pytest.raises(TrialExecutionStopped):

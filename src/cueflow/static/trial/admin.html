@@ -4,44 +4,87 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex,nofollow">
-  <title>CueFlow Trial · 运营台</title>
+  <title>CueFlow · 试运营控制台</title>
   <link rel="stylesheet" href="/trial/static/styles.css">
+  <script src="/trial/static/app.js" defer></script>
   <script src="/trial/static/admin.js" defer></script>
 </head>
 <body class="admin-body">
-  <header class="site-header admin-header"><a class="brand" href="/trial"><span class="brand-mark">C</span><span>CueFlow</span></a><span class="status-chip">Trial Operations</span></header>
-  <main class="admin-main">
-    <section id="operator-gate" class="operator-gate">
-      <p class="eyebrow">Operator access</p><h1>试运营控制台</h1>
-      <p>Bearer 只保存在当前浏览器标签页，不写入 Cookie。</p>
-      <form id="operator-form"><label for="operator-secret">Operator bearer</label><input id="operator-secret" type="password" autocomplete="off" required><button class="primary-button" type="submit">进入控制台</button><p id="operator-error" class="form-status error" role="alert"></p></form>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <header class="site-header admin-header"><a class="brand" href="/trial"><span class="brand-mark" aria-hidden="true">C</span>CueFlow</a><span class="field-help">试运营控制台</span></header>
+  <main id="main" class="admin-main" tabindex="-1">
+    <section id="operator-gate" class="operator-gate" aria-labelledby="gate-title">
+      <h1 id="gate-title">进入运营控制台</h1>
+      <p class="field-help">管理密钥仅在当前标签页会话中保存。</p>
+      <form id="operator-form"><label for="operator-secret">管理密钥</label><input id="operator-secret" type="password" autocomplete="off" required><button class="primary-button" type="submit">进入控制台</button><p id="operator-error" class="form-status error" role="alert"></p></form>
     </section>
-
-    <div id="dashboard" class="dashboard" hidden>
-      <div class="dashboard-title"><div><p class="eyebrow">Anonymous Trial · Live</p><h1>运营概览</h1><p id="updated-at">尚未刷新</p></div><button id="refresh-dashboard" class="secondary-button">刷新数据</button></div>
-      <section class="metric-grid" aria-label="关键指标">
-        <article><p>当前在线</p><strong data-metric="online_now">—</strong><span>近 5 分钟 Cookie UV</span></article>
-        <article><p>今日访客</p><strong data-metric="today_cookie_uv">—</strong><span>新增 <b data-metric="new_visitors_today">—</b> · 回访 <b data-metric="returning_visitors_today">—</b></span></article>
-        <article><p>今日运行</p><strong data-metric="today_user_runs">—</strong><span><b data-metric="today_audio_minutes">—</b> 音频分钟</span></article>
-        <article><p>实验成功率</p><strong data-percent="success_rate">—</strong><span>分母 <b data-metric="quality_denominator">—</b>，不含主动停止</span></article>
-        <article class="accent-metric"><p>今日已计算 API 成本</p><strong data-money="today_calculated_cost_micros">—</strong><span>不等同 Provider 最终发票</span></article>
-        <article><p>活动预算占位</p><strong data-money="active_budget_occupancy_micros">—</strong><span>未知估算 <b data-money="estimated_unknown_cost_micros">—</b></span></article>
+    <div id="dashboard" hidden>
+      <div class="admin-toolbar" aria-label="服务控制">
+        <span class="toolbar-title">服务控制</span>
+        <div class="toolbar-actions"><span id="service-state" class="job-status">状态待确认</span><button id="pause-service" class="danger-button" type="button" disabled>暂停新任务</button><button id="resume-service" class="secondary-button" type="button" hidden>恢复接收</button></div>
+      </div>
+      <div class="dashboard-title"><div><h1>运营概览</h1><p id="updated-at" class="field-help">尚未刷新</p></div><button id="refresh-dashboard" class="secondary-button" type="button">刷新数据</button></div>
+      <p id="dashboard-status" class="form-status" role="status" aria-live="polite"></p>
+      <div class="readiness-row">
+        <span>近 5 分钟活跃浏览器 <strong data-metric="online_now">—</strong> <span class="toolbar-wide">（Cookie UV）</span></span>
+        <span>存储检查 <strong id="storage-state">待确认</strong></span>
+        <span>磁盘容量 <strong id="disk-state">待确认</strong></span>
+      </div>
+      <section class="metric-grid" aria-label="今日核心指标">
+        <article><p>今日访客 · Cookie UV</p><strong class="metric-value" data-metric="today_cookie_uv">—</strong><span class="field-help">新增 <b data-metric="new_visitors_today">—</b> · 回访 <b data-metric="returning_visitors_today">—</b></span></article>
+        <article><p>今日运行次数</p><strong class="metric-value" data-metric="today_user_runs">—</strong><span class="field-help"><b data-metric="today_jobs">—</b> 个任务 · <b data-metric="today_audio_minutes">—</b> 音频分钟</span></article>
+        <article><p>任务成功率</p><strong class="metric-value" data-percent="success_rate">—</strong><span class="field-help">成功与失败样本共 <b data-metric="quality_denominator">—</b> 次，不含中断或取消</span></article>
+        <article><p>今日已计算 API 成本</p><strong class="metric-value" data-money="today_calculated_cost_micros">—</strong><span class="field-help">按用量与价格计算，不等同最终发票</span></article>
       </section>
-
-      <section class="admin-panels">
-        <article class="control-panel"><div class="section-heading"><div><p class="step">控制</p><h2>服务与预算</h2></div><span id="service-state" class="job-status">—</span></div>
-          <label for="control-reason">操作原因</label><input id="control-reason" placeholder="必填，会进入 append-only 审计">
-          <div class="button-row"><button id="pause-service" class="danger-button">暂停新任务</button><button id="resume-service" class="secondary-button">恢复服务</button></div>
-          <label for="budget-yuan">当日预算覆盖（元）</label><div class="inline-form"><input id="budget-yuan" type="number" min="0.01" step="0.01"><button id="set-budget" class="secondary-button">设置</button><button id="clear-budget" class="text-button">清除覆盖</button></div>
-          <p id="control-status" class="form-status" role="status"></p>
-        </article>
-        <article class="quality-panel"><div class="section-heading"><div><p class="step">质量</p><h2>处理与费用样本</h2></div></div>
-          <dl><div><dt>处理耗时 P50 / P95</dt><dd><span data-duration="processing_ms_p50">—</span> / <span data-duration="processing_ms_p95">—</span></dd></div><div><dt>成本覆盖率</dt><dd data-percent="cost_coverage">—</dd></div><div><dt>单任务成本 P50 / P95</dt><dd><span data-money="cost_per_job_p50_micros">—</span> / <span data-money="cost_per_job_p95_micros">—</span></dd></div><div><dt>第二活跃日比例</dt><dd data-percent="second_active_day_rate">—</dd></div><div><dt>历史在线峰值</dt><dd data-metric="peak_online">—</dd></div></dl>
-        </article>
+      <div class="admin-panels">
+        <section class="panel" aria-labelledby="cost-title">
+          <h2 id="cost-title">预算与成本</h2>
+          <dl>
+            <div><dt>当前每日预算</dt><dd data-money="daily_budget_micros">—</dd></div>
+            <div><dt>活动预算占用</dt><dd data-money="active_budget_occupancy_micros">—</dd></div>
+            <div><dt>未知费用估算 · 事后估算</dt><dd data-money="estimated_unknown_cost_micros">—</dd></div>
+            <div><dt>成本覆盖率</dt><dd data-percent="cost_coverage">—</dd></div>
+            <div><dt>费用未知的请求</dt><dd data-metric="unknown_request_count">—</dd></div>
+            <div><dt>单任务成本 P50 / P95</dt><dd><span data-money="cost_per_job_p50_micros">—</span> / <span data-money="cost_per_job_p95_micros">—</span></dd></div>
+          </dl>
+          <p class="field-help">预算占用不代表已发生费用。未知费用估算单独展示，缺失数据不计为零。</p>
+        </section>
+        <section class="panel" aria-labelledby="quality-title">
+          <h2 id="quality-title">处理与回访</h2>
+          <dl>
+            <div><dt>处理耗时 P50 / P95</dt><dd><span data-duration="processing_ms_p50">—</span> / <span data-duration="processing_ms_p95">—</span></dd></div>
+            <div><dt>今日执行失败</dt><dd data-metric="failures">—</dd></div>
+            <div><dt>今日中断</dt><dd data-metric="interrupted">—</dd></div>
+            <div><dt>第二活跃日比例</dt><dd data-percent="second_active_day_rate">—</dd></div>
+            <div><dt>累计访客 · Cookie UV</dt><dd data-metric="total_cookie_uv">—</dd></div>
+            <div><dt>历史活跃浏览器峰值</dt><dd data-metric="peak_online">—</dd></div>
+          </dl>
+          <p class="field-help">窗口活跃不代表此刻正在观看页面的人数，隐藏页面后不会立即扣除。</p>
+        </section>
+      </div>
+      <section class="panel request-panel" aria-labelledby="request-title">
+        <h2 id="request-title">最近请求</h2>
+        <div class="table-wrap" role="region" aria-label="请求记录，可横向滚动" tabindex="0">
+          <table><caption id="request-count">记录待确认，最多显示最近 100 条请求</caption><thead><tr><th scope="col">时间</th><th scope="col">任务</th><th scope="col">动作</th><th scope="col">状态</th><th scope="col">音频时长</th><th scope="col">成本状态</th></tr></thead><tbody id="request-rows"></tbody></table>
+        </div>
       </section>
-
-      <section class="request-panel"><div class="section-heading"><div><p class="step">最近</p><h2>请求记录</h2></div></div><div class="table-wrap"><table><thead><tr><th>时间</th><th>任务</th><th>动作</th><th>状态</th><th>音频</th><th>成本质量</th></tr></thead><tbody id="request-rows"></tbody></table></div></section>
+      <section class="panel budget-panel" aria-labelledby="budget-title">
+        <h2 id="budget-title">调整当日预算</h2>
+        <p class="field-help">仅调整当日覆盖值。设置与清除均需填写原因并记录。</p>
+        <div class="inline-form"><div><label for="budget-yuan">当日预算覆盖（元）</label><input id="budget-yuan" type="number" min="0.01" step="0.01"></div><button id="set-budget" class="secondary-button" type="button">设置覆盖</button><button id="clear-budget" class="text-button" type="button">清除覆盖</button></div>
+        <p id="control-status" class="form-status" role="status"></p>
+      </section>
     </div>
   </main>
+  <dialog id="control-dialog" class="control-dialog" aria-labelledby="control-title" aria-describedby="control-description">
+    <form id="control-form">
+      <h2 id="control-title">暂停新任务</h2>
+      <p id="control-description" class="field-help">暂停接收新任务，正在处理的任务会继续运行。</p>
+      <label for="control-reason">操作原因</label><textarea id="control-reason" rows="3" required placeholder="必填，操作原因将被记录"></textarea>
+      <p id="dialog-status" class="form-status error" role="alert"></p>
+      <div class="button-row"><button id="cancel-control" class="secondary-button" type="button">取消</button><button id="confirm-control" class="primary-button" type="submit">暂停新任务</button></div>
+    </form>
+  </dialog>
+  <footer><span>CueFlow 运营台</span><span>v0.6.3 · 数据按需刷新</span></footer>
 </body>
 </html>

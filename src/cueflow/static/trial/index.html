@@ -3,80 +3,61 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="CueFlow 匿名字幕试运营">
-  <title>CueFlow 匿名试用</title>
+  <meta name="description" content="上传音频或视频，生成可下载的 SRT 字幕。CueFlow 匿名免费试用。">
+  <title>CueFlow · 字幕工作台</title>
   <link rel="stylesheet" href="/trial/static/styles.css">
   <script src="/trial/static/app.js" defer></script>
 </head>
 <body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
   <header class="site-header">
-    <a class="brand" href="/trial" aria-label="CueFlow 首页">
-      <span class="brand-mark" aria-hidden="true">C</span>
-      <span>CueFlow</span>
-    </a>
-    <span class="status-chip"><span class="status-dot" aria-hidden="true"></span>匿名试运营</span>
+    <a class="brand" href="/trial" aria-label="CueFlow 首页"><span class="brand-mark" aria-hidden="true">C</span>CueFlow</a>
+    <nav aria-label="页面导航"><a href="#history">最近任务</a><a href="#help">使用说明</a></nav>
   </header>
-
-  <main>
+  <main id="main" tabindex="-1">
     <section class="hero" aria-labelledby="hero-title">
-      <p class="eyebrow">Anonymous preview · v0.6.2</p>
-      <h1 id="hero-title">把音视频，整理成<br><span>可继续编辑的字幕。</span></h1>
-      <p class="hero-copy">无需注册与登录。上传一份音频或视频，CueFlow 会完成双路识别、文本纠错与时间轴对齐。</p>
-      <div class="trust-row" aria-label="试用说明">
-        <span>零收费</span><span>零账号</span><span>单次少于 60 分钟</span>
+      <p class="eyebrow">字幕工作台 <span>免费试运营</span></p>
+      <h1 id="hero-title">把音视频，变成字幕。</h1>
+      <p class="hero-copy">上传文件，生成可下载的 SRT。无需注册与登录。</p>
+    </section>
+    <form id="job-form" class="upload-card" novalidate aria-label="生成字幕">
+      <div id="drop-zone" class="drop-zone" aria-describedby="media-limit">
+        <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>
+        <strong id="media-name">拖入一份音频或视频</strong>
+        <span id="media-size" class="field-help">也可以从设备中选择文件</span>
+        <div class="file-actions"><button id="choose-media" class="secondary-button" type="button">选择文件</button><button id="remove-media" class="text-button" type="button" hidden>移除</button></div>
+        <input id="media" name="media" type="file" accept="audio/*,video/*" aria-label="选择音频或视频" hidden>
+        <p id="media-limit" class="field-help">文件小于 500 MB，时长少于 60 分钟</p>
       </div>
-    </section>
-
-    <section class="workspace-grid" aria-label="创建字幕任务">
-      <form id="job-form" class="upload-card">
-        <div class="section-heading">
-          <div><p class="step">01</p><h2>上传媒体</h2></div>
-          <p>最大 500 MB</p>
+      <details id="optional-inputs" class="optional-block">
+        <summary><span>辅助材料与关键词</span><span id="optional-summary" class="field-help">可选</span></summary>
+        <div class="optional-content">
+          <label for="references">辅助材料</label>
+          <p id="reference-help" class="field-help">最多 20 份，合计小于 100 MB。可添加文稿、图片、PDF 或 Office 文件。</p>
+          <input id="references" name="references" type="file" multiple aria-describedby="reference-help" accept=".txt,.md,.csv,.json,.pdf,.png,.jpg,.jpeg,.webp,.doc,.docx,.ppt,.pptx,.xls,.xlsx">
+          <ul id="reference-list" class="reference-list" aria-label="已选择的辅助材料"></ul>
+          <label for="keywords">关键词</label>
+          <textarea id="keywords" rows="3" aria-describedby="keyword-help" placeholder="每行一个，例如：产品名、嘉宾姓名"></textarea>
+          <p id="keyword-help" class="field-help">最多 100 个，仅用于本次任务。</p>
         </div>
-
-        <label class="drop-zone" for="media">
-          <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>
-          <strong>选择音频或视频</strong>
-          <span id="media-name">也可以把文件拖到这里</span>
-          <input id="media" name="media" type="file" accept="audio/*,video/*" required>
-        </label>
-
-        <details class="optional-block">
-          <summary>添加辅助材料和关键词 <span>可选</span></summary>
-          <div class="optional-content">
-            <label for="references">辅助材料</label>
-            <input id="references" name="references" type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.png,.jpg,.jpeg,.webp,.doc,.docx,.ppt,.pptx,.xls,.xlsx">
-            <p class="field-help">最多 20 份，总计少于 100 MB。</p>
-            <label for="keywords">关键词</label>
-            <textarea id="keywords" rows="3" placeholder="每行一个关键词，例如：产品名、嘉宾姓名"></textarea>
-          </div>
-        </details>
-
-        <div class="consent-note">提交即表示你有权处理这些文件。工作文件会按试运营规则自动清理。</div>
-        <button id="submit-button" class="primary-button" type="submit">
-          <span>开始生成字幕</span><span aria-hidden="true">→</span>
-        </button>
-        <p id="form-status" class="form-status" role="status" aria-live="polite"></p>
-      </form>
-
-      <aside class="process-card" aria-labelledby="process-title">
-        <div class="section-heading"><div><p class="step">02</p><h2 id="process-title">处理流程</h2></div></div>
-        <ol class="process-list">
-          <li><span>1</span><div><strong>媒体准备</strong><p>检查时长并生成标准音频。</p></div></li>
-          <li><span>2</span><div><strong>双路识别</strong><p>比较两份独立转写结果。</p></div></li>
-          <li><span>3</span><div><strong>语义纠错</strong><p>结合材料和关键词修正文本。</p></div></li>
-          <li><span>4</span><div><strong>时间轴对齐</strong><p>发布最终 SRT 下载结果。</p></div></li>
-        </ol>
-        <div class="privacy-note"><strong>匿名不等于无保护</strong><p>Cookie、网络摘要和粗粒度设备摘要只用于限额与稳定性，不保存原始 IP。</p></div>
-      </aside>
+      </details>
+      <div class="submit-row"><p class="field-help">请仅上传你有权处理的文件。</p><button id="submit-button" class="primary-button" type="submit" disabled><span id="submit-label">生成字幕</span><span aria-hidden="true">→</span></button></div>
+      <p id="form-status" class="form-status" role="status" aria-live="polite">选择文件后即可生成字幕。</p>
+    </form>
+    <p class="history-note">记录通过当前浏览器的 Cookie 关联。清除浏览器数据、使用无痕模式或更换浏览器后，无法找回这些记录。</p>
+    <section id="history" class="history" aria-labelledby="history-title">
+      <div class="section-heading"><div><h2 id="history-title">最近任务</h2><p id="job-count" class="field-help">正在读取记录</p></div><button id="refresh-jobs" class="text-button" type="button">刷新</button></div>
+      <p id="jobs-status" class="field-help" role="status" aria-live="polite"></p>
+      <div id="job-list" class="job-list"><p class="empty-state">正在读取这个浏览器的任务…</p></div>
+      <button id="show-earlier" class="secondary-button more-button" type="button" hidden>显示更早任务</button>
     </section>
-
-    <section class="history" aria-labelledby="history-title">
-      <div class="section-heading"><div><p class="step">你的记录</p><h2 id="history-title">最近任务</h2></div><button id="refresh-jobs" class="text-button" type="button">刷新</button></div>
-      <div id="job-list" class="job-list"><p class="empty-state">这个浏览器还没有提交任务。</p></div>
+    <section id="help" class="help" aria-labelledby="help-title">
+      <h2 id="help-title">使用说明</h2>
+      <details><summary>如何获得字幕？</summary><p>选择一份音频或视频，可按需添加辅助材料与关键词。任务完成后，在最近任务中下载 SRT，可导入常见剪辑软件继续编辑。当前页面不提供在线字幕编辑。</p></details>
+      <details><summary>文件和结果会保留多久？</summary><p>原媒体和工作文件最多保留 7 天。最终字幕在试运营中不设置自动删除规则，建议完成后及时下载保存。匿名历史依赖当前浏览器的 Cookie，无法跨浏览器找回。</p></details>
+      <details><summary>处理状态与文件限制</summary><p>当前不提供完成百分比或剩余时间。只有显示“已完成”且提供下载入口时，才有可获取的结果。需要人工复核的任务会明确标出，当前 Trial 版暂不支持在线复核。</p><p>媒体需小于 500,000,000 字节且短于 60 分钟；是否可处理由服务器实际检查决定。辅助材料无法准备时可能被排除，建议提供清晰、直接相关的材料。</p></details>
     </section>
   </main>
-
-  <footer><span>CueFlow Anonymous Preview</span><span>结果链接每次访问时重新签发</span></footer>
+  <footer><span>CueFlow</span><span>匿名试运营 · v0.6.3</span></footer>
 </body>
 </html>
